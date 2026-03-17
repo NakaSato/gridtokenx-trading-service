@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package trading;
+
+service TradingService {
+  // Trading Operations
+  rpc SubmitOrder (SubmitOrderRequest) returns (TradingResponse);
+  rpc CancelOrder (CancelOrderRequest) returns (TradingResponse);
+  rpc GetOrder (GetOrderRequest) returns (OrderResponse);
+  rpc ListOrders (ListOrdersRequest) returns (ListOrdersResponse);
+
+  // ERC Operations (Energy Registration & Carbon)
+  rpc IssueERC (IssueERCRequest) returns (TradingResponse);
+  rpc TransferERC (TransferERCRequest) returns (TradingResponse);
+  rpc RetireERC (RetireERCRequest) returns (TradingResponse);
+  rpc GetERCBalance (GetERCBalanceRequest) returns (ERCBalanceResponse);
+}
+
+message SubmitOrderRequest {
+  string user_id = 1;
+  double energy_amount = 2;
+  double price_per_kwh = 3;
+  string side = 4; // "buy" or "sell"
+  string order_type = 5; // "limit", "market", etc.
+  string meter_id = 6;
+  string session_token = 7;
+}
+
+message CancelOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+}
+
+message GetOrderRequest {
+  string order_id = 1;
+}
+
+message ListOrdersRequest {
+  string user_id = 1;
+  optional string status = 2;
+}
+
+message TradingResponse {
+  bool success = 1;
+  string message = 2;
+  optional string id = 3; // e.g., order_id or transaction_id
+}
+
+message OrderResponse {
+  string id = 1;
+  string user_id = 2;
+  double energy_amount = 3;
+  double price_per_kwh = 4;
+  double filled_amount = 5;
+  string side = 6;
+  string status = 7;
+  string created_at = 8;
+}
+
+message ListOrdersResponse {
+  repeated OrderResponse orders = 1;
+}
+
+message IssueERCRequest {
+  string user_id = 2;
+  string meter_id = 3;
+  double energy_amount = 4;
+}
+
+message TransferERCRequest {
+  string from_user_id = 1;
+  string to_user_id = 2;
+  double amount = 3;
+}
+
+message RetireERCRequest {
+  string user_id = 1;
+  double amount = 2;
+  string reason = 3;
+}
+
+message GetERCBalanceRequest {
+  string user_id = 1;
+}
+
+message ERCBalanceResponse {
+  double balance = 1;
+  string asset_type = 2; // e.g., "KWH_CERT"
+}

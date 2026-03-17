@@ -1,0 +1,70 @@
+[package]
+name = "gridtokenx-trading-service"
+version = "0.1.0"
+edition = "2021"
+description = "Trading and ERC microservice for GridTokenX"
+
+[dependencies]
+# Async Runtime
+tokio = { workspace = true }
+futures = "0.3"
+
+# Database
+sqlx = { version = "0.8", features = [
+  "postgres",
+  "runtime-tokio-rustls",
+  "chrono",
+  "uuid",
+  "rust_decimal",
+] }
+rust_decimal = { workspace = true, features = ["serde-float", "maths"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+dashmap = "6.1.0"
+dotenvy = { workspace = true }
+itertools = { workspace = true }
+bs58 = { workspace = true }
+rand = { workspace = true }
+
+# Caching/PubSub
+redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+
+# Blockchain
+solana-client = { workspace = true }
+solana-sdk = { workspace = true }
+solana-program = { workspace = true }
+spl-token = { workspace = true }
+spl-associated-token-account = { workspace = true }
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Others
+spl-token-2022 = { workspace = true }
+solana-transaction-status = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+pbkdf2 = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+utoipa = { workspace = true }
+ulid = { workspace = true }
+validator = { workspace = true }
+ipnetwork = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.12"
