@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
+use tracing::info;
 
 pub mod tokenization;
 pub use tokenization::TokenizationConfig;
@@ -33,11 +34,11 @@ pub struct SolanaProgramsConfig {
 impl Default for SolanaProgramsConfig {
     fn default() -> Self {
         Self {
-            registry_program_id: "DVoD5K5YRuXXF54a3b6r282jRD8RmtVHGfpw55DHFVDe".to_string(),
-            oracle_program_id: "Ad5crRxCcvKFAShAMYtRAD9XKak1cwH1FCE6TrpUA9i2".to_string(),
-            energy_token_program_id: "ExZKhghptUk675rjxgHPjJZjczgWWRRwzUTQnqjPTLno".to_string(),
-            trading_program_id: "3iFReh5tvdWkLt7eJcvGKsST7wcwZsSHk3z3xCfUwHLw".to_string(),
-            governance_program_id: "GzEcWzkb73zcgvgoNRxEiuuT7CEAbzbHcAgjNV25pbLV".to_string(), // Typical default from IAM or similar
+            registry_program_id: "FmvDiFUWPrwXsqo7z7XnVniKbZDcz32U5HSDVwPug89c".to_string(),
+            oracle_program_id: "JDUVXMkeGi4oxLp8njBaGScAFaVBBg7iGoiqcY1LxKop".to_string(),
+            energy_token_program_id: "n52aKuZwUeZAocpWqRZAJR4xFhQqAvaRE7Xepy2JBGk".to_string(),
+            trading_program_id: "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string(),
+            governance_program_id: "DamT9e1VqbA5nSyFZHExKwQu6qs4L5FW6dirWCK8YLd4".to_string(),
         }
     }
 }
@@ -45,6 +46,11 @@ impl Default for SolanaProgramsConfig {
 impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
+        
+        info!("CWD: {:?}", std::env::current_dir().unwrap_or_default());
+        info!("FEE_COLLECTOR_WALLET: {:?}", std::env::var("FEE_COLLECTOR_WALLET"));
+        info!("CURRENCY_TOKEN_MINT: {:?}", std::env::var("CURRENCY_TOKEN_MINT"));
+        info!("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN: {:?}", std::env::var("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN"));
 
         Ok(Config {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
@@ -66,18 +72,19 @@ impl Config {
             tokenization: TokenizationConfig::from_env()?,
             solana_programs: SolanaProgramsConfig {
                 registry_program_id: env::var("SOLANA_REGISTRY_PROGRAM_ID")
-                    .unwrap_or_else(|_| "EmiSgo85FVUYWXPtScCMQZBpq9ecZ4jhveg7E7T7F75z".to_string()),
+                    .unwrap_or_else(|_| "FmvDiFUWPrwXsqo7z7XnVniKbZDcz32U5HSDVwPug89c".to_string()),
                 oracle_program_id: env::var("SOLANA_ORACLE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "BRctXUydec2wrP4k2NpqZZT2sVnMfGqpv9bmWn5mTWh9".to_string()),
+                    .unwrap_or_else(|_| "JDUVXMkeGi4oxLp8njBaGScAFaVBBg7iGoiqcY1LxKop".to_string()),
                 energy_token_program_id: env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
-                    .unwrap_or_else(|_| "GzEcWzkb73zcgvgoNRxEiuuT7CEAbzbHcAgjNV25pbLV".to_string()),
+                    .unwrap_or_else(|_| "n52aKuZwUeZAocpWqRZAJR4xFhQqAvaRE7Xepy2JBGk".to_string()),
                 trading_program_id: env::var("SOLANA_TRADING_PROGRAM_ID")
-                    .unwrap_or_else(|_| "3LXbBJ7sWYYrveHvLoLtwuVYbYd27HPcbpF1DQ8rK1Bo".to_string()),
+                    .unwrap_or_else(|_| "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string()),
                 governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "GzEcWzkb73zcgvgoNRxEiuuT7CEAbzbHcAgjNV25pbLV".to_string()),
+                    .unwrap_or_else(|_| "DamT9e1VqbA5nSyFZHExKwQu6qs4L5FW6dirWCK8YLd4".to_string()),
             },
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
-            iam_service_url: env::var("IAM_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8090".to_string()),
+            iam_service_url: env::var("IAM_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8090".to_string()),
         })
     }
 }
