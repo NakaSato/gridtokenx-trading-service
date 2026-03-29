@@ -7,10 +7,12 @@ description = "Trading and ERC microservice for GridTokenX"
 [dependencies]
 # Async Runtime
 tokio = { workspace = true }
-futures = "0.3"
+futures = { workspace = true }
+async-trait = { workspace = true }
 
 # Database
-sqlx = { version = "0.8", features = [
+# Note: Offline mode in sqlx 0.8+ is enabled via SQLX_OFFLINE=true env var
+sqlx = { workspace = true, features = [
   "postgres",
   "runtime-tokio-rustls",
   "chrono",
@@ -24,23 +26,25 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Observability
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+regex = { workspace = true }
+axum = { workspace = true }
 
 # Utilities
 chrono = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-async-trait = "0.1"
-dashmap = "6.1.0"
+dashmap = { workspace = true }
 dotenvy = { workspace = true }
-itertools = { workspace = true }
 bs58 = { workspace = true }
 rand = { workspace = true }
 
 # Caching/PubSub
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 
 # Blockchain
 solana-client = { workspace = true }
@@ -50,8 +54,8 @@ spl-token = { workspace = true }
 spl-associated-token-account = { workspace = true }
 
 # gRPC
-tonic = "0.12"
-prost = "0.13"
+connectrpc = { workspace = true }
+buffa = "0.2.0"
 
 # Others
 spl-token-2022 = { workspace = true }
@@ -65,6 +69,15 @@ utoipa = { workspace = true }
 ulid = { workspace = true }
 validator = { workspace = true }
 ipnetwork = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+http-body = "1.0.0"
 
 [build-dependencies]
-tonic-build = "0.12"
+buffa-build = "0.2.0"
+connectrpc-build = "0.2.0"
+
+[dev-dependencies]
+once_cell = "1.19"
+rust_decimal_macros = { workspace = true }
+tokio-test = { workspace = true }
