@@ -1,10 +1,12 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile(
-            &["proto/trading.proto"],
-            &["proto"],
-        )?;
+    let protos = &["proto/trading.proto"];
+    let includes = &["proto"];
+
+    connectrpc_build::Config::new()
+        .files(protos)
+        .includes(includes)
+        .include_file("_trading_include.rs")
+        .compile()?;
+
     Ok(())
 }
