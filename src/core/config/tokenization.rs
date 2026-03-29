@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use tracing::{info, warn};
@@ -169,7 +169,7 @@ impl TokenizationConfig {
 
         if let Ok(val) = env::var("TOKENIZATION_BATCH_SIZE") {
             match val.parse::<usize>() {
-                Ok(size) if size >= 1 && size <= 1000 => {
+                Ok(size) if (1..=1000).contains(&size) => {
                     config.batch_size = size;
                     info!("Using custom batch size: {}", size);
                 }
@@ -398,9 +398,9 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
     use std::env;
     use std::sync::Mutex;
-    use once_cell::sync::Lazy;
 
     static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -419,13 +419,28 @@ mod tests {
         let config = TokenizationConfig::default();
 
         // Basic conversion
-        assert_eq!(config.kwh_to_tokens(1.0).expect("Conversion failed for 1.0"), 1_000_000_000);
+        assert_eq!(
+            config
+                .kwh_to_tokens(1.0)
+                .expect("Conversion failed for 1.0"),
+            1_000_000_000
+        );
 
         // Zero amount
-        assert_eq!(config.kwh_to_tokens(0.0).expect("Conversion failed for 0.0"), 0);
+        assert_eq!(
+            config
+                .kwh_to_tokens(0.0)
+                .expect("Conversion failed for 0.0"),
+            0
+        );
 
         // Fractional amount
-        assert_eq!(config.kwh_to_tokens(0.5).expect("Conversion failed for 0.5"), 500_000_000);
+        assert_eq!(
+            config
+                .kwh_to_tokens(0.5)
+                .expect("Conversion failed for 0.5"),
+            500_000_000
+        );
 
         // Negative amount should error
         assert!(matches!(
