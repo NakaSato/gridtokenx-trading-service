@@ -11,17 +11,17 @@ use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use solana_sdk::signature::Keypair;
 use sqlx::PgPool;
+use std::str::FromStr;
 use tracing::{error, info, instrument};
 use uuid::Uuid;
-use std::str::FromStr;
 
 use self::issuance::AggregatedIssuance;
 use self::queries::ErcQueryManager;
 use self::retiring::CertificateRetiring;
 use self::transfer::CertificateTransferManager;
+use crate::domain::events::{ErcIssuedPayload, Event};
 use crate::infra::blockchain::BlockchainService;
 use crate::infra::events::EventBus;
-use crate::domain::events::{Event, ErcIssuedPayload};
 
 /// Service for managing Energy Renewable Certificates
 #[derive(Clone, Debug)]
@@ -37,7 +37,11 @@ pub struct ErcService {
 
 impl ErcService {
     /// Create a new ERC service
-    pub fn new(db_pool: PgPool, blockchain_service: BlockchainService, event_bus: EventBus) -> Self {
+    pub fn new(
+        db_pool: PgPool,
+        blockchain_service: BlockchainService,
+        event_bus: EventBus,
+    ) -> Self {
         let issuance_manager = AggregatedIssuance::new(db_pool.clone(), blockchain_service.clone());
         let retiring_manager =
             CertificateRetiring::new(db_pool.clone(), blockchain_service.clone());
@@ -71,19 +75,31 @@ impl ErcService {
         let certificate_id = self.issuance_manager.generate_certificate_id()?;
 
         // 2. Prepare Metadata
-        let renewable_source = request.metadata.as_ref()
+        let renewable_source = request
+            .metadata
+            .as_ref()
             .and_then(|m| m.get("renewable_source"))
             .and_then(|v| v.as_str())
-            .unwrap_or("Unknown").to_string();
+            .unwrap_or("Unknown")
+            .to_string();
 
-        let validation_data = request.metadata.as_ref()
+        let validation_data = request
+            .metadata
+            .as_ref()
             .and_then(|m| m.get("validation_data"))
             .and_then(|v| v.as_str())
-            .unwrap_or("").to_string();
+            .unwrap_or("")
+            .to_string();
 
         let energy_amount_f64 = request.kwh_amount.to_f64().unwrap_or(0.0);
         let metadata_struct = self.issuance_manager.create_certificate_metadata(
-            &certificate_id, energy_amount_f64, &renewable_source, issuer_wallet, Utc::now(), request.expiry_date, &validation_data,
+            &certificate_id,
+            energy_amount_f64,
+            &renewable_source,
+            issuer_wallet,
+            Utc::now(),
+            request.expiry_date,
+            &validation_data,
         )?;
         let metadata_json = serde_json::to_value(&metadata_struct)?;
 
@@ -102,7 +118,7 @@ impl ErcService {
                 issuer_wallet, status,
                 blockchain_tx_signature, metadata, settlement_id,
                 created_at, updated_at
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(certificate_id)
@@ -121,13 +137,25 @@ impl ErcService {
         let self_clone = self.clone();
         let cert_clone = certificate.clone();
         let cert_id_log = cert_clone.certificate_id.clone();
-        let meter_id = request.meter_id.clone().unwrap_or_else(|| "SYSTEM_AGGREGATED".to_string());
-        
+        let meter_id = request
+            .meter_id
+            .clone()
+            .unwrap_or_else(|| "SYSTEM_AGGREGATED".to_string());
+
         tokio::spawn(async move {
-            if let Err(e) = self_clone.process_onchain_issuance_async(
-                cert_clone, meter_id, renewable_source, validation_data
-            ).await {
-                error!("❌ Background ERC issuance failed for {}: {}", cert_id_log, e);
+            if let Err(e) = self_clone
+                .process_onchain_issuance_async(
+                    cert_clone,
+                    meter_id,
+                    renewable_source,
+                    validation_data,
+                )
+                .await
+            {
+                error!(
+                    "❌ Background ERC issuance failed for {}: {}",
+                    cert_id_log, e
+                );
             }
         });
 
@@ -142,36 +170,52 @@ impl ErcService {
         renewable_source: String,
         validation_data: String,
     ) -> Result<()> {
-        info!("🔗 Registering ERC {} on-chain...", certificate.certificate_id);
-        
+        info!(
+            "🔗 Registering ERC {} on-chain...",
+            certificate.certificate_id
+        );
+
         let authority = self.blockchain_service.get_authority_keypair().await?;
         let user_wallet = solana_sdk::pubkey::Pubkey::from_str(&certificate.wallet_address)?;
         let governance_program_id = self.blockchain_service.registry_program_id()?; // Simplified for refactor
 
         // 1. Submit to Blockchain
-        let signature = self.issue_certificate_on_chain(
-            &certificate.certificate_id,
-            &user_wallet,
-            &meter_id,
-            certificate.kwh_amount.and_then(|d| d.to_f64()).unwrap_or(0.0),
-            &renewable_source,
-            &validation_data,
-            &authority,
-            &governance_program_id,
-        ).await?;
+        let signature = self
+            .issue_certificate_on_chain(
+                &certificate.certificate_id,
+                &user_wallet,
+                &meter_id,
+                certificate
+                    .kwh_amount
+                    .and_then(|d| d.to_f64())
+                    .unwrap_or(0.0),
+                &renewable_source,
+                &validation_data,
+                &authority,
+                &governance_program_id,
+            )
+            .await?;
 
         // 2. Update DB with Signature
-        self.update_certificate_tx_signature(certificate.id, &signature.to_string()).await?;
+        self.update_certificate_tx_signature(certificate.id, &signature.to_string())
+            .await?;
 
         // 3. Notify via EventBus
-        if let Err(e) = self.event_bus.publish(Event::ErcIssued(ErcIssuedPayload {
-            certificate_id: certificate.certificate_id,
-            user_id: certificate.user_id.unwrap_or_default(),
-            energy_amount: certificate.kwh_amount.unwrap_or_default(),
-            renewable_source,
-            timestamp: Utc::now(),
-        })).await {
-            error!("❌ Failed to publish ErcIssued event for {}: {}", certificate.id, e);
+        if let Err(e) = self
+            .event_bus
+            .publish(&Event::ErcIssued(ErcIssuedPayload {
+                certificate_id: certificate.certificate_id,
+                user_id: certificate.user_id.unwrap_or_default(),
+                energy_amount: certificate.kwh_amount.unwrap_or_default(),
+                renewable_source,
+                timestamp: Utc::now(),
+            }))
+            .await
+        {
+            error!(
+                "❌ Failed to publish ErcIssued event for {}: {}",
+                certificate.id, e
+            );
         }
 
         info!("✅ ERC {} successfully registered on-chain", certificate.id);
@@ -259,7 +303,13 @@ impl ErcService {
         tx_signature: &str,
     ) -> Result<(ErcCertificate, CertificateTransfer)> {
         self.transfer_manager
-            .transfer_certificate(certificate_uuid, from_wallet, to_wallet, to_user_id, tx_signature)
+            .transfer_certificate(
+                certificate_uuid,
+                from_wallet,
+                to_wallet,
+                to_user_id,
+                tx_signature,
+            )
             .await
     }
 

@@ -3,11 +3,20 @@
 
 pub mod types {
     use serde::{Deserialize, Serialize};
-    use std::fmt;
     use utoipa::ToSchema;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, ToSchema)]
+    #[derive(
+        Debug,
+        Clone,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
     #[sqlx(type_name = "user_role", rename_all = "lowercase")]
+    #[strum(serialize_all = "lowercase")]
     pub enum UserRole {
         User,
         Admin,
@@ -16,17 +25,41 @@ pub mod types {
         Corporate,
     }
 
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, PartialEq, ToSchema)]
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        PartialEq,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
     #[sqlx(type_name = "order_type", rename_all = "lowercase")]
     #[serde(rename_all = "lowercase")]
+    #[strum(serialize_all = "lowercase")]
     pub enum OrderType {
         Limit,
         Market,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
     #[sqlx(type_name = "order_side", rename_all = "lowercase")]
     #[serde(rename_all = "lowercase")]
+    #[strum(serialize_all = "lowercase")]
     pub enum OrderSide {
         Buy,
         Sell,
@@ -41,12 +74,6 @@ pub mod types {
         }
     }
 
-    impl fmt::Display for OrderType {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}", self.as_str())
-        }
-    }
-
     impl OrderSide {
         pub fn as_str(&self) -> &'static str {
             match self {
@@ -56,15 +83,20 @@ pub mod types {
         }
     }
 
-    impl fmt::Display for OrderSide {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}", self.as_str())
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
     #[sqlx(type_name = "order_status", rename_all = "snake_case")]
     #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
     pub enum OrderStatus {
         Pending,
         Active,
@@ -91,15 +123,20 @@ pub mod types {
         }
     }
 
-    impl fmt::Display for OrderStatus {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}", self.as_str())
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::Type, ToSchema)]
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
     #[sqlx(type_name = "epoch_status", rename_all = "snake_case")]
     #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
     pub enum EpochStatus {
         Pending,
         Active,
@@ -107,14 +144,5 @@ pub mod types {
         Settled,
     }
 
-    impl fmt::Display for EpochStatus {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                EpochStatus::Pending => write!(f, "pending"),
-                EpochStatus::Active => write!(f, "active"),
-                EpochStatus::Cleared => write!(f, "cleared"),
-                EpochStatus::Settled => write!(f, "settled"),
-            }
-        }
-    }
+    // Removed manual Display implementations in favor of strum::Display
 }

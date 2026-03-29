@@ -1,10 +1,9 @@
+use crate::core::error::{ApiError, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
-use rand::Rng;
-use uuid::Uuid;
-use crate::core::error::{ApiError, Result};
+use sqlx::Row;
 use utoipa::ToSchema;
+use uuid::Uuid;
 // Removed AppState
 
 // use crate::services::websocket::WebSocketService;
@@ -24,7 +23,7 @@ pub enum MarketEvent {
         margin_used: Decimal,
         is_liquidated: bool,
         timestamp: chrono::DateTime<Utc>,
-    }
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -35,12 +34,14 @@ pub struct FuturesService {
 
 impl FuturesService {
     pub fn new(db: sqlx::PgPool) -> Self {
-        Self { db, websocket_service: WebSocketService }
+        Self {
+            db,
+            websocket_service: WebSocketService,
+        }
     }
 
     pub async fn get_products(&self) -> Result<Vec<FuturesProduct>> {
-        sqlx::query_as!(
-            FuturesProduct,
+        sqlx::query_as::<_, FuturesProduct>(
             r#"
             SELECT 
                 id, 
@@ -53,7 +54,7 @@ impl FuturesService {
                 is_active, created_at, updated_at
             FROM futures_products 
             WHERE is_active = true
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -68,100 +69,110 @@ impl FuturesService {
         order_type: String,
         quantity: Decimal,
         price: Decimal,
-        leverage: i32
+        leverage: i32,
     ) -> Result<Uuid> {
         // Validate inputs
         if quantity <= Decimal::ZERO {
-            return Err(ApiError::BadRequest("Quantity must be positive".to_string()));
+            return Err(ApiError::BadRequest(
+                "Quantity must be positive".to_string(),
+            ));
         }
 
-        let mut tx = self.db.begin().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         // 1. Check margin requirements
         let margin_required = (quantity * price) / Decimal::from(leverage);
-        
-        let user = sqlx::query!("SELECT balance FROM users WHERE id = $1 FOR UPDATE", user_id)
+
+        let user = sqlx::query("SELECT balance FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to fetch user balance: {}", e)))?;
 
-        if user.balance.unwrap_or(Decimal::ZERO) < margin_required {
+        let balance: Decimal = user
+            .get::<Option<Decimal>, _>("balance")
+            .unwrap_or(Decimal::ZERO);
+        if balance < margin_required {
             return Err(ApiError::BadRequest(format!(
-                "Insufficient margin. Required: {}, Available: {}", 
-                margin_required, 
-                user.balance.unwrap_or(Decimal::ZERO)
+                "Insufficient margin. Required: {}, Available: {}",
+                margin_required, balance
             )));
         }
 
         // 2. Lock margin
-        sqlx::query!(
-            "UPDATE users SET balance = balance - $1, locked_amount = locked_amount + $1 WHERE id = $2",
-            margin_required,
-            user_id
+        sqlx::query(
+            "UPDATE users SET balance = balance - $1, locked_amount = locked_amount + $1 WHERE id = $2"
         )
+        .bind(margin_required)
+        .bind(user_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         // 3. Insert order
-        let order_id = sqlx::query!(
+        let order_id = sqlx::query(
             r#"
             INSERT INTO futures_orders (user_id, product_id, side, order_type, quantity, price, leverage, status)
             VALUES ($1, $2, $3::futures_order_side, $4::futures_order_type, $5, $6, $7, 'pending')
             RETURNING id
-            "#,
-            user_id,
-            product_id,
-            side as _,
-            order_type as _,
-            quantity,
-            price,
-            leverage
+            "#
         )
+        .bind(user_id)
+        .bind(product_id)
+        .bind(side.as_str())
+        .bind(order_type.as_str())
+        .bind(quantity)
+        .bind(price)
+        .bind(leverage)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .id;
+        .get("id");
 
         // Auto-fill for MVP if market order
         if order_type == "market" {
-             sqlx::query!(
+            sqlx::query(
                 r#"
                 INSERT INTO futures_positions (user_id, product_id, side, quantity, entry_price, current_price, leverage, margin_used, unrealized_pnl)
                 VALUES ($1, $2, $3::futures_order_side, $4, $5, $5, $6, $7, 0)
-                "#,
-                user_id,
-                product_id,
-                side as _,
-                quantity,
-                price, // Using price as execution price for simplicity
-                leverage,
-                margin_required
+                "#
             )
+            .bind(user_id)
+            .bind(product_id)
+            .bind(side.as_str())
+            .bind(quantity)
+            .bind(price)
+            .bind(leverage)
+            .bind(margin_required)
             .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             // Update order status
-            sqlx::query!(
-                "UPDATE futures_orders SET status = 'filled', filled_quantity = $1, average_fill_price = $2 WHERE id = $3",
-                quantity,
-                price,
-                order_id
+            sqlx::query(
+                "UPDATE futures_orders SET status = 'filled', filled_quantity = $1, average_fill_price = $2 WHERE id = $3"
             )
+            .bind(quantity)
+            .bind(price)
+            .bind(order_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
 
-        tx.commit().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         Ok(order_id)
     }
 
     pub async fn get_positions(&self, user_id: Uuid) -> Result<Vec<FuturesPosition>> {
-        sqlx::query_as!(
-            FuturesPosition,
+        sqlx::query_as::<_, FuturesPosition>(
             r#"
             SELECT 
                 p.id, p.user_id, p.product_id, 
@@ -174,8 +185,8 @@ impl FuturesService {
             JOIN futures_products prod ON p.product_id = prod.id
             WHERE p.user_id = $1
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))
@@ -260,7 +271,7 @@ pub struct FuturesOrder {
     pub id: Uuid,
     pub user_id: Uuid,
     pub product_id: Uuid,
-    pub side: Option<String>, // 'long', 'short'
+    pub side: Option<String>,       // 'long', 'short'
     pub order_type: Option<String>, // 'market', 'limit'
     #[schema(value_type = String)]
     pub quantity: Decimal,
@@ -282,22 +293,22 @@ impl FuturesService {
 
     pub async fn get_candles(&self, _product_id: Uuid, _interval: String) -> Result<Vec<Candle>> {
         // ... existing mock candle generation ...
-        // Keeping as is for brevity in this replace block, but need to be careful not to delete it if I can't match it exactly. 
+        // Keeping as is for brevity in this replace block, but need to be careful not to delete it if I can't match it exactly.
         // Actually, to be safe, I should append the new methods after get_candles.
         // Let's assume the previous content is there and just append.
         // But replace_file_content needs target content.
         // I will target the end of the file or after get_candles implementation.
         // This tool is tricky if I don't see the exact lines.
         // I'll assume get_candles is correct and just add new methods before the end of impl FuturesService.
-        
+
         // RE-READING FILE CONTENT FROM STEP 35/36...
         // The previous replace added get_candles.
         // I will target the implementation of get_candles closing brace and add new methods.
-        
+
         let candles = Vec::new();
         // ... (lines 178-212 in my mental model, or previous step output) ...
         // simulating the end of get_candles
-        
+
         Ok(candles)
     }
 
@@ -305,7 +316,7 @@ impl FuturesService {
         // Mock Order Book
         // Center around 50000 + random noise
         let center_price = Decimal::from(50000);
-        
+
         let mut bids = Vec::new();
         let mut asks = Vec::new();
 
@@ -313,7 +324,7 @@ impl FuturesService {
             let spread = Decimal::from(i) * Decimal::from(10);
             let bid_price = center_price - spread;
             let ask_price = center_price + spread;
-            
+
             let qty = Decimal::from_f64_retain(rand::random::<f64>() * 5.0).unwrap_or(Decimal::ONE);
 
             bids.push(OrderBookEntry {
@@ -325,7 +336,7 @@ impl FuturesService {
             asks.push(OrderBookEntry {
                 price: ask_price,
                 quantity: qty,
-                total: Decimal::ZERO, 
+                total: Decimal::ZERO,
             });
         }
 
@@ -333,8 +344,7 @@ impl FuturesService {
     }
 
     pub async fn get_user_orders(&self, user_id: Uuid) -> Result<Vec<FuturesOrder>> {
-        sqlx::query_as!(
-            FuturesOrder,
+        sqlx::query_as::<_, FuturesOrder>(
             r#"
             SELECT 
                 o.id, o.user_id, o.product_id, 
@@ -352,8 +362,8 @@ impl FuturesService {
             ORDER BY o.created_at DESC
             LIMIT 50
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_all(&self.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))
@@ -361,26 +371,33 @@ impl FuturesService {
 
     pub async fn close_position(&self, user_id: Uuid, position_id: Uuid) -> Result<Uuid> {
         // 1. Get position details
-        let position = sqlx::query!(
+        let position = sqlx::query(
             r#"
             SELECT product_id, COALESCE(side::text, 'unknown') as side, quantity, current_price 
             FROM futures_positions 
             WHERE id = $1 AND user_id = $2
             "#,
-            position_id,
-            user_id
         )
+        .bind(position_id)
+        .bind(user_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::BadRequest("Position not found".to_string()))?;
 
+        let product_id: Uuid = position.get("product_id");
+        let side: String = position
+            .get::<Option<String>, _>("side")
+            .unwrap_or_else(|| "unknown".to_string());
+        let quantity: Decimal = position.get("quantity");
+        let current_price: Decimal = position.get("current_price");
+
         // 2. Calculate closing side
-        let close_side = if position.side.as_deref() == Some("long") { "short" } else { "long" };
-        let price = position.current_price; // executing at current mark price for simplicity
+        let close_side = if side == "long" { "short" } else { "long" };
+        let price = current_price; // executing at current mark price for simplicity
 
         // 3. Create closing order record (History)
-        let order_id = sqlx::query!(
+        let order_id = sqlx::query(
             r#"
             INSERT INTO futures_orders (
                 user_id, product_id, side, order_type, quantity, price, leverage, 
@@ -389,25 +406,23 @@ impl FuturesService {
             VALUES ($1, $2, $3::futures_order_side, 'market', $4, $5, 1, 'filled', $4, $5)
             RETURNING id
             "#,
-            user_id,
-            position.product_id,
-            close_side as _,
-            position.quantity,
-            price
         )
+        .bind(user_id)
+        .bind(product_id)
+        .bind(close_side.to_string())
+        .bind(quantity)
+        .bind(price)
         .fetch_one(&self.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .id;
+        .get("id");
 
         // 4. Delete position (Close it out)
-        sqlx::query!(
-            "DELETE FROM futures_positions WHERE id = $1",
-            position_id
-        )
-        .execute(&self.db)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        sqlx::query("DELETE FROM futures_positions WHERE id = $1")
+            .bind(position_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         Ok(order_id)
     }
@@ -415,13 +430,13 @@ impl FuturesService {
     /// Update PnL for all active positions based on current market prices
     pub async fn refresh_unrealized_pnl(&self) -> Result<()> {
         // 1. Get all positions with their product's current price
-        let positions = sqlx::query!(
+        let positions = sqlx::query(
             r#"
             SELECT p.id, p.user_id, p.side::text as side, p.quantity, p.entry_price, 
                    p.margin_used, prod.current_price, prod.symbol
             FROM futures_positions p
             JOIN futures_products prod ON p.product_id = prod.id
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -430,27 +445,40 @@ impl FuturesService {
         let mut events = Vec::new();
 
         for pos in positions {
-            let side_mult = if pos.side.as_deref() == Some("long") { Decimal::ONE } else { -Decimal::ONE };
-            let price_diff = pos.current_price - pos.entry_price;
-            let unrealized_pnl = price_diff * pos.quantity * side_mult;
+            let pos_id: Uuid = pos.get("id");
+            let pos_user_id: Uuid = pos.get("user_id");
+            let pos_side: String = pos
+                .get::<Option<String>, _>("side")
+                .unwrap_or_else(|| "unknown".to_string());
+            let pos_quantity: Decimal = pos.get("quantity");
+            let pos_entry_price: Decimal = pos.get("entry_price");
+            let pos_margin_used: Decimal = pos.get("margin_used");
+            let prod_current_price: Decimal = pos.get("current_price");
+            let prod_symbol: String = pos.get("symbol");
+
+            let side_mult = if pos_side == "long" {
+                Decimal::ONE
+            } else {
+                -Decimal::ONE
+            };
+            let price_diff = prod_current_price - pos_entry_price;
+            let unrealized_pnl = price_diff * pos_quantity * side_mult;
 
             // 2. Update DB
-            sqlx::query!(
-                "UPDATE futures_positions SET unrealized_pnl = $1, updated_at = NOW() WHERE id = $2",
-                unrealized_pnl,
-                pos.id
-            )
-            .execute(&self.db)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            sqlx::query("UPDATE futures_positions SET unrealized_pnl = $1, updated_at = NOW() WHERE id = $2")
+                .bind(unrealized_pnl)
+                .bind(pos_id)
+                .execute(&self.db)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             // 3. Prepare WebSocket event
             events.push(MarketEvent::FuturesPositionUpdate {
-                position_id: pos.id,
-                user_id: pos.user_id,
-                product_symbol: pos.symbol,
+                position_id: pos_id,
+                user_id: pos_user_id,
+                product_symbol: prod_symbol,
                 unrealized_pnl,
-                margin_used: pos.margin_used,
+                margin_used: pos_margin_used,
                 is_liquidated: false,
                 timestamp: Utc::now(),
             });
@@ -465,13 +493,13 @@ impl FuturesService {
     /// Scan for and execute liquidations for positions below maintenance margin
     pub async fn check_liquidations(&self) -> Result<usize> {
         // Simple liquidation logic: If unrealized PnL is negative and exceeds 80% of margin_used
-        let liquidatable = sqlx::query!(
+        let liquidatable = sqlx::query(
             r#"
             SELECT p.id, p.user_id, p.margin_used, p.unrealized_pnl, prod.symbol
             FROM futures_positions p
             JOIN futures_products prod ON p.product_id = prod.id
             WHERE p.unrealized_pnl < 0 AND ABS(p.unrealized_pnl) >= (p.margin_used * 0.8)
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -481,37 +509,55 @@ impl FuturesService {
         let mut events = Vec::new();
 
         for pos in liquidatable {
-            let mut tx = self.db.begin().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+            let pos_id: Uuid = pos.get("id");
+            let pos_user_id: Uuid = pos.get("user_id");
+            let pos_margin_used: Decimal = pos.get("margin_used");
+            let pos_unrealized_pnl: Option<Decimal> = pos.get("unrealized_pnl");
+            let prod_symbol: String = pos.get("symbol");
+
+            let mut tx = self
+                .db
+                .begin()
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             // 1. Create liquidation order (History)
-            sqlx::query!(
-                "INSERT INTO futures_orders (user_id, status, order_type, quantity, price, leverage) VALUES ($1, 'liquidated', 'market', 0, 0, 1)",
-                pos.user_id
+            sqlx::query(
+                r#"
+                INSERT INTO futures_orders (user_id, status, order_type, quantity, price, leverage) 
+                VALUES ($1, 'liquidated', 'market', 0, 0, 1)
+                "#,
             )
+            .bind(pos_user_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             // 2. Delete position
-            sqlx::query!("DELETE FROM futures_positions WHERE id = $1", pos.id)
+            sqlx::query("DELETE FROM futures_positions WHERE id = $1")
+                .bind(pos_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             // 3. Burn remaining margin (Insurance fund or platform revenue)
-            sqlx::query!("UPDATE users SET locked_amount = locked_amount - $1 WHERE id = $2", pos.margin_used, pos.user_id)
+            sqlx::query("UPDATE users SET locked_amount = locked_amount - $1 WHERE id = $2")
+                .bind(pos_margin_used)
+                .bind(pos_user_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-            tx.commit().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
 
             events.push(MarketEvent::FuturesPositionUpdate {
-                position_id: pos.id,
-                user_id: pos.user_id,
-                product_symbol: pos.symbol,
-                unrealized_pnl: pos.unrealized_pnl.unwrap_or(Decimal::ZERO),
-                margin_used: pos.margin_used,
+                position_id: pos_id,
+                user_id: pos_user_id,
+                product_symbol: prod_symbol,
+                unrealized_pnl: pos_unrealized_pnl.unwrap_or(Decimal::ZERO),
+                margin_used: pos_margin_used,
                 is_liquidated: true,
                 timestamp: Utc::now(),
             });

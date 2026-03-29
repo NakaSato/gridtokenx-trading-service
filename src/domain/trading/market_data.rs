@@ -3,17 +3,17 @@
 //! Domain service that aggregates market depth from the database
 //! and synchronizes it with the Solana blockchain.
 
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use solana_sdk::pubkey::Pubkey;
 use sqlx::{PgPool, Row};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
-use tracing::{info, error, debug};
-use solana_sdk::pubkey::Pubkey;
-use std::str::FromStr;
+use tracing::{debug, error, info};
 
 use crate::infra::blockchain::BlockchainService;
-use crate::infra::db::schema::types::{OrderSide};
+use crate::infra::db::schema::types::OrderSide;
 
 /// Market data sync configuration
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ impl Default for MarketDataConfig {
         Self {
             sync_interval_secs: 30, // Sync every 30s by default
             enabled: true,
-            trading_program_id: "3iFReh5tvdWkLt7eJcvGKsST7wcwZsSHk3z3xCfUwHLw".to_string(),
+            trading_program_id: "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string(),
         }
     }
 }
@@ -49,8 +49,13 @@ impl MarketDataManager {
     pub fn new(db: PgPool, blockchain: BlockchainService, config: MarketDataConfig) -> Self {
         let program_id = Pubkey::from_str(&config.trading_program_id).unwrap_or_default();
         let (market_pubkey, _) = Pubkey::find_program_address(&[b"market"], &program_id);
-        
-        Self { db, blockchain, config, market_pubkey }
+
+        Self {
+            db,
+            blockchain,
+            config,
+            market_pubkey,
+        }
     }
 
     /// Start the market data sync loop
@@ -60,13 +65,16 @@ impl MarketDataManager {
             return;
         }
 
-        info!("Starting market data sync with {}s interval", self.config.sync_interval_secs);
-        
+        info!(
+            "Starting market data sync with {}s interval",
+            self.config.sync_interval_secs
+        );
+
         let mut sync_interval = interval(Duration::from_secs(self.config.sync_interval_secs));
 
         loop {
             sync_interval.tick().await;
-            
+
             if let Err(e) = self.sync_market_depth().await {
                 error!("Market depth sync error: {}", e);
             }
@@ -81,10 +89,11 @@ impl MarketDataManager {
         }
 
         // Find all active zones
-        let zones_rows = sqlx::query!("SELECT DISTINCT zone_id FROM trading_orders WHERE zone_id IS NOT NULL")
-            .fetch_all(&self.db)
-            .await?;
-        
+        let zones_rows =
+            sqlx::query("SELECT DISTINCT zone_id FROM trading_orders WHERE zone_id IS NOT NULL")
+                .fetch_all(&self.db)
+                .await?;
+
         for row in zones_rows {
             let zone_id: i32 = row.get(0);
             if let Err(e) = self.sync_zone_depth(zone_id as u32).await {
@@ -110,23 +119,33 @@ impl MarketDataManager {
             return Ok(());
         }
 
-        info!("Updating on-chain depth for zone {}: {} bid levels, {} ask levels", 
-            zone_id, buy_prices.len(), sell_prices.len());
-
-        self.blockchain.execute_update_depth(
-            &self.market_pubkey,
+        info!(
+            "Updating on-chain depth for zone {}: {} bid levels, {} ask levels",
             zone_id,
-            buy_prices,
-            buy_amounts,
-            sell_prices,
-            sell_amounts,
-        ).await?;
+            buy_prices.len(),
+            sell_prices.len()
+        );
+
+        self.blockchain
+            .execute_update_depth(
+                &self.market_pubkey,
+                zone_id,
+                buy_prices,
+                buy_amounts,
+                sell_prices,
+                sell_amounts,
+            )
+            .await?;
 
         Ok(())
     }
 
-    async fn get_aggregated_depth(&self, zone_id: u32, side: OrderSide) -> anyhow::Result<Vec<(u64, u64)>> {
-        let rows = sqlx::query!(
+    async fn get_aggregated_depth(
+        &self,
+        zone_id: u32,
+        side: OrderSide,
+    ) -> anyhow::Result<Vec<(u64, u64)>> {
+        let rows = sqlx::query(
             r#"
             SELECT price_per_kwh, SUM(energy_amount - COALESCE(filled_amount, 0)) as remaining_amount
             FROM trading_orders
@@ -147,10 +166,14 @@ impl MarketDataManager {
         for row in rows {
             let price_dec: Decimal = row.get("price_per_kwh");
             let amount_dec: Decimal = row.get("remaining_amount");
-            
-            let price = (price_dec * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
-            let amount = (amount_dec * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
-            
+
+            let price = (price_dec * Decimal::from(1_000_000_000u64))
+                .to_u64()
+                .unwrap_or(0);
+            let amount = (amount_dec * Decimal::from(1_000_000_000u64))
+                .to_u64()
+                .unwrap_or(0);
+
             if amount > 0 {
                 depth.push((price, amount));
             }
@@ -170,16 +193,21 @@ impl MarketDataManager {
             return Ok(());
         }
 
-        let price_u64 = (price * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
-        let amount_u64 = (amount * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
+        let price_u64 = (price * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        let amount_u64 = (amount * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
 
-        info!("Syncing price history on-chain: price={}, volume={}", price, amount);
-        
-        self.blockchain.execute_update_price_history(
-            &self.market_pubkey,
-            price_u64,
-            amount_u64,
-        ).await?;
+        info!(
+            "Syncing price history on-chain: price={}, volume={}",
+            price, amount
+        );
+
+        self.blockchain
+            .execute_update_price_history(&self.market_pubkey, price_u64, amount_u64)
+            .await?;
 
         Ok(())
     }

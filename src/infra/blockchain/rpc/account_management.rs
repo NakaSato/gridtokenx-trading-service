@@ -3,8 +3,8 @@ use crate::infra::blockchain::rpc::utils::BlockchainUtils;
 use anyhow::{anyhow, Result};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature};
-use std::str::FromStr;
 use solana_transaction_status;
+use std::str::FromStr;
 // use crate::api::middleware::metrics::track_wallet_balance_check;
 fn track_wallet_balance_check(_wallet: &str, _balance: f64) {}
 use tracing::info;
@@ -43,13 +43,13 @@ impl AccountManager {
     }
 
     /// Get account balance in lamports
-    pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
-        self.transaction_handler.get_balance(pubkey).await
+    pub async fn get_balance(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<u64> {
+        self.transaction_handler.get_balance(pubkey, force_refresh).await
     }
 
     /// Get account balance in SOL
-    pub async fn get_balance_sol(&self, pubkey: &Pubkey) -> Result<f64> {
-        let balance = self.transaction_handler.get_balance_sol(pubkey).await?;
+    pub async fn get_balance_sol(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<f64> {
+        let balance = self.transaction_handler.get_balance_sol(pubkey, force_refresh).await?;
         track_wallet_balance_check("authority", balance);
         Ok(balance)
     }

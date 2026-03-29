@@ -5,10 +5,7 @@ use uuid::Uuid;
 
 use crate::services::erc::types::ErcCertificate;
 
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::Keypair,
-};
+use solana_sdk::{pubkey::Pubkey, signature::Keypair};
 
 use crate::infra::blockchain::BlockchainService;
 
@@ -57,7 +54,7 @@ impl CertificateRetiring {
                 issuer_wallet, status,
                 blockchain_tx_signature, metadata, settlement_id,
                 created_at, updated_at
-            "#
+            "#,
         )
         .bind(certificate_uuid)
         .fetch_one(&self.db_pool)

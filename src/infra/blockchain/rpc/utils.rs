@@ -1,14 +1,14 @@
+use super::instructions::{
+    ENERGY_TOKEN_PROGRAM_ID, GOVERNANCE_PROGRAM_ID, ORACLE_PROGRAM_ID, REGISTRY_PROGRAM_ID,
+    TRADING_PROGRAM_ID,
+};
 use anyhow::{anyhow, Result};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use solana_sdk::{
     instruction::Instruction,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use super::instructions::{
-    ENERGY_TOKEN_PROGRAM_ID, GOVERNANCE_PROGRAM_ID, ORACLE_PROGRAM_ID, REGISTRY_PROGRAM_ID,
-    TRADING_PROGRAM_ID,
 };
 use std::str::FromStr;
 use tracing::info;
@@ -33,21 +33,50 @@ impl BlockchainUtils {
     /// The file should contain an array of 64 bytes representing the keypair
     pub fn load_keypair_from_file(filepath: &str) -> Result<Keypair> {
         use std::fs;
+        use std::path::Path;
 
-        info!("Loading keypair from file: {}", filepath);
+        info!("Attempting to load keypair from: {}", filepath);
 
-        // Read the file contents
-        let file_contents = fs::read_to_string(filepath)
-            .map_err(|e| anyhow!("Failed to read keypair file '{}': {}", filepath, e))?;
+        // Try direct path
+        if let Ok(contents) = fs::read_to_string(filepath) {
+            return Self::load_keypair_from_string(&contents);
+        }
 
-        Self::load_keypair_from_string(&file_contents)
+        // Try relative to parent (if currently in a subdirectory like gridtokenx-trading-service)
+        let parent_path = format!("../{}", filepath);
+        if let Ok(contents) = fs::read_to_string(&parent_path) {
+            info!("Found keypair at fallback: {}", parent_path);
+            return Self::load_keypair_from_string(&contents);
+        }
+
+        // Try some common locations if filename matches
+        if filepath.contains("dev-wallet.json") {
+            let common_paths = vec![
+                "./dev-wallet.json",
+                "../dev-wallet.json",
+                "../../dev-wallet.json",
+                "/app/dev-wallet.json",
+            ];
+
+            for path in common_paths {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    info!("Found keypair at common location: {}", path);
+                    return Self::load_keypair_from_string(&contents);
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "Failed to find keypair file '{}' in any expected location",
+            filepath
+        ))
     }
 
     /// Load keypair from an environment variable
     pub fn load_keypair_from_env(var_name: &str) -> Result<Keypair> {
         let val = std::env::var(var_name)
             .map_err(|e| anyhow!("Environment variable '{}' not set: {}", var_name, e))?;
-        
+
         Self::load_keypair_from_string(&val)
     }
 
@@ -59,15 +88,16 @@ impl BlockchainUtils {
         if s.starts_with('[') {
             let bytes: Vec<u8> = serde_json::from_str(s)
                 .map_err(|e| anyhow!("Failed to parse keypair JSON: {}", e))?;
-            
+
             return Self::keypair_from_bytes(&bytes);
         }
 
         // Try parsing as base64
         use base64::{engine::general_purpose, Engine as _};
-        let bytes = general_purpose::STANDARD.decode(s)
+        let bytes = general_purpose::STANDARD
+            .decode(s)
             .map_err(|e| anyhow!("Failed to decode base64 keypair: {}", e))?;
-        
+
         Self::keypair_from_bytes(&bytes)
     }
 
@@ -106,7 +136,8 @@ impl BlockchainUtils {
         );
 
         // Convert kWh to token amount (with 9 decimals)
-        let amount_lamports = ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000))).unwrap_or(0);
+        let amount_lamports =
+            ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000))).unwrap_or(0);
 
         let energy_token_program_id = Self::energy_token_program_id()?;
         let token_program_id = Self::get_token_program_id()?;
@@ -132,7 +163,7 @@ impl BlockchainUtils {
         // 3. authority (signer)
         // 4. registry_authority (readonly) - often same as authority
         // 5. token_program
-        
+
         use solana_sdk::instruction::{AccountMeta, Instruction};
 
         let accounts = vec![
@@ -167,7 +198,8 @@ impl BlockchainUtils {
         );
 
         // Convert kWh to token amount (with 9 decimals)
-        let amount_lamports = ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000))).unwrap_or(0);
+        let amount_lamports =
+            ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000))).unwrap_or(0);
 
         let token_program_id = Self::get_token_program_id()?;
 
@@ -177,7 +209,7 @@ impl BlockchainUtils {
             mint,
             user_token_account,
             &authority.pubkey(),
-            &[],  // No multisig signers
+            &[], // No multisig signers
             amount_lamports,
         )?;
 
@@ -191,17 +223,21 @@ impl BlockchainUtils {
         user_wallet: &Pubkey,
         mint: &Pubkey,
     ) -> Result<Instruction> {
-        info!("Creating idempotent ATA instruction for user: {}", user_wallet);
+        info!(
+            "Creating idempotent ATA instruction for user: {}",
+            user_wallet
+        );
 
         let token_program_id = Self::get_token_program_id()?;
 
         // Use idempotent version - doesn't fail if account already exists
-        let instruction = spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-            &authority.pubkey(),  // Payer
-            user_wallet,          // Owner of the ATA
-            mint,                 // Token mint
-            &token_program_id,    // Token program
-        );
+        let instruction =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &authority.pubkey(), // Payer
+                user_wallet,         // Owner of the ATA
+                mint,                // Token mint
+                &token_program_id,   // Token program
+            );
 
         Ok(instruction)
     }
@@ -231,7 +267,7 @@ impl BlockchainUtils {
             mint,
             to_token_account,
             &authority.pubkey(),
-            &[],  // No multisig signers
+            &[], // No multisig signers
             amount,
             decimals,
         )?;
@@ -308,11 +344,10 @@ impl BlockchainUtils {
             &registry_program_id,
         );
         // Correct seeds: [b"meter", owner, meter_id]
-        let (meter_account_pda, _) =
-            Pubkey::find_program_address(
-                &[b"meter", authority.pubkey().as_ref(), meter_id.as_bytes()], 
-                &registry_program_id
-            );
+        let (meter_account_pda, _) = Pubkey::find_program_address(
+            &[b"meter", authority.pubkey().as_ref(), meter_id.as_bytes()],
+            &registry_program_id,
+        );
 
         // Build instruction data
         let mut instruction_data = Vec::new();
@@ -365,11 +400,10 @@ impl BlockchainUtils {
         // Derive PDAs
         let (oracle_data_pda, _) =
             Pubkey::find_program_address(&[b"oracle_data"], &oracle_program_id);
-        let (_meter_account_pda, _) =
-            Pubkey::find_program_address(
-                &[b"meter", owner.as_ref(), meter_id.as_bytes()], 
-                &registry_program_id
-            );
+        let (_meter_account_pda, _) = Pubkey::find_program_address(
+            &[b"meter", owner.as_ref(), meter_id.as_bytes()],
+            &registry_program_id,
+        );
 
         // Build instruction data
         let mut instruction_data = Vec::new();
@@ -417,11 +451,10 @@ impl BlockchainUtils {
 
         // Derive PDAs
         let (registry_pda, _) = Pubkey::find_program_address(&[b"registry"], &registry_program_id);
-        let (meter_account_pda, _) =
-            Pubkey::find_program_address(
-                &[b"meter", owner.as_ref(), meter_id.as_bytes()], 
-                &registry_program_id
-            );
+        let (meter_account_pda, _) = Pubkey::find_program_address(
+            &[b"meter", owner.as_ref(), meter_id.as_bytes()],
+            &registry_program_id,
+        );
 
         // Build instruction data
         let mut instruction_data = Vec::new();
@@ -460,7 +493,7 @@ impl BlockchainUtils {
     /// Set the oracle authority in the Registry program (admin only)
     pub fn create_set_oracle_authority_instruction(
         authority: &Keypair, // Must be the Registry authority
-        oracle: &Pubkey,      // New oracle authority to set
+        oracle: &Pubkey,     // New oracle authority to set
     ) -> Result<Instruction> {
         info!("Creating set_oracle_authority instruction for: {}", oracle);
 
@@ -504,7 +537,8 @@ impl BlockchainUtils {
         );
 
         // Convert kWh to token amount (with 9 decimals)
-        let amount_lamports = ToPrimitive::to_u64(&(amount_kwh.abs() * Decimal::from(1_000_000_000))).unwrap_or(0);
+        let amount_lamports =
+            ToPrimitive::to_u64(&(amount_kwh.abs() * Decimal::from(1_000_000_000))).unwrap_or(0);
 
         let energy_token_program_id = Self::energy_token_program_id()?;
 
@@ -663,7 +697,10 @@ pub mod transaction_utils {
         decimals: u8,
     ) -> Result<MintBatchData> {
         // Calculate tokens to mint
-        let tokens_to_mint = ToPrimitive::to_u64(&(kwh_amount * kwh_to_token_ratio * Decimal::from(10_u64.pow(decimals as u32)))).unwrap_or(0);
+        let tokens_to_mint = ToPrimitive::to_u64(
+            &(kwh_amount * kwh_to_token_ratio * Decimal::from(10_u64.pow(decimals as u32))),
+        )
+        .unwrap_or(0);
 
         // Get or create associated token account
         let token_program_id = BlockchainUtils::get_token_program_id()?;
@@ -704,12 +741,16 @@ mod tests {
         let kp = Keypair::new();
         let pubkey_orig = kp.pubkey();
         let bytes = kp.to_bytes();
-        
+
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&bytes[0..32]);
         let kp_der = Keypair::new_from_array(seed);
-        
-        assert_eq!(pubkey_orig, kp_der.pubkey(), "Keypair derived from first 32 bytes of to_bytes() should match original!");
+
+        assert_eq!(
+            pubkey_orig,
+            kp_der.pubkey(),
+            "Keypair derived from first 32 bytes of to_bytes() should match original!"
+        );
     }
 
     #[test]
@@ -717,7 +758,7 @@ mod tests {
         let kp = Keypair::new();
         let bytes = kp.to_bytes();
         let json = serde_json::to_string(&bytes.to_vec()).unwrap();
-        
+
         let loaded_kp = BlockchainUtils::load_keypair_from_string(&json).unwrap();
         assert_eq!(kp.pubkey(), loaded_kp.pubkey());
     }
@@ -728,7 +769,7 @@ mod tests {
         let kp = Keypair::new();
         let bytes = kp.to_bytes();
         let b64 = general_purpose::STANDARD.encode(&bytes);
-        
+
         let loaded_kp = BlockchainUtils::load_keypair_from_string(&b64).unwrap();
         assert_eq!(kp.pubkey(), loaded_kp.pubkey());
     }

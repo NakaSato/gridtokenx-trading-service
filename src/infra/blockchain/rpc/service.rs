@@ -6,6 +6,7 @@ use super::transactions::TransactionHandler;
 use super::utils::BlockchainUtils;
 use crate::core::config::SolanaProgramsConfig;
 use anyhow::{anyhow, Result};
+use rust_decimal::Decimal;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     instruction::Instruction,
@@ -14,7 +15,6 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::str::FromStr;
-use rust_decimal::Decimal;
 use std::sync::Arc;
 // use crate::api::middleware::metrics::track_blockchain_operation;
 fn track_blockchain_operation(_op: &str, _duration: f64, _success: bool) {}
@@ -70,7 +70,9 @@ impl BlockchainService {
                     "Failed to load authority keypair: {}. Using placeholder.",
                     e
                 );
-                "11111111111111111111111111111112".parse().unwrap_or_else(|_| Pubkey::default())
+                "11111111111111111111111111111112"
+                    .parse()
+                    .unwrap_or_else(|_| Pubkey::default())
             }
         };
 
@@ -159,13 +161,13 @@ impl BlockchainService {
     }
 
     /// Get account balance in lamports
-    pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
-        self.account_manager.get_balance(pubkey).await
+    pub async fn get_balance(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<u64> {
+        self.account_manager.get_balance(pubkey, force_refresh).await
     }
 
     /// Get account balance in SOL
-    pub async fn get_balance_sol(&self, pubkey: &Pubkey) -> Result<f64> {
-        self.account_manager.get_balance_sol(pubkey).await
+    pub async fn get_balance_sol(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<f64> {
+        self.account_manager.get_balance_sol(pubkey, force_refresh).await
     }
 
     /// Get SPL token balance for a user
@@ -209,64 +211,128 @@ impl BlockchainService {
     pub async fn initialize_registry(&self, authority: &Keypair) -> Result<Signature> {
         info!("Initializing Registry on-chain...");
         let start = std::time::Instant::now();
-        let instruction = self.instruction_builder.build_initialize_registry_instruction()?;
-        let res = self.build_and_send_transaction(vec![instruction], &[authority]).await;
-        track_blockchain_operation("initialize_registry", start.elapsed().as_millis() as f64, res.is_ok());
+        let instruction = self
+            .instruction_builder
+            .build_initialize_registry_instruction()?;
+        let res = self
+            .build_and_send_transaction(vec![instruction], &[authority])
+            .await;
+        track_blockchain_operation(
+            "initialize_registry",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
     /// Initialize a registry shard on-chain
-    pub async fn initialize_registry_shard(&self, authority: &Keypair, shard_id: u8) -> Result<Signature> {
+    pub async fn initialize_registry_shard(
+        &self,
+        authority: &Keypair,
+        shard_id: u8,
+    ) -> Result<Signature> {
         info!("Initializing Registry Shard {} on-chain...", shard_id);
         let start = std::time::Instant::now();
-        let instruction = self.instruction_builder.build_initialize_shard_instruction(shard_id)?;
-        let res = self.build_and_send_transaction(vec![instruction], &[authority]).await;
-        track_blockchain_operation("initialize_shard", start.elapsed().as_millis() as f64, res.is_ok());
+        let instruction = self
+            .instruction_builder
+            .build_initialize_shard_instruction(shard_id)?;
+        let res = self
+            .build_and_send_transaction(vec![instruction], &[authority])
+            .await;
+        track_blockchain_operation(
+            "initialize_shard",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
     /// Initialize the oracle on-chain (localnet bootstrapping)
-    pub async fn initialize_oracle(&self, authority: &Keypair, api_gateway: &Pubkey) -> Result<Signature> {
-        info!("Initializing Oracle on-chain with API Gateway: {}...", api_gateway);
+    pub async fn initialize_oracle(
+        &self,
+        authority: &Keypair,
+        api_gateway: &Pubkey,
+    ) -> Result<Signature> {
+        info!(
+            "Initializing Oracle on-chain with API Gateway: {}...",
+            api_gateway
+        );
         let start = std::time::Instant::now();
-        let instruction = self.instruction_builder.build_initialize_oracle_instruction(api_gateway)?;
-        let res = self.build_and_send_transaction(vec![instruction], &[authority]).await;
-        track_blockchain_operation("initialize_oracle", start.elapsed().as_millis() as f64, res.is_ok());
+        let instruction = self
+            .instruction_builder
+            .build_initialize_oracle_instruction(api_gateway)?;
+        let res = self
+            .build_and_send_transaction(vec![instruction], &[authority])
+            .await;
+        track_blockchain_operation(
+            "initialize_oracle",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
     /// Set the oracle authority in the Registry program (admin only)
-    pub async fn set_oracle_authority(&self, authority: &Keypair, oracle: &Pubkey) -> Result<Signature> {
+    pub async fn set_oracle_authority(
+        &self,
+        authority: &Keypair,
+        oracle: &Pubkey,
+    ) -> Result<Signature> {
         info!("Setting oracle authority in Registry to: {}...", oracle);
-        let instruction = BlockchainUtils::create_set_oracle_authority_instruction(authority, oracle)?;
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        let instruction =
+            BlockchainUtils::create_set_oracle_authority_instruction(authority, oracle)?;
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Initialize the governance (PoA) on-chain (localnet bootstrapping)
     pub async fn initialize_governance(&self, authority: &Keypair) -> Result<Signature> {
         info!("Initializing Governance (PoA) on-chain...");
-        let instruction = self.instruction_builder.build_initialize_governance_instruction()?;
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        let instruction = self
+            .instruction_builder
+            .build_initialize_governance_instruction()?;
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Initialize the Energy Token program mint on-chain (localnet bootstrapping)
     pub async fn initialize_energy_token(&self, authority: &Keypair) -> Result<Signature> {
-        info!("Initializing Energy Token on-chain with Authority: {}", authority.pubkey());
-        let instruction = self.instruction_builder.build_initialize_energy_token_instruction(authority.pubkey())?;
-        
+        info!(
+            "Initializing Energy Token on-chain with Authority: {}",
+            authority.pubkey()
+        );
+        let instruction = self
+            .instruction_builder
+            .build_initialize_energy_token_instruction(authority.pubkey())?;
+
         for (i, acc) in instruction.accounts.iter().enumerate() {
-            info!("  Account {}: {} (signer: {}, writable: {})", i, acc.pubkey, acc.is_signer, acc.is_writable);
+            info!(
+                "  Account {}: {} (signer: {}, writable: {})",
+                i, acc.pubkey, acc.is_signer, acc.is_writable
+            );
         }
 
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Initialize the Trading Market on-chain
-    pub async fn initialize_trading_market(&self, authority: &Keypair, num_shards: u8) -> Result<Signature> {
-        info!("Initializing Trading Market on-chain with Authority: {}, shards: {}", authority.pubkey(), num_shards);
-        let instruction = self.instruction_builder.build_initialize_market_instruction(authority.pubkey(), num_shards)?;
-        
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+    pub async fn initialize_trading_market(
+        &self,
+        authority: &Keypair,
+        num_shards: u8,
+    ) -> Result<Signature> {
+        info!(
+            "Initializing Trading Market on-chain with Authority: {}, shards: {}",
+            authority.pubkey(),
+            num_shards
+        );
+        let instruction = self
+            .instruction_builder
+            .build_initialize_market_instruction(authority.pubkey(), num_shards)?;
+
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Initialize a Zone Market on-chain
@@ -277,16 +343,22 @@ impl BlockchainService {
         num_shards: u8,
     ) -> Result<Signature> {
         let market_pubkey = self.instruction_builder.get_market_pda()?;
-        info!("Initializing Zone Market {} on-chain (market: {})", zone_id, market_pubkey);
-        
-        let instruction = self.instruction_builder.build_initialize_zone_market_instruction(
-            market_pubkey,
-            authority.pubkey(),
-            zone_id,
-            num_shards,
-        )?;
-        
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        info!(
+            "Initializing Zone Market {} on-chain (market: {})",
+            zone_id, market_pubkey
+        );
+
+        let instruction = self
+            .instruction_builder
+            .build_initialize_zone_market_instruction(
+                market_pubkey,
+                authority.pubkey(),
+                zone_id,
+                num_shards,
+            )?;
+
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Issue an ERC certificate on-chain
@@ -300,7 +372,10 @@ impl BlockchainService {
         validation_data: &str,
         authority: &Keypair,
     ) -> Result<Signature> {
-        info!("Issuing ERC {} on-chain for {} kWh", certificate_id, energy_amount);
+        info!(
+            "Issuing ERC {} on-chain for {} kWh",
+            certificate_id, energy_amount
+        );
         let start = std::time::Instant::now();
         let instruction = self.instruction_builder.build_issue_erc_instruction(
             certificate_id,
@@ -310,7 +385,9 @@ impl BlockchainService {
             renewable_source,
             validation_data,
         )?;
-        let res = self.build_and_send_transaction(vec![instruction], &[authority]).await;
+        let res = self
+            .build_and_send_transaction(vec![instruction], &[authority])
+            .await;
         track_blockchain_operation("issue_erc", start.elapsed().as_millis() as f64, res.is_ok());
         res
     }
@@ -322,13 +399,17 @@ impl BlockchainService {
         owner: &Keypair,
         new_owner: &Pubkey,
     ) -> Result<Signature> {
-        info!("Transferring ERC {} on-chain to {}", certificate_id, new_owner);
+        info!(
+            "Transferring ERC {} on-chain to {}",
+            certificate_id, new_owner
+        );
         let instruction = self.instruction_builder.build_transfer_erc_instruction(
             certificate_id,
             &owner.pubkey(),
             new_owner,
         )?;
-        self.build_and_send_transaction(vec![instruction], &[owner]).await
+        self.build_and_send_transaction(vec![instruction], &[owner])
+            .await
     }
 
     /// Revoke (retire) an ERC certificate on-chain
@@ -338,12 +419,15 @@ impl BlockchainService {
         reason: &str,
         authority: &Keypair,
     ) -> Result<Signature> {
-        info!("Revoking ERC {} on-chain (Reason: {})", certificate_id, reason);
-        let instruction = self.instruction_builder.build_revoke_erc_instruction(
-            certificate_id,
-            reason,
-        )?;
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        info!(
+            "Revoking ERC {} on-chain (Reason: {})",
+            certificate_id, reason
+        );
+        let instruction = self
+            .instruction_builder
+            .build_revoke_erc_instruction(certificate_id, reason)?;
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Check if an account exists
@@ -432,7 +516,10 @@ impl BlockchainService {
             // Offset for ZoneMarket.active_orders (offset 56, u32)
             // Layout: Disc(8) + Market(32) + ZoneId(4) + NumShards(1) + Pad(3) + Vol(8) = 56
             if account.data.len() < 60 {
-                return Err(anyhow!("ZoneMarket account data too small (expected at least 60 bytes, got {})", account.data.len()));
+                return Err(anyhow!(
+                    "ZoneMarket account data too small (expected at least 60 bytes, got {})",
+                    account.data.len()
+                ));
             }
             let active_orders_bytes: [u8; 4] = account.data[56..60]
                 .try_into()
@@ -445,11 +532,7 @@ impl BlockchainService {
     }
 
     /// Derive order PDA
-    pub fn derive_order_pda(
-        &self,
-        authority: &Pubkey,
-        index: u64,
-    ) -> Result<Pubkey> {
+    pub fn derive_order_pda(&self, authority: &Pubkey, index: u64) -> Result<Pubkey> {
         let (pda, _) = Pubkey::find_program_address(
             &[b"order", authority.as_ref(), &index.to_le_bytes()],
             &self.trading_program_id()?,
@@ -489,14 +572,19 @@ impl BlockchainService {
         // Only authority signs (trade_record is a PDA, not a signer)
         let start = std::time::Instant::now();
         let signers = vec![authority];
-        let res = self.build_and_send_transaction_with_priority(
-            vec![instruction],
-            &signers,
-            "token_transaction",
-        )
-        .await;
+        let res = self
+            .build_and_send_transaction_with_priority(
+                vec![instruction],
+                &signers,
+                "token_transaction",
+            )
+            .await;
 
-        track_blockchain_operation("execute_match_orders", start.elapsed().as_millis() as f64, res.is_ok());
+        track_blockchain_operation(
+            "execute_match_orders",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -523,36 +611,43 @@ impl BlockchainService {
         energy_mint: &Pubkey,
     ) -> Result<Signature> {
         let authority = self.get_authority_keypair().await?;
-        
-        let instruction = self.instruction_builder.build_settle_offchain_match_instruction(
-            market_pubkey,
-            buyer_payload,
-            seller_payload,
-            match_amount,
-            match_price,
-            wheeling_charge,
-            loss_cost,
-            buyer_currency_ata,
-            seller_currency_ata,
-            seller_energy_ata,
-            buyer_energy_ata,
-            fee_collector_ata,
-            wheeling_collector_ata,
-            loss_collector_ata,
-            currency_mint,
-            energy_mint,
-        )?;
+
+        let instruction = self
+            .instruction_builder
+            .build_settle_offchain_match_instruction(
+                market_pubkey,
+                buyer_payload,
+                seller_payload,
+                match_amount,
+                match_price,
+                wheeling_charge,
+                loss_cost,
+                buyer_currency_ata,
+                seller_currency_ata,
+                seller_energy_ata,
+                buyer_energy_ata,
+                fee_collector_ata,
+                wheeling_collector_ata,
+                loss_collector_ata,
+                currency_mint,
+                energy_mint,
+            )?;
 
         let start = std::time::Instant::now();
         let signers = vec![&authority];
-        let res = self.build_and_send_transaction_with_priority(
-            vec![instruction],
-            &signers,
-            "token_transaction",
-        )
-        .await;
+        let res = self
+            .build_and_send_transaction_with_priority(
+                vec![instruction],
+                &signers,
+                "token_transaction",
+            )
+            .await;
 
-        track_blockchain_operation("execute_settle_offchain_match", start.elapsed().as_millis() as f64, res.is_ok());
+        track_blockchain_operation(
+            "execute_settle_offchain_match",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -579,26 +674,27 @@ impl BlockchainService {
         wheeling_charge: u64,
         loss_cost: u64,
     ) -> Result<Instruction> {
-        self.instruction_builder.build_execute_atomic_settlement_instruction(
-            *market_pubkey,
-            *buy_order_pubkey,
-            *sell_order_pubkey,
-            *buyer_currency_escrow,
-            *seller_energy_escrow,
-            *seller_currency_account,
-            *buyer_energy_account,
-            *fee_collector,
-            *wheeling_collector,
-            *loss_collector,
-            *energy_mint,
-            *currency_mint,
-            *escrow_authority,
-            *market_authority,
-            amount,
-            price,
-            wheeling_charge,
-            loss_cost,
-        )
+        self.instruction_builder
+            .build_execute_atomic_settlement_instruction(
+                *market_pubkey,
+                *buy_order_pubkey,
+                *sell_order_pubkey,
+                *buyer_currency_escrow,
+                *seller_energy_escrow,
+                *seller_currency_account,
+                *buyer_energy_account,
+                *fee_collector,
+                *wheeling_collector,
+                *loss_collector,
+                *energy_mint,
+                *currency_mint,
+                *escrow_authority,
+                *market_authority,
+                amount,
+                price,
+                wheeling_charge,
+                loss_cost,
+            )
     }
 
     /// Execute on-chain atomic settlement (energy-for-currency swap)
@@ -652,14 +748,19 @@ impl BlockchainService {
         };
 
         let start = std::time::Instant::now();
-        let res = self.build_and_send_transaction_with_priority(
-            vec![instruction],
-            &signers,
-            "token_transaction",
-        )
-        .await;
+        let res = self
+            .build_and_send_transaction_with_priority(
+                vec![instruction],
+                &signers,
+                "token_transaction",
+            )
+            .await;
 
-        track_blockchain_operation("execute_atomic_settlement", start.elapsed().as_millis() as f64, res.is_ok());
+        track_blockchain_operation(
+            "execute_atomic_settlement",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -671,15 +772,16 @@ impl BlockchainService {
     ) -> Result<Signature> {
         let signers = vec![authority];
         let start = std::time::Instant::now();
-        
-        let res = self.build_and_send_transaction_with_priority(
-            instructions,
-            &signers,
-            "batched_transaction",
-        )
-        .await;
 
-        track_blockchain_operation("batched_transaction", start.elapsed().as_millis() as f64, res.is_ok());
+        let res = self
+            .build_and_send_transaction_with_priority(instructions, &signers, "batched_transaction")
+            .await;
+
+        track_blockchain_operation(
+            "batched_transaction",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -696,7 +798,7 @@ impl BlockchainService {
     ) -> Result<(Signature, String, u64)> {
         let market =
             Pubkey::from_str(market_pubkey).map_err(|e| anyhow!("Invalid market pubkey: {}", e))?;
- 
+
         let start = std::time::Instant::now();
         let build_res = self
             .build_create_order_instruction(
@@ -709,22 +811,32 @@ impl BlockchainService {
                 zone_id,
             )
             .await;
- 
+
         match build_res {
             Ok((instruction, order_pda, index)) => {
                 let signers = vec![authority];
-                let res = self.build_and_send_transaction_with_priority(
-                    vec![instruction],
-                    &signers,
-                    "token_transaction",
-                ).await;
-                
-                track_blockchain_operation("execute_create_order", start.elapsed().as_millis() as f64, res.is_ok());
-                
+                let res = self
+                    .build_and_send_transaction_with_priority(
+                        vec![instruction],
+                        &signers,
+                        "token_transaction",
+                    )
+                    .await;
+
+                track_blockchain_operation(
+                    "execute_create_order",
+                    start.elapsed().as_millis() as f64,
+                    res.is_ok(),
+                );
+
                 Ok((res?, order_pda.to_string(), index))
-            },
+            }
             Err(e) => {
-                track_blockchain_operation("execute_create_order_build", start.elapsed().as_millis() as f64, false);
+                track_blockchain_operation(
+                    "execute_create_order_build",
+                    start.elapsed().as_millis() as f64,
+                    false,
+                );
                 Err(e)
             }
         }
@@ -752,13 +864,19 @@ impl BlockchainService {
 
         let start = std::time::Instant::now();
         let signers = vec![&authority];
-        let res = self.build_and_send_transaction_with_priority(
-            vec![instruction],
-            &signers,
-            "token_transaction",
-        ).await;
+        let res = self
+            .build_and_send_transaction_with_priority(
+                vec![instruction],
+                &signers,
+                "token_transaction",
+            )
+            .await;
 
-        track_blockchain_operation("execute_update_depth", start.elapsed().as_millis() as f64, res.is_ok());
+        track_blockchain_operation(
+            "execute_update_depth",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -770,21 +888,25 @@ impl BlockchainService {
         trade_volume: u64,
     ) -> Result<Signature> {
         let authority = self.get_authority_keypair().await?;
-        let instruction = self.instruction_builder.build_update_price_history_instruction(
-            market_pubkey,
-            trade_price,
-            trade_volume,
-        )?;
+        let instruction = self
+            .instruction_builder
+            .build_update_price_history_instruction(market_pubkey, trade_price, trade_volume)?;
 
         let start = std::time::Instant::now();
         let signers = vec![&authority];
-        let res = self.build_and_send_transaction_with_priority(
-            vec![instruction],
-            &signers,
-            "token_transaction",
-        ).await;
+        let res = self
+            .build_and_send_transaction_with_priority(
+                vec![instruction],
+                &signers,
+                "token_transaction",
+            )
+            .await;
 
-        track_blockchain_operation("execute_update_price_history", start.elapsed().as_millis() as f64, res.is_ok());
+        track_blockchain_operation(
+            "execute_update_price_history",
+            start.elapsed().as_millis() as f64,
+            res.is_ok(),
+        );
         res
     }
 
@@ -801,7 +923,7 @@ impl BlockchainService {
         zone_id: u32,
     ) -> Result<(Instruction, Pubkey, u64)> {
         let market = *market_pubkey;
- 
+
         // Derive zone_market PDA
         let (zone_market_pda, _) = Pubkey::find_program_address(
             &[b"zone_market", market.as_ref(), &zone_id.to_le_bytes()],
@@ -809,14 +931,21 @@ impl BlockchainService {
         );
 
         // Get active orders count from ZoneMarket (since Anchor increments zone_market.active_orders)
-        let active_orders = self.get_zone_market_active_orders(&zone_market_pda).await.unwrap_or(0);
+        let active_orders = self
+            .get_zone_market_active_orders(&zone_market_pda)
+            .await
+            .unwrap_or(0);
 
         // Derive order PDA using 8-byte u64 for index
         let (order_pda, _) = Pubkey::find_program_address(
-            &[b"order", authority.as_ref(), &(active_orders as u64).to_le_bytes()],
+            &[
+                b"order",
+                authority.as_ref(),
+                &(active_orders as u64).to_le_bytes(),
+            ],
             &self.trading_program_id()?,
         );
- 
+
         let instruction = self.instruction_builder.build_create_order_instruction(
             market_pubkey,
             &authority,
@@ -829,7 +958,7 @@ impl BlockchainService {
             authority,
             zone_id,
         )?;
- 
+
         Ok((instruction, order_pda, active_orders as u64))
     }
 
@@ -1000,20 +1129,26 @@ impl BlockchainService {
         amount_kwh: Decimal,
     ) -> Result<Signature> {
         if amount_kwh > Decimal::ZERO {
-            info!("Minting {} kWh tokens for wallet {}", amount_kwh, user_wallet);
+            info!(
+                "Minting {} kWh tokens for wallet {}",
+                amount_kwh, user_wallet
+            );
             self.token_manager
                 .mint_energy_tokens(authority, user_token_account, user_wallet, mint, amount_kwh)
                 .await
         } else if amount_kwh < Decimal::ZERO {
             let burn_amount = amount_kwh.abs();
-            info!("Burning {} kWh tokens from wallet {}", burn_amount, user_wallet);
+            info!(
+                "Burning {} kWh tokens from wallet {}",
+                burn_amount, user_wallet
+            );
             self.token_manager
                 .burn_energy_tokens(authority, user_token_account, mint, burn_amount)
                 .await
         } else {
             // Zero reading, no-op but return successful "signature" placeholder?
             // Or technically this shouldn't happen if validation works.
-            // Let's just return a log and skip. 
+            // Let's just return a log and skip.
             // We need to return a signature though.
             // Returning an error might fail the flow, but zero tokens is valid state.
             // We can return the last signature or a dummy one if we had one.
@@ -1030,7 +1165,10 @@ impl BlockchainService {
         mint: &Pubkey,
         amount_kwh: Decimal,
     ) -> Result<Signature> {
-        info!("Minting {} SPL tokens for wallet {} using CLI", amount_kwh, user_wallet);
+        info!(
+            "Minting {} SPL tokens for wallet {} using CLI",
+            amount_kwh, user_wallet
+        );
         self.token_manager
             .mint_spl_tokens(authority, user_wallet, mint, amount_kwh)
             .await
@@ -1224,7 +1362,14 @@ impl BlockchainService {
         decimals: u8,
     ) -> Result<Signature> {
         self.transaction_handler
-            .lock_tokens_to_escrow(buyer_authority, buyer_ata, escrow_ata, token_mint, amount, decimals)
+            .lock_tokens_to_escrow(
+                buyer_authority,
+                buyer_ata,
+                escrow_ata,
+                token_mint,
+                amount,
+                decimals,
+            )
             .await
     }
 
@@ -1239,7 +1384,14 @@ impl BlockchainService {
         decimals: u8,
     ) -> Result<Signature> {
         self.transaction_handler
-            .release_escrow_to_seller(escrow_authority, escrow_ata, seller_ata, token_mint, amount, decimals)
+            .release_escrow_to_seller(
+                escrow_authority,
+                escrow_ata,
+                seller_ata,
+                token_mint,
+                amount,
+                decimals,
+            )
             .await
     }
 
@@ -1254,7 +1406,14 @@ impl BlockchainService {
         decimals: u8,
     ) -> Result<Signature> {
         self.transaction_handler
-            .refund_escrow_to_buyer(escrow_authority, escrow_ata, buyer_ata, token_mint, amount, decimals)
+            .refund_escrow_to_buyer(
+                escrow_authority,
+                escrow_ata,
+                buyer_ata,
+                token_mint,
+                amount,
+                decimals,
+            )
             .await
     }
 
@@ -1271,18 +1430,27 @@ impl BlockchainService {
         // Get configured mint
         let mint_str = std::env::var("ENERGY_TOKEN_MINT")
             .unwrap_or_else(|_| "2XLTgMue7MHSjZ7A25zmV9xF6ZeBz2LouZt6Y92AtN2H".to_string());
-        let mint = Pubkey::from_str(&mint_str)
-            .map_err(|e| anyhow!("Invalid ENERGY_TOKEN_MINT: {}", e))?;
+        let mint =
+            Pubkey::from_str(&mint_str).map_err(|e| anyhow!("Invalid ENERGY_TOKEN_MINT: {}", e))?;
 
         // Convert atomic amount to UI amount (assuming 9 decimals)
         let amount_kwh = Decimal::from(amount) / Decimal::from(1_000_000_000);
-        
+
         // Ensure ATA exists explicitly
-        let user_token_account = self.ensure_token_account_exists(&authority, user_wallet, &mint).await?;
+        let user_token_account = self
+            .ensure_token_account_exists(&authority, user_wallet, &mint)
+            .await?;
 
         // Use mint_energy_tokens which properly calls the Anchor program via CPI
         // (mint authority is the program's PDA, not the wallet)
-        self.mint_energy_tokens(&authority, &user_token_account, user_wallet, &mint, amount_kwh).await
+        self.mint_energy_tokens(
+            &authority,
+            &user_token_account,
+            user_wallet,
+            &mint,
+            amount_kwh,
+        )
+        .await
     }
 
     pub async fn validate_erc_on_chain(
@@ -1291,10 +1459,11 @@ impl BlockchainService {
         authority: &Keypair,
     ) -> Result<Signature> {
         info!("Validating ERC {} on-chain for trading", certificate_id);
-        let instruction = self.instruction_builder.build_validate_erc_instruction(
-            certificate_id,
-        )?;
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        let instruction = self
+            .instruction_builder
+            .build_validate_erc_instruction(certificate_id)?;
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Update governance configuration on-chain
@@ -1304,33 +1473,43 @@ impl BlockchainService {
         allow_certificate_transfers: bool,
         authority: &Keypair,
     ) -> Result<Signature> {
-        info!("Updating governance config on-chain: validation={}, transfers={}", 
-            erc_validation_enabled, allow_certificate_transfers);
-        let instruction = self.instruction_builder.build_update_governance_config_instruction(
-            erc_validation_enabled,
-            allow_certificate_transfers,
-        )?;
-        self.build_and_send_transaction(vec![instruction], &[authority]).await
+        info!(
+            "Updating governance config on-chain: validation={}, transfers={}",
+            erc_validation_enabled, allow_certificate_transfers
+        );
+        let instruction = self
+            .instruction_builder
+            .build_update_governance_config_instruction(
+                erc_validation_enabled,
+                allow_certificate_transfers,
+            )?;
+        self.build_and_send_transaction(vec![instruction], &[authority])
+            .await
     }
 
     /// Check if an ERC certificate is already validated for trading
     pub async fn is_erc_validated(&self, certificate_id: &str) -> Result<bool> {
-        let pda = self.instruction_builder.get_erc_certificate_pubkey(certificate_id)?;
-        
+        let pda = self
+            .instruction_builder
+            .get_erc_certificate_pubkey(certificate_id)?;
+
         // Use result from get_account_data
         let data: Vec<u8> = self.on_chain_manager.get_account_data(&pda).await?;
-        
+
         // Offset 486 is validated_for_trading bool in ErcCertificate
-        // Account structure: Discriminator(8) + cert_id(64) + id_len(1) + 
+        // Account structure: Discriminator(8) + cert_id(64) + id_len(1) +
         // authority(32) + owner(32) + amount(8) + source(64) + source_len(1) +
         // validation_data(256) + data_len(2) + issued_at(8) + expires_at(9) + status(1) + validated(1)
         // 8+64+1+32+32+8+64+1+256+2+8+9+1 = 486
-        
+
         if data.len() <= 486 {
-            debug!("Account data too short for ERC certificate or account empty: {} bytes", data.len());
+            debug!(
+                "Account data too short for ERC certificate or account empty: {} bytes",
+                data.len()
+            );
             return Ok(false);
         }
-        
+
         Ok(data[486] != 0)
     }
 

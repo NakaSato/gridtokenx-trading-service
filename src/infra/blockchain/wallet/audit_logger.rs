@@ -1,5 +1,4 @@
 use anyhow::Result;
-use ipnetwork::IpNetwork;
 use serde_json::json;
 use sqlx::PgPool;
 use std::net::IpAddr;
@@ -118,25 +117,20 @@ impl WalletAuditLogger {
         error_message: Option<String>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
-        let ip_network = ip_address.map(|ip| match ip {
-            IpAddr::V4(ipv4) => IpNetwork::V4(ipv4.into()),
-            IpAddr::V6(ipv6) => IpNetwork::V6(ipv6.into()),
-        });
-
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             INSERT INTO wallet_audit_log
                 (user_id, operation, success, ip_address, user_agent, error_message, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
-            user_id,
-            operation,
-            success,
-            ip_network as Option<IpNetwork>,
-            user_agent,
-            error_message,
-            metadata
         )
+        .bind(user_id)
+        .bind(operation)
+        .bind(success)
+        .bind(ip_address.map(|ip| ip.to_string()))
+        .bind(&user_agent)
+        .bind(&error_message)
+        .bind(&metadata)
         .execute(&self.db)
         .await;
 
@@ -179,7 +173,7 @@ impl WalletAuditLogger {
             WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT $2
-            "#
+            "#,
         )
         .bind(user_id)
         .bind(limit)
@@ -190,7 +184,7 @@ impl WalletAuditLogger {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
 pub struct WalletAuditEntry {
     pub id: Uuid,
     pub user_id: Uuid,

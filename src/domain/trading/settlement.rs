@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-use uuid::Uuid;
 use sqlx::{PgPool, Row};
+use std::str::FromStr;
 use tracing::info;
 use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::core::error::{ApiError, Result};
 use crate::domain::trading::clearing::TradeMatch;
@@ -89,21 +89,21 @@ use solana_sdk::pubkey::Pubkey;
 /// Settlement service configuration
 #[derive(Debug, Clone)]
 pub struct SettlementConfig {
-    pub fee_rate: Decimal,            
-    pub min_confirmation_blocks: u64, 
-    pub retry_attempts: u32,          
-    pub retry_delay_secs: u64,        
-    pub enable_real_blockchain: bool, 
+    pub fee_rate: Decimal,
+    pub min_confirmation_blocks: u64,
+    pub retry_attempts: u32,
+    pub retry_delay_secs: u64,
+    pub enable_real_blockchain: bool,
 }
 
 impl Default for SettlementConfig {
     fn default() -> Self {
         Self {
-            fee_rate: Decimal::from_str("0.01").expect("valid hardcoded decimal 0.01"), 
-            min_confirmation_blocks: 32,                  
+            fee_rate: Decimal::from_str("0.01").expect("valid hardcoded decimal 0.01"),
+            min_confirmation_blocks: 32,
             retry_attempts: 3,
             retry_delay_secs: 5,
-            enable_real_blockchain: true, 
+            enable_real_blockchain: true,
         }
     }
 }
@@ -149,27 +149,33 @@ impl SettlementManager {
 
     /// Create a settlement record from a trade match (Business Logic)
     pub async fn create_settlement_record(&self, trade: &TradeMatch) -> Result<Settlement> {
-        info!("Creating settlement record for trade match: {} (Match: {})", trade.id, trade.match_id);
+        info!(
+            "Creating settlement record for trade match: {} (Match: {})",
+            trade.id, trade.match_id
+        );
 
         let total_value = trade.total_value;
         let fee_rate = self.config.fee_rate;
-        
+
         let loss_cost = trade.loss_cost;
         let wheeling_charge = trade.wheeling_charge;
-        
+
         let seller_base_price_total = total_value - wheeling_charge - loss_cost;
         let fee_amount = seller_base_price_total * fee_rate;
         let net_amount = seller_base_price_total - fee_amount;
-        
+
         if net_amount < Decimal::ZERO {
-            return Err(ApiError::BadRequest(format!("Settlement would result in negative seller balance: net={}", net_amount)));
+            return Err(ApiError::BadRequest(format!(
+                "Settlement would result in negative seller balance: net={}",
+                net_amount
+            )));
         }
 
         let effective_energy = trade.quantity * (Decimal::ONE - trade.loss_factor);
-        
+
         let settlement_ulid = Ulid::new();
         let settlement_id = Uuid::from_bytes(settlement_ulid.to_bytes());
-        
+
         let settlement = Settlement {
             id: settlement_id,
             trade_id: trade.id,
@@ -178,7 +184,7 @@ impl SettlementManager {
             buy_order_id: trade.buy_order_id,
             sell_order_id: trade.sell_order_id,
             energy_amount: trade.quantity,
-            price: trade.price, 
+            price: trade.price,
             total_value,
             fee_amount,
             net_amount,
@@ -302,7 +308,7 @@ impl SettlementManager {
             AND (next_retry_at IS NULL OR next_retry_at <= NOW())
             ORDER BY created_at ASC 
             LIMIT 100
-            "#
+            "#,
         )
         .fetch_all(&self.db)
         .await
@@ -312,7 +318,7 @@ impl SettlementManager {
     }
 
     pub async fn update_settlement_status(&self, id: Uuid, status: SettlementStatus) -> Result<()> {
-        sqlx::query!("UPDATE settlements SET status = $1, updated_at = NOW() WHERE id = $2")
+        sqlx::query("UPDATE settlements SET status = $1, updated_at = NOW() WHERE id = $2")
             .bind(status.to_string())
             .bind(id)
             .execute(&self.db)
@@ -325,7 +331,7 @@ impl SettlementManager {
     pub async fn mark_settlement_failed(&self, id: Uuid, error_message: &str) -> Result<()> {
         let max_retries = self.config.retry_attempts as i32;
         let base_delay = self.config.retry_delay_secs as i32;
-        
+
         let result = sqlx::query(
             r#"
             UPDATE settlements
@@ -344,7 +350,7 @@ impl SettlementManager {
                 updated_at = NOW()
             WHERE id = $4
             RETURNING status, retry_count, next_retry_at
-            "#
+            "#,
         )
         .bind(max_retries)
         .bind(base_delay)
@@ -358,12 +364,20 @@ impl SettlementManager {
             let status: String = row.get("status");
             let retry_count: i32 = row.get("retry_count");
             if status == "failed" {
-                tracing::error!("❌ Settlement {} PERMANENTLY FAILED after {} attempts: {}", id, retry_count, error_message);
+                tracing::error!(
+                    "❌ Settlement {} PERMANENTLY FAILED after {} attempts: {}",
+                    id,
+                    retry_count,
+                    error_message
+                );
             } else {
                 let next_retry: Option<DateTime<Utc>> = row.get("next_retry_at");
                 tracing::warn!(
-                    "⚠️ Settlement {} failed (Attempt {}). Retrying at {:?}: {}", 
-                    id, retry_count, next_retry, error_message
+                    "⚠️ Settlement {} failed (Attempt {}). Retrying at {:?}: {}",
+                    id,
+                    retry_count,
+                    next_retry,
+                    error_message
                 );
             }
         }
@@ -451,32 +465,52 @@ impl SettlementManager {
             let sell_order_index: Option<i64> = row.get("sell_order_index");
 
             // PDA fallback derivation logic if missing in DB
-            let mut buy_order_pda = buy_order_pda_str.and_then(|s| Pubkey::from_str(&s).ok()).unwrap_or_default();
-            let mut sell_order_pda = sell_order_pda_str.and_then(|s| Pubkey::from_str(&s).ok()).unwrap_or_default();
-
-            let trading_program_id = Pubkey::from_str(&std::env::var("SOLANA_TRADING_PROGRAM_ID")
-                .unwrap_or_else(|_| "3iFReh5tvdWkLt7eJcvGKsST7wcwZsSHk3z3xCfUwHLw".to_string()))
+            let mut buy_order_pda = buy_order_pda_str
+                .and_then(|s| Pubkey::from_str(&s).ok())
+                .unwrap_or_default();
+            let mut sell_order_pda = sell_order_pda_str
+                .and_then(|s| Pubkey::from_str(&s).ok())
                 .unwrap_or_default();
 
+            let trading_program_id = Pubkey::from_str(
+                &std::env::var("SOLANA_TRADING_PROGRAM_ID")
+                    .unwrap_or_else(|_| "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string()),
+            )
+            .unwrap_or_default();
+
             if buy_order_pda == Pubkey::default() {
-                if let (Some(idx), Ok(buyer_wallet)) = (buy_order_index, Pubkey::from_str(&buyer_wallet_str)) {
+                if let (Some(idx), Ok(buyer_wallet)) =
+                    (buy_order_index, Pubkey::from_str(&buyer_wallet_str))
+                {
                     let (pda, _) = Pubkey::find_program_address(
                         &[b"order", buyer_wallet.as_ref(), &(idx as u64).to_le_bytes()],
                         &trading_program_id,
                     );
                     buy_order_pda = pda;
-                    info!("Re-derived Buy Order PDA: {} for order {}", buy_order_pda, settlement.buy_order_id);
+                    info!(
+                        "Re-derived Buy Order PDA: {} for order {}",
+                        buy_order_pda, settlement.buy_order_id
+                    );
                 }
             }
 
             if sell_order_pda == Pubkey::default() {
-                if let (Some(idx), Ok(seller_wallet)) = (sell_order_index, Pubkey::from_str(&seller_wallet_str)) {
+                if let (Some(idx), Ok(seller_wallet)) =
+                    (sell_order_index, Pubkey::from_str(&seller_wallet_str))
+                {
                     let (pda, _) = Pubkey::find_program_address(
-                        &[b"order", seller_wallet.as_ref(), &(idx as u64).to_le_bytes()],
+                        &[
+                            b"order",
+                            seller_wallet.as_ref(),
+                            &(idx as u64).to_le_bytes(),
+                        ],
                         &trading_program_id,
                     );
                     sell_order_pda = pda;
-                    info!("Re-derived Sell Order PDA: {} for order {}", sell_order_pda, settlement.sell_order_id);
+                    info!(
+                        "Re-derived Sell Order PDA: {} for order {}",
+                        sell_order_pda, settlement.sell_order_id
+                    );
                 }
             }
 
@@ -493,7 +527,12 @@ impl SettlementManager {
         Ok(contexts)
     }
 
-    pub async fn update_settlement_confirmed(&self, id: Uuid, tx_signature: &str, status: SettlementStatus) -> Result<()> {
+    pub async fn update_settlement_confirmed(
+        &self,
+        id: Uuid,
+        tx_signature: &str,
+        status: SettlementStatus,
+    ) -> Result<()> {
         sqlx::query(
             "UPDATE settlements SET status = $1, transaction_hash = $2, processed_at = NOW(), updated_at = NOW() WHERE id = $3"
         )
@@ -506,9 +545,14 @@ impl SettlementManager {
         Ok(())
     }
 
-    pub async fn update_settlement_erc(&self, id: Uuid, erc_certificate_id: &str, erc_transfer_tx: &str) -> Result<()> {
+    pub async fn update_settlement_erc(
+        &self,
+        id: Uuid,
+        erc_certificate_id: &str,
+        erc_transfer_tx: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE settlements SET erc_certificate_id = $1, erc_transfer_tx = $2 WHERE id = $3"
+            "UPDATE settlements SET erc_certificate_id = $1, erc_transfer_tx = $2 WHERE id = $3",
         )
         .bind(erc_certificate_id)
         .bind(erc_transfer_tx)
@@ -522,23 +566,42 @@ impl SettlementManager {
     pub async fn finalize_escrow(&self, settlement: &Settlement) -> Result<()> {
         let mut tx = self.db.begin().await.map_err(ApiError::Database)?;
 
-        sqlx::query!("UPDATE users SET locked_energy = GREATEST(0, locked_energy - $1) WHERE id = $2", settlement.energy_amount, settlement.seller_id)
-            .execute(&mut *tx).await.map_err(ApiError::Database)?;
+        sqlx::query(
+            "UPDATE users SET locked_energy = GREATEST(0, locked_energy - $1) WHERE id = $2",
+        )
+        .bind(settlement.energy_amount)
+        .bind(settlement.seller_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Database)?;
 
-        sqlx::query!("UPDATE users SET locked_amount = GREATEST(0, locked_amount - $1) WHERE id = $2", settlement.total_value, settlement.buyer_id)
-            .execute(&mut *tx).await.map_err(ApiError::Database)?;
+        sqlx::query(
+            "UPDATE users SET locked_amount = GREATEST(0, locked_amount - $1) WHERE id = $2",
+        )
+        .bind(settlement.total_value)
+        .bind(settlement.buyer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Database)?;
 
-        sqlx::query!("UPDATE users SET balance = balance + $1 WHERE id = $2", settlement.net_amount, settlement.seller_id)
-            .execute(&mut *tx).await.map_err(ApiError::Database)?;
+        sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
+            .bind(settlement.net_amount)
+            .bind(settlement.seller_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::Database)?;
 
         if settlement.fee_amount > Decimal::ZERO {
-            sqlx::query!("INSERT INTO platform_revenue (settlement_id, amount, revenue_type, description) VALUES ($1, $2, 'platform_fee', $3)",
-                settlement.id, settlement.fee_amount, format!("Platform fee for settlement {}", settlement.id))
+            sqlx::query("INSERT INTO platform_revenue (settlement_id, amount, revenue_type, description) VALUES ($1, $2, 'platform_fee', $3)")
+                .bind(settlement.id)
+                .bind(settlement.fee_amount)
+                .bind(format!("Platform fee for settlement {}", settlement.id))
                 .execute(&mut *tx).await.map_err(ApiError::Database)?;
         }
 
-        sqlx::query!("UPDATE escrow_records SET status = 'released', updated_at = NOW() WHERE order_id IN ($1, $2) AND status = 'locked'",
-            settlement.buy_order_id, settlement.sell_order_id)
+        sqlx::query("UPDATE escrow_records SET status = 'released', updated_at = NOW() WHERE order_id IN ($1, $2) AND status = 'locked'")
+            .bind(settlement.buy_order_id)
+            .bind(settlement.sell_order_id)
             .execute(&mut *tx).await.map_err(ApiError::Database)?;
 
         tx.commit().await.map_err(ApiError::Database)?;

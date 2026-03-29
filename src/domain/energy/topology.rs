@@ -1,5 +1,5 @@
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -35,7 +35,7 @@ impl GridPricingConfig {
         let mut zone_wheeling = HashMap::new();
         zone_wheeling.insert(0, Decimal::from_f64(0.50).unwrap_or_default());
         zone_wheeling.insert(1, Decimal::from_f64(1.00).unwrap_or_default());
-        
+
         let mut zone_loss = HashMap::new();
         zone_loss.insert(0, Decimal::from_f64(0.01).unwrap_or_default());
         zone_loss.insert(1, Decimal::from_f64(0.03).unwrap_or_default());
@@ -77,20 +77,29 @@ pub struct GridTopologyService {
     pricing_config: Arc<RwLock<GridPricingConfig>>,
 }
 
+impl Default for GridTopologyService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GridTopologyService {
     pub fn new() -> Self {
         let mut branches = HashMap::new();
-        
+
         // Initialize default constraints (Zone 1 <-> Zone 2 <-> Zone 3 ...)
         // This simulates a linear feeder.
         for i in 1..10 {
             let key = format!("{}-{}", i, i + 1);
-            branches.insert(key, BranchSegment {
-                from_zone: i,
-                to_zone: i + 1,
-                capacity_kwh: Decimal::from(1000), // Default 1MWh capacity
-                current_flow_kwh: Decimal::ZERO,
-            });
+            branches.insert(
+                key,
+                BranchSegment {
+                    from_zone: i,
+                    to_zone: i + 1,
+                    capacity_kwh: Decimal::from(1000), // Default 1MWh capacity
+                    current_flow_kwh: Decimal::ZERO,
+                },
+            );
         }
 
         Self {
@@ -109,13 +118,16 @@ impl GridTopologyService {
     /// Parses keys like `wheeling.zone_1_3` and `loss.zone_2_5` into zone-pair maps
     pub async fn load_zone_pair_overrides(&self, config_values: &HashMap<String, Decimal>) {
         let mut pricing = self.pricing_config.write().await;
-        
+
         for (key, value) in config_values {
             // Parse wheeling.zone_X_Y
             if let Some(zones) = key.strip_prefix("wheeling.zone_") {
                 if let Some((from_str, to_str)) = zones.split_once('_') {
                     if let (Ok(from), Ok(to)) = (from_str.parse::<i32>(), to_str.parse::<i32>()) {
-                        debug!("Loaded zone-pair wheeling override ({},{}) = {}", from, to, value);
+                        debug!(
+                            "Loaded zone-pair wheeling override ({},{}) = {}",
+                            from, to, value
+                        );
                         pricing.zone_pair_wheeling.insert((from, to), *value);
                     }
                 }
@@ -124,7 +136,10 @@ impl GridTopologyService {
             if let Some(zones) = key.strip_prefix("loss.zone_") {
                 if let Some((from_str, to_str)) = zones.split_once('_') {
                     if let (Ok(from), Ok(to)) = (from_str.parse::<i32>(), to_str.parse::<i32>()) {
-                        debug!("Loaded zone-pair loss override ({},{}) = {}", from, to, value);
+                        debug!(
+                            "Loaded zone-pair loss override ({},{}) = {}",
+                            from, to, value
+                        );
                         pricing.zone_pair_loss.insert((from, to), *value);
                     }
                 }
@@ -141,12 +156,17 @@ impl GridTopologyService {
     }
 
     /// Check if a trade of `amount` from `src` to `dst` is physically possible
-    pub async fn can_accommodate_flow(&self, from_zone: Option<i32>, to_zone: Option<i32>, amount: Decimal) -> bool {
+    pub async fn can_accommodate_flow(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+        amount: Decimal,
+    ) -> bool {
         match (from_zone, to_zone) {
             (Some(sz), Some(dz)) if sz != dz => {
                 let branches = self.branches.read().await;
                 let path = self.get_path(sz, dz);
-                
+
                 for key in path {
                     if let Some(segment) = branches.get(&key) {
                         if segment.current_flow_kwh + amount > segment.capacity_kwh {
@@ -154,7 +174,7 @@ impl GridTopologyService {
                         }
                     } else {
                         // Unknown segment, assume high risk/limited capacity
-                        return false; 
+                        return false;
                     }
                 }
                 true
@@ -169,7 +189,7 @@ impl GridTopologyService {
             (Some(sz), Some(dz)) if sz != dz => {
                 let mut branches = self.branches.write().await;
                 let path = self.get_path(sz, dz);
-                
+
                 for key in path {
                     if let Some(segment) = branches.get_mut(&key) {
                         segment.current_flow_kwh += amount;
@@ -184,7 +204,7 @@ impl GridTopologyService {
     fn get_path(&self, sz: i32, dz: i32) -> Vec<String> {
         let mut path = Vec::new();
         let (start, end) = if sz < dz { (sz, dz) } else { (dz, sz) };
-        
+
         for i in start..end {
             path.push(format!("{}-{}", i, i + 1));
         }
@@ -193,13 +213,19 @@ impl GridTopologyService {
 
     /// Calculate wheeling charge (transmission fee) in THB per kWh
     /// Priority: zone-pair override → distance-based → defaults
-    pub async fn calculate_wheeling_charge(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> Decimal {
+    pub async fn calculate_wheeling_charge(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
         let config = self.pricing_config.read().await;
-        
+
         match (from_zone, to_zone) {
             (Some(mz), Some(bz)) => {
                 // 1. Check zone-pair specific override (both directions)
-                if let Some(&charge) = config.zone_pair_wheeling.get(&(mz, bz))
+                if let Some(&charge) = config
+                    .zone_pair_wheeling
+                    .get(&(mz, bz))
                     .or_else(|| config.zone_pair_wheeling.get(&(bz, mz)))
                 {
                     debug!("Zone-pair wheeling override ({},{}): {}", mz, bz, charge);
@@ -221,14 +247,18 @@ impl GridTopologyService {
                     }
                 }
             }
-            _ => config.wheeling_fallback
+            _ => config.wheeling_fallback,
         }
     }
 
     /// Legacy sync version for backward compatibility (uses defaults)
-    pub fn calculate_wheeling_charge_sync(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> Decimal {
+    pub fn calculate_wheeling_charge_sync(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
         let config = GridPricingConfig::with_defaults();
-        
+
         match (from_zone, to_zone) {
             (Some(mz), Some(bz)) => {
                 if mz == bz {
@@ -245,19 +275,25 @@ impl GridTopologyService {
                     }
                 }
             }
-            _ => config.wheeling_fallback
+            _ => config.wheeling_fallback,
         }
     }
 
     /// Calculate technical loss (%)
     /// Priority: zone-pair override → distance-based → defaults
-    pub async fn calculate_loss_factor(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> Decimal {
+    pub async fn calculate_loss_factor(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
         let config = self.pricing_config.read().await;
-        
+
         match (from_zone, to_zone) {
             (Some(mz), Some(bz)) => {
                 // 1. Check zone-pair specific override (both directions)
-                if let Some(&loss) = config.zone_pair_loss.get(&(mz, bz))
+                if let Some(&loss) = config
+                    .zone_pair_loss
+                    .get(&(mz, bz))
                     .or_else(|| config.zone_pair_loss.get(&(bz, mz)))
                 {
                     debug!("Zone-pair loss override ({},{}): {}", mz, bz, loss);
@@ -280,14 +316,18 @@ impl GridTopologyService {
                     }
                 }
             }
-            _ => Decimal::from_f64(0.05).unwrap_or_default()
+            _ => Decimal::from_f64(0.05).unwrap_or_default(),
         }
     }
 
     /// Legacy sync version for backward compatibility (uses defaults)
-    pub fn calculate_loss_factor_sync(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> Decimal {
+    pub fn calculate_loss_factor_sync(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
         let config = GridPricingConfig::with_defaults();
-        
+
         match (from_zone, to_zone) {
             (Some(mz), Some(bz)) => {
                 if mz == bz {
@@ -305,12 +345,17 @@ impl GridTopologyService {
                     }
                 }
             }
-            _ => Decimal::from_f64(0.05).unwrap_or_default()
+            _ => Decimal::from_f64(0.05).unwrap_or_default(),
         }
     }
 
     /// Calculate actual cost of losses
-    pub fn calculate_loss_cost(&self, energy_amount: Decimal, price: Decimal, loss_factor: Decimal) -> Decimal {
+    pub fn calculate_loss_cost(
+        &self,
+        energy_amount: Decimal,
+        price: Decimal,
+        loss_factor: Decimal,
+    ) -> Decimal {
         energy_amount * price * loss_factor
     }
 }

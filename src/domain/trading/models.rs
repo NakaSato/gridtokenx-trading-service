@@ -33,7 +33,7 @@ pub struct TradingOrder {
     pub session_token: Option<String>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct TradingOrderDb {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -94,9 +94,9 @@ pub struct EscrowRecord {
     pub order_id: Option<Uuid>,
     #[schema(value_type = String)]
     pub amount: Decimal,
-    pub asset_type: String, // 'currency', 'energy'
+    pub asset_type: String,  // 'currency', 'energy'
     pub escrow_type: String, // 'buy_lock', 'sell_lock'
-    pub status: String, // 'locked', 'released', 'refunded'
+    pub status: String,      // 'locked', 'released', 'refunded'
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -105,10 +105,10 @@ pub struct EscrowRecord {
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateOrderRequest {
     pub side: OrderSide,
-    
+
     #[schema(value_type = String, example = "10.5")]
     pub energy_amount: Decimal,
-    
+
     #[schema(value_type = String, example = "0.15")]
     pub price_per_kwh: Option<Decimal>,
 
@@ -122,7 +122,7 @@ pub struct CreateOrderRequest {
 
     /// HMAC-SHA256 signature of the order parameters
     pub signature: Option<String>,
-    
+
     /// Timestamp of when the signature was created
     pub timestamp: Option<i64>,
 
@@ -135,25 +135,25 @@ pub struct RelayOrderRequest {
     /// 16-byte UUID hex string (32 chars)
     #[validate(length(equal = 32))]
     pub order_id: String,
-    
+
     /// User's Solana public key (Base58)
     pub user_pubkey: String,
-    
+
     /// Energy amount in base units
     pub energy_amount: u64,
-    
+
     /// Price per kWh in base units
     pub price_per_kwh: u64,
-    
+
     /// 0 = Buy, 1 = Sell
     pub side: u8,
-    
+
     /// Grid zone ID
     pub zone_id: u32,
-    
+
     /// Expiration timestamp (seconds)
     pub expires_at: i64,
-    
+
     /// Ed25519 signature (Base58)
     pub signature: String,
 }
@@ -256,26 +256,26 @@ impl std::fmt::Display for TriggerStatus {
 pub struct CreateConditionalOrderRequest {
     /// Order side (buy/sell)
     pub side: OrderSide,
-    
+
     /// Amount of energy to trade
     #[schema(value_type = String, example = "10.5")]
     pub energy_amount: Decimal,
-    
+
     /// Price that triggers the order execution
     #[schema(value_type = String, example = "0.10")]
     pub trigger_price: Decimal,
-    
+
     /// Type of conditional order
     pub trigger_type: TriggerType,
-    
+
     /// Optional limit price for the order after triggering (if not set, uses market order)
     #[schema(value_type = String, example = "0.09")]
     pub limit_price: Option<Decimal>,
-    
+
     /// For trailing stop: the offset from peak price
     #[schema(value_type = String, example = "0.02")]
     pub trailing_offset: Option<Decimal>,
-    
+
     /// Optional expiry time for the conditional order
     pub expiry_time: Option<DateTime<Utc>>,
 
@@ -368,31 +368,31 @@ impl std::fmt::Display for RecurringStatus {
 pub struct CreateRecurringOrderRequest {
     /// Order side (buy/sell)
     pub side: OrderSide,
-    
+
     /// Amount of energy per execution
     #[schema(value_type = String, example = "10.0")]
     pub energy_amount: Decimal,
-    
+
     /// Max price for buy orders
     #[schema(value_type = String, example = "0.20")]
     pub max_price_per_kwh: Option<Decimal>,
-    
+
     /// Min price for sell orders
     #[schema(value_type = String, example = "0.10")]
     pub min_price_per_kwh: Option<Decimal>,
-    
+
     /// Interval type (hourly, daily, weekly, monthly)
     pub interval_type: IntervalType,
-    
+
     /// Execute every N intervals (default: 1)
     pub interval_value: Option<i32>,
-    
+
     /// Maximum number of executions (null = unlimited)
     pub max_executions: Option<i32>,
-    
+
     /// User-friendly name for this order
     pub name: Option<String>,
-    
+
     /// Optional description
     pub description: Option<String>,
 

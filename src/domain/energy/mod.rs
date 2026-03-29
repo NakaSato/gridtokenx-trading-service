@@ -1,5 +1,5 @@
 pub mod analyzer;
 pub mod topology;
 
-pub use analyzer::{check_alerts, calculate_health_score, MeterAlert, AlertSeverity};
-pub use topology::{GridTopologyService, GridPricingConfig};
+pub use analyzer::{calculate_health_score, check_alerts, AlertSeverity, MeterAlert};
+pub use topology::{GridPricingConfig, GridTopologyService};

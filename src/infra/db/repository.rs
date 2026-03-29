@@ -344,25 +344,16 @@ pub struct Transaction<'a> {
 
 impl<'a> Transaction<'a> {
     pub async fn begin(pool: &'a PgPool) -> crate::core::error::Result<Self> {
-        let tx = pool
-            .begin()
-            .await
-            .map_err(ApiError::from)?;
+        let tx = pool.begin().await.map_err(ApiError::from)?;
         Ok(Self { tx })
     }
 
     pub async fn commit(self) -> crate::core::error::Result<()> {
-        self.tx
-            .commit()
-            .await
-            .map_err(ApiError::from)
+        self.tx.commit().await.map_err(ApiError::from)
     }
 
     pub async fn rollback(self) -> crate::core::error::Result<()> {
-        self.tx
-            .rollback()
-            .await
-            .map_err(ApiError::from)
+        self.tx.rollback().await.map_err(ApiError::from)
     }
 
     pub fn inner(&mut self) -> &mut sqlx::Transaction<'a, sqlx::Postgres> {
@@ -419,7 +410,7 @@ mod tests {
     fn test_paged_result() {
         let pagination = Pagination::new(2, 10);
         let result: PagedResult<i32> = PagedResult::new(vec![1, 2, 3], 25, &pagination);
-        
+
         assert_eq!(result.total, 25);
         assert_eq!(result.page, 2);
         assert_eq!(result.total_pages, 3);

@@ -31,7 +31,7 @@ pub struct OrderMatch {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TradeMatch {
-    pub id: Uuid, // Unique ID for this trade event
+    pub id: Uuid,       // Unique ID for this trade event
     pub match_id: Uuid, // Reference to OrderMatch
     pub epoch_id: Uuid,
     pub buyer_id: Uuid,
@@ -86,8 +86,8 @@ pub struct OrderBookEntry {
     pub order_id: Uuid,
     pub user_id: Uuid,
     pub side: OrderSide,
-    pub energy_amount: Decimal,        // Remaining amount
-    pub original_amount: Decimal,      // Original order amount
+    pub energy_amount: Decimal,   // Remaining amount
+    pub original_amount: Decimal, // Original order amount
     pub price_per_kwh: Decimal,
     pub created_at: DateTime<Utc>,
     pub zone_id: Option<i32>,

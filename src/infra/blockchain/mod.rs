@@ -1,7 +1,7 @@
 pub mod rpc;
-pub mod wallet;
 pub mod settlement;
+pub mod wallet;
 
 pub use rpc::service::BlockchainService;
-pub use wallet::service::WalletService;
 pub use settlement::BlockchainSettlementProvider;
+pub use wallet::service::WalletService;

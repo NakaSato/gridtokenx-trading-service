@@ -1,9 +1,9 @@
 use anyhow::Result;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature, Signer};
 use std::str::FromStr;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use tracing::info;
 
 use crate::infra::blockchain::rpc::account_management::AccountManager; // Dependency
@@ -45,25 +45,30 @@ impl TokenManager {
         user_wallet: &Pubkey,
         mint: &Pubkey,
     ) -> Result<Pubkey> {
-        let token_program_id = self.transaction_handler.get_token_program_for_mint(mint).await?;
-        let ata_address = spl_associated_token_account::get_associated_token_address_with_program_id(
-            user_wallet,
-            mint,
-            &token_program_id,
-        );
+        let token_program_id = self
+            .transaction_handler
+            .get_token_program_for_mint(mint)
+            .await?;
+        let ata_address =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                user_wallet,
+                mint,
+                &token_program_id,
+            );
 
         if self.account_manager.account_exists(&ata_address).await? {
             return Ok(ata_address);
         }
 
         info!("Creating ATA {} for user {}...", ata_address, user_wallet);
-        
-        let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
-            &authority.pubkey(),
-            user_wallet,
-            mint,
-            &token_program_id,
-        );
+
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &authority.pubkey(),
+                user_wallet,
+                mint,
+                &token_program_id,
+            );
 
         self.transaction_handler
             .build_and_send_transaction_with_priority(
@@ -87,34 +92,33 @@ impl TokenManager {
         amount_kwh: Decimal,
     ) -> Result<Signature> {
         let token_program_id = BlockchainUtils::get_token_program_id()?;
-        
+
         // Derive the mint PDA from energy_token program
         let energy_token_program_id = std::env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
             .unwrap_or_else(|_| "GzEcWzkb73zcgvgoNRxEiuuT7CEAbzbHcAgjNV25pbLV".to_string());
         let energy_token_program_id = Pubkey::from_str(&energy_token_program_id)?;
 
-        let (mint_pda, _) = Pubkey::find_program_address(
-            &[b"mint_2022"],
-            &energy_token_program_id,
-        );
+        let (mint_pda, _) = Pubkey::find_program_address(&[b"mint_2022"], &energy_token_program_id);
 
         // Calculate ATA for the user
-        let user_token_account = spl_associated_token_account::get_associated_token_address_with_program_id(
-            user_wallet,
-            &mint_pda,
-            &token_program_id,
-        );
+        let user_token_account =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                user_wallet,
+                &mint_pda,
+                &token_program_id,
+            );
 
         // Build instructions
         let mut instructions = Vec::new();
 
         // 1. Create ATA if it doesn't exist (idempotent)
-        let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-            &authority.pubkey(),
-            user_wallet,
-            &mint_pda,
-            &token_program_id,
-        );
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &authority.pubkey(),
+                user_wallet,
+                &mint_pda,
+                &token_program_id,
+            );
         instructions.push(create_ata_ix);
 
         // 2. Build the Anchor mint_tokens_direct instruction via BlockchainUtils
@@ -129,11 +133,7 @@ impl TokenManager {
 
         let signers = vec![authority];
         self.transaction_handler
-            .build_and_send_transaction_with_priority(
-                instructions,
-                &signers,
-                "token_transaction",
-            )
+            .build_and_send_transaction_with_priority(instructions, &signers, "token_transaction")
             .await
     }
 
@@ -145,11 +145,18 @@ impl TokenManager {
         mint: &Pubkey,
         amount: Decimal,
     ) -> Result<Signature> {
-        let token_program_id = self.transaction_handler.get_token_program_for_mint(mint).await?;
-        let ata_address = self.ensure_token_account_exists(authority, user_wallet, mint).await?;
-        
+        let token_program_id = self
+            .transaction_handler
+            .get_token_program_for_mint(mint)
+            .await?;
+        let ata_address = self
+            .ensure_token_account_exists(authority, user_wallet, mint)
+            .await?;
+
         // Convert to raw amount (assuming 9 decimals for energy tokens)
-        let amount_u64 = (amount.abs() * Decimal::from(1_000_000_000)).to_u64().unwrap_or(0);
+        let amount_u64 = (amount.abs() * Decimal::from(1_000_000_000))
+            .to_u64()
+            .unwrap_or(0);
 
         let ix = if amount >= Decimal::ZERO {
             info!("Minting {} tokens to {}...", amount, user_wallet);
@@ -174,11 +181,7 @@ impl TokenManager {
         };
 
         self.transaction_handler
-            .build_and_send_transaction_with_priority(
-                vec![ix],
-                &[authority],
-                "token_transaction",
-            )
+            .build_and_send_transaction_with_priority(vec![ix], &[authority], "token_transaction")
             .await
     }
 
@@ -192,7 +195,10 @@ impl TokenManager {
         amount: u64,
         decimals: u8,
     ) -> Result<Signature> {
-        let token_program_id = self.transaction_handler.get_token_program_for_mint(mint).await?;
+        let token_program_id = self
+            .transaction_handler
+            .get_token_program_for_mint(mint)
+            .await?;
 
         let ix = spl_token::instruction::transfer_checked(
             &token_program_id,
@@ -206,11 +212,7 @@ impl TokenManager {
         )?;
 
         self.transaction_handler
-            .build_and_send_transaction_with_priority(
-                vec![ix],
-                &[authority],
-                "token_transaction",
-            )
+            .build_and_send_transaction_with_priority(vec![ix], &[authority], "token_transaction")
             .await
     }
 
@@ -247,7 +249,9 @@ impl TokenManager {
         mint: &Pubkey,
         amount_kwh: Decimal,
     ) -> Result<Signature> {
-        let amount_u64 = (amount_kwh.abs() * Decimal::from(1_000_000_000)).to_u64().unwrap_or(0);
+        let amount_u64 = (amount_kwh.abs() * Decimal::from(1_000_000_000))
+            .to_u64()
+            .unwrap_or(0);
 
         let transfer_instruction = BlockchainUtils::create_transfer_instruction(
             authority,

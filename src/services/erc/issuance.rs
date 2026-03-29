@@ -1,13 +1,10 @@
+use crate::infra::blockchain::BlockchainService;
 use crate::services::erc::types::{
     ErcAttribute, ErcCertificate, ErcFile, ErcMetadata, ErcProperties,
 };
-use crate::infra::blockchain::BlockchainService;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::Keypair,
-};
+use solana_sdk::{pubkey::Pubkey, signature::Keypair};
 use tracing::info;
 use uuid::Uuid;
 
@@ -54,7 +51,7 @@ impl AggregatedIssuance {
                 settlement_id,
                 created_at, 
                 updated_at
-            "#
+            "#,
         )
         .bind(certificate_uuid)
         .bind(signature)
@@ -93,15 +90,17 @@ impl AggregatedIssuance {
         );
 
         // Submit real transaction via blockchain service
-        self.blockchain_service.issue_erc(
-            certificate_id,
-            user_wallet,
-            &meter_pda,
-            amount_u64,
-            renewable_source,
-            validation_data,
-            authority,
-        ).await
+        self.blockchain_service
+            .issue_erc(
+                certificate_id,
+                user_wallet,
+                &meter_pda,
+                amount_u64,
+                renewable_source,
+                validation_data,
+                authority,
+            )
+            .await
     }
 
     /// Create ERC metadata for on-chain storage
@@ -173,10 +172,17 @@ impl AggregatedIssuance {
         _governance_program_id: &Pubkey,
     ) -> Result<bool> {
         info!("Validating certificate {} on-chain", certificate_id);
-        
+
         // Idempotence check: is it already validated?
-        if let Ok(true) = self.blockchain_service.is_erc_validated(certificate_id).await {
-            info!("Certificate {} is already validated for trading", certificate_id);
+        if let Ok(true) = self
+            .blockchain_service
+            .is_erc_validated(certificate_id)
+            .await
+        {
+            info!(
+                "Certificate {} is already validated for trading",
+                certificate_id
+            );
             return Ok(true);
         }
 
@@ -184,11 +190,16 @@ impl AggregatedIssuance {
         let authority = self.blockchain_service.get_authority_keypair().await?;
 
         // Call on-chain validation
-        let sig = self.blockchain_service.validate_erc_on_chain(certificate_id, &authority).await?;
-        
+        let sig = self
+            .blockchain_service
+            .validate_erc_on_chain(certificate_id, &authority)
+            .await?;
+
         // Wait for confirmation
-        self.blockchain_service.wait_for_confirmation(&sig, 30).await?;
-        
+        self.blockchain_service
+            .wait_for_confirmation(&sig, 30)
+            .await?;
+
         Ok(true)
     }
 

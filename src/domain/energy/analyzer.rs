@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use serde::Serialize;
 // gy_hdl::types::ReadingData;
 pub trait ReadingData {
     fn voltage(&self) -> Option<Decimal>;
@@ -47,10 +47,7 @@ pub struct MeterAlert {
 }
 
 /// Check for abnormal readings and generate alerts
-pub fn check_alerts<T: ReadingData>(
-    meter_id: &str,
-    data: &T,
-) -> Vec<MeterAlert> {
+pub fn check_alerts<T: ReadingData>(meter_id: &str, data: &T) -> Vec<MeterAlert> {
     let mut alerts = Vec::new();
     let now = Utc::now();
 
@@ -90,7 +87,10 @@ pub fn check_alerts<T: ReadingData>(
                 value: frequency,
                 threshold: if frequency < low { low } else { high },
                 severity: AlertSeverity::Warning,
-                message: format!("Frequency deviation: {:.2}Hz (normal: 49.5-50.5Hz)", frequency),
+                message: format!(
+                    "Frequency deviation: {:.2}Hz (normal: 49.5-50.5Hz)",
+                    frequency
+                ),
                 timestamp: now,
             });
         }
@@ -104,7 +104,11 @@ pub fn check_alerts<T: ReadingData>(
                 alert_type: "low_battery".to_string(),
                 value: battery,
                 threshold: Decimal::from(20),
-                severity: if battery < Decimal::from(10) { AlertSeverity::Critical } else { AlertSeverity::Warning },
+                severity: if battery < Decimal::from(10) {
+                    AlertSeverity::Critical
+                } else {
+                    AlertSeverity::Warning
+                },
                 message: format!("Low battery: {:.0}%", battery),
                 timestamp: now,
             });
@@ -176,7 +180,11 @@ pub fn calculate_health_score<T: ReadingData>(data: &T) -> f64 {
         let voltage_score = if voltage >= v_220 && voltage <= v_240 {
             100.0
         } else if voltage >= v_200 && voltage <= v_260 {
-            let deviation = if voltage < v_220 { v_220 - voltage } else { voltage - v_240 };
+            let deviation = if voltage < v_220 {
+                v_220 - voltage
+            } else {
+                voltage - v_240
+            };
             100.0 - (deviation.to_f64().unwrap_or(0.0) * 5.0).min(50.0)
         } else {
             25.0 // Very poor
@@ -193,7 +201,8 @@ pub fn calculate_health_score<T: ReadingData>(data: &T) -> f64 {
     }
 
     // THD score (20% weight) - lower is better
-    let thd_total = data.thd_voltage().unwrap_or(Decimal::ZERO) + data.thd_current().unwrap_or(Decimal::ZERO);
+    let thd_total =
+        data.thd_voltage().unwrap_or(Decimal::ZERO) + data.thd_current().unwrap_or(Decimal::ZERO);
     if data.thd_voltage().is_some() || data.thd_current().is_some() {
         let thd_score = (100.0 - thd_total.to_f64().unwrap_or(0.0) * 5.0).max(0.0);
         weighted_score += thd_score * 0.2;

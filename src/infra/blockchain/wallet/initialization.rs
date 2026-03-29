@@ -8,7 +8,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use solana_sdk::signature::Signer;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::time::Instant;
 use tracing::{info, warn};
 use utoipa::ToSchema;
@@ -28,9 +28,10 @@ struct UserRow {
     username: String,
     email: String,
     wallet_address: Option<String>,
-    encrypted_private_key: Option<String>,
-    wallet_salt: Option<String>,
-    encryption_iv: Option<String>,
+    encrypted_private_key: Option<Vec<u8>>,
+    wallet_salt: Option<Vec<u8>>,
+    encryption_iv: Option<Vec<u8>>,
+    _role: Option<String>,
 }
 
 /// Service for initializing and fixing user wallets
@@ -111,26 +112,22 @@ impl WalletInitializationService {
 
     /// Diagnose wallet status for a single user
     pub async fn diagnose_user_wallet(&self, user_id: Uuid) -> Result<WalletDiagnosis> {
-        let user = sqlx::query!(
-            r#"
-            SELECT id, username, email, wallet_address,
-                   encrypted_private_key, wallet_salt, encryption_iv
-            FROM users WHERE id = $1
-            "#,
-            user_id
+        let wallet_data = sqlx::query_as::<_, UserRow>(
+            "SELECT id, username, email, wallet_address, encrypted_private_key, wallet_salt, encryption_iv FROM users WHERE id = $1"
         )
+        .bind(user_id)
         .fetch_optional(&self.db)
         .await?
         .ok_or_else(|| anyhow!("User not found"))?;
 
         self.diagnose_wallet_data(
-            user.id,
-            &user.username,
-            &user.email,
-            user.wallet_address.as_deref(),
-            user.encrypted_private_key.as_deref(),
-            user.wallet_salt.as_deref(),
-            user.encryption_iv.as_deref(),
+            wallet_data.id,
+            &wallet_data.username,
+            &wallet_data.email,
+            wallet_data.wallet_address.as_deref(),
+            wallet_data.encrypted_private_key.as_deref(),
+            wallet_data.wallet_salt.as_deref(),
+            wallet_data.encryption_iv.as_deref(),
         )
         .await
     }
@@ -138,12 +135,7 @@ impl WalletInitializationService {
     /// Diagnose wallet status for all users
     pub async fn diagnose_all_users(&self) -> Result<Vec<WalletDiagnosis>> {
         let users = sqlx::query_as::<_, UserRow>(
-            r#"
-            SELECT id, username, email, wallet_address,
-                   encrypted_private_key, wallet_salt, encryption_iv
-            FROM users
-            ORDER BY created_at DESC
-            "#
+            "SELECT id, username, email, wallet_address, encrypted_private_key, wallet_salt, encryption_iv FROM users ORDER BY created_at DESC"
         )
         .fetch_all(&self.db)
         .await?;
@@ -295,12 +287,10 @@ impl WalletInitializationService {
         info!("Generating new wallet for user: {}", user_id);
 
         // Get user's role for on-chain registration
-        let user = sqlx::query!(
-            "SELECT role::text as role FROM users WHERE id = $1",
-            user_id
-        )
-        .fetch_one(&self.db)
-        .await?;
+        let user = sqlx::query("SELECT role::text as role FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&self.db)
+            .await?;
 
         let wallet_service = WalletService::new(&self.solana_rpc_url);
 
@@ -329,27 +319,19 @@ impl WalletInitializationService {
             WalletService::encrypt_to_bytes(&keypair.to_bytes(), &self.encryption_secret)?;
 
         // Update database
-        sqlx::query!(
-            r#"
-            UPDATE users 
-            SET wallet_address = $1,
-                encrypted_private_key = $2,
-                wallet_salt = $3,
-                encryption_iv = $4,
-                updated_at = NOW()
-            WHERE id = $5
-            "#,
-            &wallet_address,
-            &encrypted_key[..],
-            &salt[..],
-            &iv[..],
-            user_id
+        sqlx::query(
+            "UPDATE users SET wallet_address = $1, encrypted_private_key = $2, wallet_salt = $3, encryption_iv = $4, updated_at = NOW() WHERE id = $5"
         )
+        .bind(&wallet_address)
+        .bind(&encrypted_key)
+        .bind(&salt)
+        .bind(&iv)
+        .bind(user_id)
         .execute(&self.db)
         .await?;
 
         // Register user on-chain
-        let user_type: u8 = match user.role.as_deref() {
+        let user_type: u8 = match user.get::<Option<String>, _>("role").as_deref() {
             Some("prosumer") => 0,
             Some("consumer") => 1,
             _ => 1, // Default to consumer
@@ -394,13 +376,10 @@ impl WalletInitializationService {
         info!("Re-encrypting wallet for user: {}", user_id);
 
         // Fetch current encrypted data
-        let wallet_data = sqlx::query!(
-            r#"
-            SELECT encrypted_private_key, wallet_salt, encryption_iv, wallet_address
-            FROM users WHERE id = $1
-            "#,
-            user_id
+        let wallet_data = sqlx::query_as::<_, UserRow>(
+            "SELECT id, username, email, encrypted_private_key, wallet_salt, encryption_iv, wallet_address, role::text as role FROM users WHERE id = $1"
         )
+        .bind(user_id)
         .fetch_one(&self.db)
         .await?;
 
@@ -415,12 +394,8 @@ impl WalletInitializationService {
             .ok_or_else(|| anyhow!("Missing encryption IV for user {}", user_id))?;
 
         // Decrypt with old format (crypto module handles legacy IV)
-        let decrypted_bytes = WalletService::decrypt_bytes(
-            &encrypted_key,
-            &salt,
-            &iv,
-            &self.encryption_secret,
-        )?;
+        let decrypted_bytes =
+            WalletService::decrypt_bytes(&encrypted_key, &salt, &iv, &self.encryption_secret)?;
 
         // Re-encrypt with new standard format
         let (new_encrypted, new_salt, new_iv) =
@@ -435,22 +410,13 @@ impl WalletInitializationService {
         }
 
         // Update database
-        sqlx::query!(
-            r#"
-            UPDATE users 
-            SET encrypted_private_key = $1,
-                wallet_salt = $2,
-                encryption_iv = $3,
-                updated_at = NOW()
-            WHERE id = $4
-            "#,
-            &new_encrypted[..],
-            &new_salt[..],
-            &new_iv[..],
-            user_id
-        )
-        .execute(&self.db)
-        .await?;
+        sqlx::query("UPDATE users SET encrypted_private_key = $1, wallet_salt = $2, encryption_iv = $3, updated_at = NOW() WHERE id = $4")
+            .bind(&new_encrypted[..])
+            .bind(&new_salt[..])
+            .bind(&new_iv[..])
+            .bind(user_id)
+            .execute(&self.db)
+            .await?;
 
         info!(
             "Successfully re-encrypted wallet for user {} (IV: {} -> {} bytes)",
@@ -557,13 +523,15 @@ impl WalletInitializationService {
         let mut results = Vec::new();
 
         for email in emails {
-            let user = sqlx::query!("SELECT id FROM users WHERE email = $1", *email)
+            let user = sqlx::query("SELECT id FROM users WHERE email = $1")
+                .bind(*email)
                 .fetch_optional(&self.db)
                 .await?;
 
             match user {
                 Some(u) => {
-                    let result = self.fix_user_wallet(u.id, false).await?;
+                    let user_id: Uuid = u.get("id");
+                    let result = self.fix_user_wallet(user_id, false).await?;
                     results.push(result);
                 }
                 None => {

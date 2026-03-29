@@ -1,29 +1,28 @@
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
-use uuid::Uuid;
 use tracing::info;
+use uuid::Uuid;
 
-use crate::infra::db::schema::types::EpochStatus;
-use super::MarketClearingService;
 use super::types::MarketEpoch;
+use super::MarketClearingService;
+use crate::infra::db::schema::types::EpochStatus;
 
 impl MarketClearingService {
     /// Get current market epoch (15-minute intervals)
     pub async fn get_current_epoch(&self) -> Result<Option<MarketEpoch>> {
-        let epoch = sqlx::query_as!(
-            MarketEpoch,
+        let epoch = sqlx::query_as::<_, MarketEpoch>(
             r#"
             SELECT 
-                id, epoch_number, start_time, end_time, status as "status: EpochStatus",
+                id, epoch_number, start_time, end_time, status,
                 clearing_price, 
-                total_volume as "total_volume?", 
-                total_orders as "total_orders?", 
-                matched_orders as "matched_orders?"
+                total_volume, 
+                total_orders, 
+                matched_orders
             FROM market_epochs 
             WHERE start_time <= NOW() AND end_time > NOW()
             ORDER BY start_time DESC
             LIMIT 1
-            "#
+            "#,
         )
         .fetch_optional(&self.db)
         .await?;
@@ -69,7 +68,8 @@ impl MarketClearingService {
                     EpochStatus::Settled => "settled",
                 };
 
-                sqlx::query!(&format!("UPDATE market_epochs SET status = '{}'::epoch_status, updated_at = NOW() WHERE id = $1", status_str))
+                sqlx::query("UPDATE market_epochs SET status = $1::epoch_status, updated_at = NOW() WHERE id = $2")
+                    .bind(status_str)
                     .bind(existing.id)
                     .execute(&self.db)
                     .await?;
@@ -95,19 +95,18 @@ impl MarketClearingService {
             matched_orders: None,
         };
 
-        let status_str = "pending";
-        sqlx::query!(&format!(
+        sqlx::query(
             r#"
             INSERT INTO market_epochs (
                 id, epoch_number, start_time, end_time, status
-            ) VALUES ($1, $2, $3, $4, '{}'::epoch_status)
+            ) VALUES ($1, $2, $3, $4, $5::epoch_status)
             "#,
-            status_str
-        ))
+        )
         .bind(epoch.id)
         .bind(epoch.epoch_number)
         .bind(epoch.start_time)
         .bind(epoch.end_time)
+        .bind("pending")
         .execute(&self.db)
         .await?;
 
@@ -120,17 +119,16 @@ impl MarketClearingService {
 
     /// Get epoch by epoch number
     pub async fn get_epoch_by_number(&self, epoch_number: i64) -> Result<Option<MarketEpoch>> {
-        let epoch = sqlx::query_as!(
-            MarketEpoch,
+        let epoch = sqlx::query_as::<_, MarketEpoch>(
             r#"
             SELECT 
-                id, epoch_number, start_time, end_time, status as "status: EpochStatus",
+                id, epoch_number, start_time, end_time, status,
                 clearing_price, total_volume, total_orders, matched_orders
             FROM market_epochs 
             WHERE epoch_number = $1
             "#,
-            epoch_number
         )
+        .bind(epoch_number)
         .fetch_optional(&self.db)
         .await?;
 
@@ -138,19 +136,18 @@ impl MarketClearingService {
     }
 
     pub async fn get_market_statistics(&self, epochs: i64) -> Result<Vec<MarketEpoch>> {
-        let stats = sqlx::query_as!(
-            MarketEpoch,
+        let stats = sqlx::query_as::<_, MarketEpoch>(
             r#"
             SELECT 
-                id, epoch_number, start_time, end_time, status as "status: EpochStatus",
+                id, epoch_number, start_time, end_time, status,
                 clearing_price, total_volume, total_orders, matched_orders
             FROM market_epochs 
             WHERE status IN ('cleared', 'settled')
             ORDER BY epoch_number DESC
             LIMIT $1
             "#,
-            epochs
         )
+        .bind(epochs)
         .fetch_all(&self.db)
         .await?;
 

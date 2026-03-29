@@ -3,10 +3,10 @@
 // Aggregates bid/ask levels into a compact depth snapshot
 // for WebSocket broadcasting and caching.
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tracing::info;
-use chrono::{Utc, DateTime};
 
 use super::MarketClearingService;
 
@@ -49,7 +49,10 @@ impl MarketClearingService {
     ///
     /// Groups active orders by `price_per_kwh`, sums remaining volume,
     /// returns top `depth` levels for each side.
-    pub async fn capture_depth_snapshot(&self, depth: usize) -> anyhow::Result<OrderBookDepthSnapshot> {
+    pub async fn capture_depth_snapshot(
+        &self,
+        depth: usize,
+    ) -> anyhow::Result<OrderBookDepthSnapshot> {
         // Aggregate bids (buy side): price DESC, sum remaining volume
         let bid_rows = sqlx::query_as::<_, (Decimal, Decimal, i64)>(
             r#"
@@ -153,21 +156,27 @@ impl MarketClearingService {
         let snapshot = self.capture_depth_snapshot(20).await?;
 
         // Convert to the WebSocket PriceLevel format
-        let ws_bids: Vec<(String, String)> = snapshot.bids.iter()
+        let ws_bids: Vec<(String, String)> = snapshot
+            .bids
+            .iter()
             .map(|l| (l.price.to_string(), l.volume.to_string()))
             .collect();
-        let ws_asks: Vec<(String, String)> = snapshot.asks.iter()
+        let ws_asks: Vec<(String, String)> = snapshot
+            .asks
+            .iter()
             .map(|l| (l.price.to_string(), l.volume.to_string()))
             .collect();
 
-        self.websocket_service.broadcast_order_book_snapshot(
-            ws_bids,
-            ws_asks,
-            snapshot.best_bid.map(|p| p.to_string()),
-            snapshot.best_ask.map(|p| p.to_string()),
-            snapshot.mid_price.map(|p| p.to_string()),
-            snapshot.spread_pct.map(|p| format!("{:.2}", p)),
-        ).await;
+        self.websocket_service
+            .broadcast_order_book_snapshot(
+                ws_bids,
+                ws_asks,
+                snapshot.best_bid.map(|p| p.to_string()),
+                snapshot.best_ask.map(|p| p.to_string()),
+                snapshot.mid_price.map(|p| p.to_string()),
+                snapshot.spread_pct.map(|p| format!("{:.2}", p)),
+            )
+            .await;
 
         info!("📡 Full depth snapshot broadcast to all clients");
         Ok(())

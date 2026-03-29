@@ -1,8 +1,8 @@
+use crate::domain::events::Event;
 use anyhow::Result;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client, RedisResult};
 use tracing::{debug, error, info};
-use crate::domain::events::Event;
 
 #[derive(Clone)]
 pub struct EventBus {
@@ -24,7 +24,7 @@ impl EventBus {
 
         let client = Client::open(redis_url)?;
         let connection_manager = ConnectionManager::new(client).await?;
-        
+
         let stream_name = std::env::var("EVENT_STREAM_NAME")
             .unwrap_or_else(|_| "gridtokenx:events:v1".to_string());
 
@@ -39,20 +39,98 @@ impl EventBus {
         let mut conn = self.connection_manager.clone();
 
         // XADD stream * event <json>
-        let result: RedisResult<String> = conn.xadd(
-            &self.stream_name,
-            "*",
-            &[("event", serialized)]
-        ).await;
+        let result: RedisResult<String> = conn
+            .xadd(&self.stream_name, "*", &[("event", serialized)])
+            .await;
 
         match result {
             Ok(id) => {
-                debug!("Event published to stream {}: {:?} (ID: {})", self.stream_name, event, id);
+                info!(
+                    "Event published to stream {}: {:?} (ID: {})",
+                    self.stream_name, event, id
+                );
                 Ok(id)
             }
             Err(e) => {
-                error!("Failed to publish event to stream {}: {}", self.stream_name, e);
+                error!(
+                    "Failed to publish event to stream {}: {}",
+                    self.stream_name, e
+                );
                 Err(anyhow::anyhow!("Redis XADD failed: {}", e))
+            }
+        }
+    }
+
+    pub async fn create_consumer_group(&self, group_name: &str) -> Result<()> {
+        let mut conn = self.connection_manager.clone();
+        let _: RedisResult<()> = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(&self.stream_name)
+            .arg(group_name)
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut conn)
+            .await;
+        Ok(())
+    }
+
+    pub async fn consume_events<F, Fut>(
+        &self,
+        group_name: &str,
+        consumer_name: &str,
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Event) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        use redis::streams::{StreamReadOptions, StreamReadReply};
+
+        info!(
+            "Starting event consumption from {} (Group: {}, Consumer: {})",
+            self.stream_name, group_name, consumer_name
+        );
+
+        let mut conn = self.connection_manager.clone();
+        let opts = StreamReadOptions::default()
+            .group(group_name, consumer_name)
+            .block(5000)
+            .count(10);
+
+        loop {
+            let read_result: RedisResult<StreamReadReply> = conn
+                .xread_options(&[&self.stream_name], &[">"], &opts)
+                .await;
+
+            match read_result {
+                Ok(reply) => {
+                    for stream in reply.keys {
+                        for entry in stream.ids {
+                            if let Some(event_json) = entry.map.get("event") {
+                                if let Ok(event_str) = redis::from_redis_value::<String>(event_json)
+                                {
+                                    if let Ok(event) = serde_json::from_str::<Event>(&event_str) {
+                                        info!("🔍 Processing event from stream: {:?}", event);
+                                        if let Err(e) = handler(event).await {
+                                            error!("Error handling event {}: {}", entry.id, e);
+                                        } else {
+                                            // ACK the message
+                                            let _: RedisResult<()> = conn
+                                                .xack(&self.stream_name, group_name, &[&entry.id])
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !e.is_timeout() {
+                        error!("Redis xread error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
     }

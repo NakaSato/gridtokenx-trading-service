@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
-use utoipa::{ToSchema, IntoParams};
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]

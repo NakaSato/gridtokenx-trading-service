@@ -1,39 +1,36 @@
 pub mod types;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
 use tracing::{debug, error, info, warn};
 
 fn track_order_matched(_strategy: &str, _amount: f64) {}
-use uuid::Uuid;
 use solana_sdk::pubkey::Pubkey;
+use uuid::Uuid;
 
+use chrono::{Timelike, Utc};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::str::FromStr;
-use chrono::{DateTime, Utc, Timelike};
-use ulid::Ulid;
 use tokio::sync::RwLock;
+use ulid::Ulid;
 
-use crate::{ 
-    infra::db::schema::types::{OrderStatus, OrderSide},
-    infra::{
-        blockchain::BlockchainService,
-        events::EventBus,
+use crate::{
+    domain::trading::market_data::MarketDataManager as MarketDataService,
+    domain::trading::{
+        clearing::MarketClearingService,
+        models::{TradingOrderDb, TriggerStatus, TriggerType},
+        settlement::Settlement,
     },
     domain::{
         energy::GridTopologyService,
         events::{Event, OrderMatchedPayload},
     },
+    infra::db::schema::types::{OrderSide, OrderStatus},
+    infra::{blockchain::BlockchainService, events::EventBus},
     services::settlement::SettlementService,
-    domain::trading::market_data::MarketDataManager as MarketDataService,
-    domain::trading::{
-        clearing::MarketClearingService,
-        models::{TriggerType, TriggerStatus, TradingOrderDb},
-        settlement::Settlement,
-    },
 };
 
 use dashmap::DashMap;
@@ -47,7 +44,7 @@ pub struct ShardedMatchingWorker {
     settlement: Option<SettlementService>,
     market_clearing: Option<MarketClearingService>,
     blockchain_service: Option<BlockchainService>,
-    grid_topology: GridTopologyService,
+    grid_topology: Arc<GridTopologyService>,
     market_data_service: Option<MarketDataService>,
     event_bus: Option<EventBus>,
     match_interval_secs: u64,
@@ -63,7 +60,7 @@ impl ShardedMatchingWorker {
         num_shards: u32,
         db: PgPool,
         match_interval_secs: u64,
-        grid_topology: GridTopologyService,
+        grid_topology: Arc<GridTopologyService>,
     ) -> Self {
         Self {
             shard_id,
@@ -86,9 +83,12 @@ impl ShardedMatchingWorker {
     async fn bootstrap_orders(&self) -> Result<()> {
         use TradingOrderDb;
 
-        info!("Shard {} bootstrapping in-memory order book...", self.shard_id);
+        info!(
+            "Shard {} bootstrapping in-memory order book...",
+            self.shard_id
+        );
 
-        let active_orders_rows = sqlx::query!(
+        let active_orders_rows = sqlx::query(
             r#"
             SELECT 
                 id, user_id, energy_amount, price_per_kwh, filled_amount,
@@ -135,7 +135,9 @@ impl ShardedMatchingWorker {
                 last_peak_price: row.get("last_peak_price"),
             };
 
-            if  (order.trigger_price.is_some() || order.trigger_type.is_some()) && order.trigger_status == Some(TriggerStatus::Pending) {
+            if (order.trigger_price.is_some() || order.trigger_type.is_some())
+                && order.trigger_status == Some(TriggerStatus::Pending)
+            {
                 self.trigger_orders.insert(order.id, order);
             } else if order.side == OrderSide::Buy {
                 self.buy_orders.insert(order.id, order);
@@ -144,21 +146,33 @@ impl ShardedMatchingWorker {
             }
         }
 
-        info!("Shard {} bootstrapped {} buy, {} sell, and {} trigger orders", 
-            self.shard_id, self.buy_orders.len(), self.sell_orders.len(), self.trigger_orders.len());
+        info!(
+            "Shard {} bootstrapped {} buy, {} sell, and {} trigger orders",
+            self.shard_id,
+            self.buy_orders.len(),
+            self.sell_orders.len(),
+            self.trigger_orders.len()
+        );
         Ok(())
     }
 
-    pub async fn run(&self, running: Arc<RwLock<bool>>, mut notify_rx: tokio::sync::mpsc::Receiver<Option<TradingOrderDb>>) {
-        info!("Worker Shard {} started (Managing zones % {} == {})", self.shard_id, self.num_shards, self.shard_id);
-        
+    pub async fn run(
+        &self,
+        running: Arc<RwLock<bool>>,
+        mut notify_rx: tokio::sync::mpsc::Receiver<Option<TradingOrderDb>>,
+    ) {
+        info!(
+            "Worker Shard {} started (Managing zones % {} == {})",
+            self.shard_id, self.num_shards, self.shard_id
+        );
+
         // Bootstrap in-memory state
         if let Err(e) = self.bootstrap_orders().await {
             error!("Shard {} failed to bootstrap orders: {}", self.shard_id, e);
         }
 
         let mut interval = tokio::time::interval(Duration::from_secs(self.match_interval_secs));
-        
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -184,7 +198,9 @@ impl ShardedMatchingWorker {
 
             {
                 let is_running = running.read().await;
-                if !*is_running { break; }
+                if !*is_running {
+                    break;
+                }
             }
 
             if let Err(e) = self.match_shard_cycle().await {
@@ -194,44 +210,51 @@ impl ShardedMatchingWorker {
     }
 
     async fn check_triggers(&self) -> Result<()> {
-        let mut triggered_orders = Vec::new(); 
-        let mut peak_updates = Vec::new();
+        let mut triggered_orders = Vec::new();
 
         for entry in self.trigger_orders.iter() {
             let order = entry.value();
             let zone_id = order.zone_id.unwrap_or(0);
-            
+
             if let Some(last_price) = self.zone_prices.get(&zone_id) {
                 let last_price = *last_price;
                 let trigger_price = order.trigger_price.unwrap_or(Decimal::ZERO);
-                
+
                 let is_triggered = match order.trigger_type.as_ref() {
-                    Some(TriggerType::StopLoss) => {
-                        match order.side {
-                            OrderSide::Sell => {
-                                let triggered = last_price <= trigger_price;
-                                debug!("Checking Sell StopLoss: price {} <= trigger {}? {}", last_price, trigger_price, triggered);
-                                triggered
-                            },
-                            OrderSide::Buy => {
-                                let triggered = last_price >= trigger_price;
-                                debug!("Checking Buy StopLoss: price {} >= trigger {}? {}", last_price, trigger_price, triggered);
-                                triggered
-                            },
+                    Some(TriggerType::StopLoss) => match order.side {
+                        OrderSide::Sell => {
+                            let triggered = last_price <= trigger_price;
+                            debug!(
+                                "Checking Sell StopLoss: price {} <= trigger {}? {}",
+                                last_price, trigger_price, triggered
+                            );
+                            triggered
+                        }
+                        OrderSide::Buy => {
+                            let triggered = last_price >= trigger_price;
+                            debug!(
+                                "Checking Buy StopLoss: price {} >= trigger {}? {}",
+                                last_price, trigger_price, triggered
+                            );
+                            triggered
                         }
                     },
-                    Some(TriggerType::TakeProfit) => {
-                        match order.side {
-                            OrderSide::Sell => {
-                                let triggered = last_price >= trigger_price;
-                                debug!("Checking Sell TakeProfit: price {} >= trigger {}? {}", last_price, trigger_price, triggered);
-                                triggered
-                            },
-                            OrderSide::Buy => {
-                                let triggered = last_price <= trigger_price;
-                                debug!("Checking Buy TakeProfit: price {} <= trigger {}? {}", last_price, trigger_price, triggered);
-                                triggered
-                            },
+                    Some(TriggerType::TakeProfit) => match order.side {
+                        OrderSide::Sell => {
+                            let triggered = last_price >= trigger_price;
+                            debug!(
+                                "Checking Sell TakeProfit: price {} >= trigger {}? {}",
+                                last_price, trigger_price, triggered
+                            );
+                            triggered
+                        }
+                        OrderSide::Buy => {
+                            let triggered = last_price <= trigger_price;
+                            debug!(
+                                "Checking Buy TakeProfit: price {} <= trigger {}? {}",
+                                last_price, trigger_price, triggered
+                            );
+                            triggered
                         }
                     },
                     Some(TriggerType::TrailingStop) => {
@@ -248,7 +271,7 @@ impl ShardedMatchingWorker {
                                 let effective_trigger = peak - offset;
                                 debug!("Checking Sell TrailingStop: price {} <= trigger {} (Peak: {})? {}", 
                                     last_price, effective_trigger, peak, last_price <= effective_trigger);
-                                
+
                                 if peak_updated {
                                     if let Some(event_bus) = &self.event_bus {
                                         let event = Event::PeakPriceUpdate {
@@ -263,7 +286,7 @@ impl ShardedMatchingWorker {
                                 }
 
                                 last_price <= effective_trigger
-                            },
+                            }
                             OrderSide::Buy => {
                                 if last_price < peak || order.last_peak_price.is_none() {
                                     peak = last_price;
@@ -289,7 +312,7 @@ impl ShardedMatchingWorker {
                                 last_price >= effective_trigger
                             }
                         }
-                    },
+                    }
                     _ => false,
                 };
 
@@ -300,16 +323,23 @@ impl ShardedMatchingWorker {
         }
 
         // Apply peak updates to memory
-        for (order_id, peak) in peak_updates {
-            if let Some(mut order) = self.trigger_orders.get_mut(&order_id) {
-                order.last_peak_price = Some(peak);
-            }
-        }
+        /*
+                for (order_id, peak) in peak_updates {
+                    if let Some(mut order) = self.trigger_orders.get_mut(&order_id) {
+                        order.last_peak_price = Some(peak);
+                    }
+                }
+        */
 
         for order_id in triggered_orders {
             if let Some((_, mut order)) = self.trigger_orders.remove(&order_id) {
-                info!("🚀 Triggered order {}: type={:?}, price={}", order_id, order.trigger_type, order.trigger_price.unwrap_or_default());
-                
+                info!(
+                    "🚀 Triggered order {}: type={:?}, price={}",
+                    order_id,
+                    order.trigger_type,
+                    order.trigger_price.unwrap_or_default()
+                );
+
                 order.status = OrderStatus::Active;
                 order.trigger_status = Some(TriggerStatus::Triggered);
                 order.triggered_at = Some(chrono::Utc::now());
@@ -343,7 +373,7 @@ impl ShardedMatchingWorker {
     async fn get_dynamic_multiplier(&self) -> Decimal {
         let hour = Utc::now().hour();
         let (base_mult, _) = MarketClearingService::get_tou_multiplier_for_hour(hour);
-        
+
         // Placeholder for market multiplier (previously from P2PConfigService)
         let market_mult = Decimal::ONE;
 
@@ -354,7 +384,10 @@ impl ShardedMatchingWorker {
         let start_time = std::time::Instant::now();
         let buy_count = self.buy_orders.len();
         let sell_count = self.sell_orders.len();
-        info!("Shard {} matching cycle started (Pools: {} buy, {} sell)", self.shard_id, buy_count, sell_count);
+        info!(
+            "Shard {} matching cycle started (Pools: {} buy, {} sell)",
+            self.shard_id, buy_count, sell_count
+        );
         // Evaluate triggers before matching
         if let Err(e) = self.check_triggers().await {
             error!("Shard {} trigger check failed: {}", self.shard_id, e);
@@ -368,19 +401,27 @@ impl ShardedMatchingWorker {
         let buy_count = self.buy_orders.len();
         let mut buy_orders: Vec<TradingOrderDb> = Vec::with_capacity(buy_count);
         buy_orders.extend(self.buy_orders.iter().map(|o| o.value().clone()));
-        
+
         // Priority: Price-Time (not explicit in current logic but created_at is used below)
         buy_orders.sort_by(|a, b| a.created_at.cmp(&b.created_at));
 
-        if buy_orders.is_empty() { return Ok(0); }
+        if buy_orders.is_empty() {
+            return Ok(0);
+        }
 
         let sell_count = self.sell_orders.len();
         let mut sell_orders: Vec<TradingOrderDb> = Vec::with_capacity(sell_count);
         sell_orders.extend(self.sell_orders.iter().map(|o| o.value().clone()));
-        
-        sell_orders.sort_by(|a, b| a.price_per_kwh.cmp(&b.price_per_kwh).then_with(|| a.created_at.cmp(&b.created_at)));
 
-        if sell_orders.is_empty() { return Ok(0); }
+        sell_orders.sort_by(|a, b| {
+            a.price_per_kwh
+                .cmp(&b.price_per_kwh)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+
+        if sell_orders.is_empty() {
+            return Ok(0);
+        }
 
         let mut matches_created = 0;
 
@@ -389,8 +430,10 @@ impl ShardedMatchingWorker {
             let mut buy_filled_amount = buy_order.filled_amount.unwrap_or(Decimal::ZERO);
             let buy_energy_amount = buy_order.energy_amount;
             let mut remaining_buy_amount = buy_energy_amount - buy_filled_amount;
-            
-            if remaining_buy_amount < OrderMatchingEngine::MIN_TRADE_AMOUNT { continue; }
+
+            if remaining_buy_amount < OrderMatchingEngine::MIN_TRADE_AMOUNT {
+                continue;
+            }
 
             struct Candidate {
                 id: Uuid,
@@ -401,41 +444,73 @@ impl ShardedMatchingWorker {
             }
 
             let mut candidates: Vec<Candidate> = Vec::new();
-            info!("  Analyzing Candidates for Buy Order {} (Zone {}, Price {}):", buy_order.id, buy_order.zone_id.unwrap_or(0), buy_order.price_per_kwh);
+            /*
+            info!(
+                "  Analyzing Candidates for Buy Order {} (Zone {}, Price {}):",
+                buy_order.id,
+                buy_order.zone_id.unwrap_or(0),
+                buy_order.price_per_kwh
+            );
+            */
 
             for sell_order in &sell_orders {
-                if buy_order.user_id == sell_order.user_id { 
+                if buy_order.user_id == sell_order.user_id {
                     debug!("    x Matching Prevention (Member ID check)");
-                    continue; 
+                    continue;
                 }
 
                 let sell_filled = sell_order.filled_amount.unwrap_or(Decimal::ZERO);
                 let remaining_sell = sell_order.energy_amount - sell_filled;
-                
-                if remaining_sell < OrderMatchingEngine::MIN_TRADE_AMOUNT { continue; }
 
-                if !self.grid_topology.can_accommodate_flow(sell_order.zone_id, buy_order.zone_id, remaining_sell.min(remaining_buy_amount)).await {
+                if remaining_sell < OrderMatchingEngine::MIN_TRADE_AMOUNT {
                     continue;
                 }
 
-                let wheeling_charge = self.grid_topology.calculate_wheeling_charge(sell_order.zone_id, buy_order.zone_id).await;
-                let loss_factor = self.grid_topology.calculate_loss_factor(sell_order.zone_id, buy_order.zone_id).await;
-                debug!("    - Wheeling: {}, Loss Factor: {}", wheeling_charge, loss_factor);
-                
+                if !self
+                    .grid_topology
+                    .can_accommodate_flow(
+                        sell_order.zone_id,
+                        buy_order.zone_id,
+                        remaining_sell.min(remaining_buy_amount),
+                    )
+                    .await
+                {
+                    continue;
+                }
+
+                let wheeling_charge = self
+                    .grid_topology
+                    .calculate_wheeling_charge(sell_order.zone_id, buy_order.zone_id)
+                    .await;
+                let loss_factor = self
+                    .grid_topology
+                    .calculate_loss_factor(sell_order.zone_id, buy_order.zone_id)
+                    .await;
+                debug!(
+                    "    - Wheeling: {}, Loss Factor: {}",
+                    wheeling_charge, loss_factor
+                );
+
                 let sell_price = sell_order.price_per_kwh;
                 let loss_cost_unit = sell_price * loss_factor;
                 let mut landed_price = sell_price + wheeling_charge + loss_cost_unit;
 
                 // Apply dynamic multiplier (TOU * Market)
                 let dynamic_mult = self.get_dynamic_multiplier().await;
-                landed_price = landed_price * dynamic_mult;
+                landed_price *= dynamic_mult;
 
                 if sell_order.zone_id == buy_order.zone_id {
-                    landed_price = landed_price * (Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT);
+                    landed_price *= (Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT);
                 }
 
                 if landed_price <= buy_order.price_per_kwh {
-                    info!("    ✓ Candidate Sell Order {} (Zone {}): Landed Price {} <= Buy Price {}", sell_order.id, sell_order.zone_id.unwrap_or(0), landed_price, buy_order.price_per_kwh);
+                    info!(
+                        "    ✓ Candidate Sell Order {} (Zone {}): Landed Price {} <= Buy Price {}",
+                        sell_order.id,
+                        sell_order.zone_id.unwrap_or(0),
+                        landed_price,
+                        buy_order.price_per_kwh
+                    );
                     candidates.push(Candidate {
                         id: sell_order.id,
                         landed_cost: landed_price,
@@ -444,30 +519,48 @@ impl ShardedMatchingWorker {
                         loss_cost_per_kwh: loss_cost_unit,
                     });
                 } else {
-                    info!("    x Candidate Sell Order {} (Zone {}): Landed Price {} > Buy Price {}", sell_order.id, sell_order.zone_id.unwrap_or(0), landed_price, buy_order.price_per_kwh);
+                    info!(
+                        "    x Candidate Sell Order {} (Zone {}): Landed Price {} > Buy Price {}",
+                        sell_order.id,
+                        sell_order.zone_id.unwrap_or(0),
+                        landed_price,
+                        buy_order.price_per_kwh
+                    );
                 }
             }
 
             candidates.sort_by(|a, b| a.landed_cost.cmp(&b.landed_cost));
 
             for candidate in candidates {
-                if remaining_buy_amount <= Decimal::ZERO { break; }
+                if remaining_buy_amount <= Decimal::ZERO {
+                    break;
+                }
 
                 // Get the latest sell order state from mem
                 let sell_order_entry = match self.sell_orders.get_mut(&candidate.id) {
                     Some(entry) => entry,
                     None => continue,
                 };
-                
+
                 let sell_filled = sell_order_entry.filled_amount.unwrap_or(Decimal::ZERO);
                 let remaining_sell = sell_order_entry.energy_amount - sell_filled;
 
-                if remaining_sell < OrderMatchingEngine::MIN_TRADE_AMOUNT { continue; }
+                if remaining_sell < OrderMatchingEngine::MIN_TRADE_AMOUNT {
+                    continue;
+                }
 
-                let match_amount = if remaining_buy_amount < remaining_sell { remaining_buy_amount } else { remaining_sell };
+                let match_amount = if remaining_buy_amount < remaining_sell {
+                    remaining_buy_amount
+                } else {
+                    remaining_sell
+                };
                 let landed_price = candidate.landed_cost;
-                let match_price = if sell_order_entry.created_at < buy_order.created_at { landed_price } else { buy_order.price_per_kwh };
-                
+                let match_price = if sell_order_entry.created_at < buy_order.created_at {
+                    landed_price
+                } else {
+                    buy_order.price_per_kwh
+                };
+
                 let total_energy_cost = match_amount * match_price;
                 let total_wheeling = match_amount * candidate.wheeling_charge_per_kwh;
                 let total_loss_cost = match_amount * candidate.loss_cost_per_kwh;
@@ -480,7 +573,10 @@ impl ShardedMatchingWorker {
                 let epoch_id = match buy_order.epoch_id.or(sell_order_entry.epoch_id) {
                     Some(id) => id,
                     None => {
-                        error!("❌ No epoch ID found for orders {} or {}. Skipping match.", buy_order.id, sell_order_id);
+                        error!(
+                            "❌ No epoch ID found for orders {} or {}. Skipping match.",
+                            buy_order.id, sell_order_id
+                        );
                         drop(sell_order_entry);
                         continue;
                     }
@@ -489,85 +585,129 @@ impl ShardedMatchingWorker {
                 // Drop the synchronous DashMap lock before async calls to prevent Tokio thread deadlocks
                 drop(sell_order_entry);
 
-                match self.create_order_match(
-                    epoch_id, buy_order.id, sell_order_id, match_amount, match_price,
-                    buy_order.order_pda.as_deref(), sell_order_pda.as_deref(), buy_order.zone_id,
-                ).await {
+                match self
+                    .create_order_match(
+                        epoch_id,
+                        buy_order.id,
+                        sell_order_id,
+                        match_amount,
+                        match_price,
+                        buy_order.order_pda.as_deref(),
+                        sell_order_pda.as_deref(),
+                        buy_order.zone_id,
+                    )
+                    .await
+                {
                     Ok(match_id) => {
-                         matches_created += 1;
-                         track_order_matched("p2p", match_amount.to_f64().unwrap_or(0.0));
-                         
-                         if let Some(market_data) = &self.market_data_service {
-                             let market_data = market_data.clone();
-                             tokio::spawn(async move {
-                                 let _ = market_data.sync_price_history(match_price, match_amount).await;
-                             });
-                         }
+                        matches_created += 1;
+                        track_order_matched("p2p", match_amount.to_f64().unwrap_or(0.0));
 
-                         // Update local zone price for triggers
-                         let b_zone = buy_order.zone_id.unwrap_or(0);
-                         let s_zone = sell_order_zone_id.unwrap_or(0);
-                         debug!("Shard {} updated zone prices with match at {}: BuyZone={}, SellZone={}", self.shard_id, match_price, b_zone, s_zone);
-                         self.zone_prices.insert(b_zone, match_price);
-                         self.zone_prices.insert(s_zone, match_price);
+                        if let Some(market_data) = &self.market_data_service {
+                            let market_data = market_data.clone();
+                            tokio::spawn(async move {
+                                let _ = market_data
+                                    .sync_price_history(match_price, match_amount)
+                                    .await;
+                            });
+                        }
 
-                         self.trigger_settlement(
-                            match_id, buy_order.id, sell_order_id, 
-                            buy_order.user_id, sell_order_user_id, 
-                            match_amount, match_price, total_energy_cost, epoch_id,
-                            (total_wheeling, candidate.loss_factor, total_loss_cost, buy_order.zone_id, sell_order_zone_id),
-                            buy_order.session_token.clone(), sell_order_session_token.clone()
-                         ).await;
+                        // Update local zone price for triggers
+                        let b_zone = buy_order.zone_id.unwrap_or(0);
+                        let s_zone = sell_order_zone_id.unwrap_or(0);
+                        debug!("Shard {} updated zone prices with match at {}: BuyZone={}, SellZone={}", self.shard_id, match_price, b_zone, s_zone);
+                        self.zone_prices.insert(b_zone, match_price);
+                        self.zone_prices.insert(s_zone, match_price);
 
-                         self.grid_topology.record_flow(sell_order_zone_id, buy_order.zone_id, match_amount).await;
+                        self.trigger_settlement(
+                            match_id,
+                            buy_order.id,
+                            sell_order_id,
+                            buy_order.user_id,
+                            sell_order_user_id,
+                            match_amount,
+                            match_price,
+                            total_energy_cost,
+                            epoch_id,
+                            (
+                                total_wheeling,
+                                candidate.loss_factor,
+                                total_loss_cost,
+                                buy_order.zone_id,
+                                sell_order_zone_id,
+                            ),
+                            buy_order.session_token.clone(),
+                            sell_order_session_token.clone(),
+                        )
+                        .await;
 
-                         // Re-acquire lock to update order states safely
-                         let mut remove_sell_order = false;
-                         let mut sell_order_id_to_update = Uuid::default();
-                         
-                         if let Some(mut sell_order_entry) = self.sell_orders.get_mut(&candidate.id) {
-                             let sell_filled = sell_order_entry.filled_amount.unwrap_or(Decimal::ZERO);
-                             let new_sell_filled = sell_filled + match_amount;
-                             sell_order_entry.filled_amount = Some(new_sell_filled);
-                             buy_filled_amount += match_amount;
-                             remaining_buy_amount -= match_amount;
+                        self.grid_topology
+                            .record_flow(sell_order_zone_id, buy_order.zone_id, match_amount)
+                            .await;
 
-                             let new_sell_status = if new_sell_filled >= sell_order_entry.energy_amount { OrderStatus::Filled } else { OrderStatus::PartiallyFilled };
-                             sell_order_entry.status = new_sell_status.clone();
-                             sell_order_id_to_update = sell_order_entry.id;
-                             
-                             if new_sell_status == OrderStatus::Filled {
-                                 remove_sell_order = true;
-                             }
-                         }
+                        // Re-acquire lock to update order states safely
+                        let mut remove_sell_order = false;
+                        let mut sell_order_id_to_update = Uuid::default();
 
-                         // Release lock before doing async operations
-                         if remove_sell_order {
-                             self.sell_orders.remove(&candidate.id);
-                         }
+                        if let Some(mut sell_order_entry) = self.sell_orders.get_mut(&candidate.id)
+                        {
+                            let sell_filled =
+                                sell_order_entry.filled_amount.unwrap_or(Decimal::ZERO);
+                            let new_sell_filled = sell_filled + match_amount;
+                            sell_order_entry.filled_amount = Some(new_sell_filled);
+                            buy_filled_amount += match_amount;
+                            remaining_buy_amount -= match_amount;
 
-                         let new_sell_status = if (sell_filled + match_amount) >= remaining_sell + sell_filled { OrderStatus::Filled } else { OrderStatus::PartiallyFilled };
+                            let new_sell_status =
+                                if new_sell_filled >= sell_order_entry.energy_amount {
+                                    OrderStatus::Filled
+                                } else {
+                                    OrderStatus::PartiallyFilled
+                                };
+                            sell_order_entry.status = new_sell_status.clone();
+                            sell_order_id_to_update = sell_order_entry.id;
 
-                         // Async DB Update for Sell Order (via EventBus)
-                         if let Some(event_bus) = &self.event_bus {
-                             let event = Event::OrderUpdate {
-                                 id: sell_order_id_to_update,
-                                 filled_amount: sell_filled + match_amount,
-                                 status: new_sell_status.to_string(),
-                             };
-                             let bus = event_bus.clone();
-                             tokio::spawn(async move {
-                                 let _ = bus.publish(&event).await;
-                             });
-                         }
+                            if new_sell_status == OrderStatus::Filled {
+                                remove_sell_order = true;
+                            }
+                        }
 
-                    },
+                        // Release lock before doing async operations
+                        if remove_sell_order {
+                            self.sell_orders.remove(&candidate.id);
+                        }
+
+                        let new_sell_status =
+                            if (sell_filled + match_amount) >= remaining_sell + sell_filled {
+                                OrderStatus::Filled
+                            } else {
+                                OrderStatus::PartiallyFilled
+                            };
+
+                        // Async DB Update for Sell Order (via EventBus)
+                        if let Some(event_bus) = &self.event_bus {
+                            let event = Event::OrderUpdate {
+                                id: sell_order_id_to_update,
+                                filled_amount: sell_filled + match_amount,
+                                status: new_sell_status.to_string(),
+                            };
+                            let bus = event_bus.clone();
+                            tokio::spawn(async move {
+                                let _ = bus.publish(&event).await;
+                            });
+                        }
+                    }
                     Err(e) => error!("Failed to create match: {}", e),
                 }
             }
 
-            let new_buy_status = if buy_filled_amount >= buy_energy_amount { OrderStatus::Filled } else if buy_filled_amount > Decimal::ZERO { OrderStatus::PartiallyFilled } else { OrderStatus::Active };
-            
+            let new_buy_status = if buy_filled_amount >= buy_energy_amount {
+                OrderStatus::Filled
+            } else if buy_filled_amount > Decimal::ZERO {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::Active
+            };
+
             // Async DB Update for Buy Order (via EventBus)
             if let Some(event_bus) = &self.event_bus {
                 let event = Event::OrderUpdate {
@@ -599,11 +739,18 @@ impl ShardedMatchingWorker {
     }
 
     async fn create_order_match(
-        &self, epoch_id: Uuid, buy_order_id: Uuid, sell_order_id: Uuid, energy_amount: Decimal, 
-        price_per_kwh: Decimal, buy_order_pda: Option<&str>, sell_order_pda: Option<&str>, zone_id: Option<i32>,
+        &self,
+        epoch_id: Uuid,
+        buy_order_id: Uuid,
+        sell_order_id: Uuid,
+        energy_amount: Decimal,
+        price_per_kwh: Decimal,
+        buy_order_pda: Option<&str>,
+        sell_order_pda: Option<&str>,
+        zone_id: Option<i32>,
     ) -> Result<Uuid> {
         let match_id = Uuid::new_v4();
-        
+
         // Emit OrderMatched event via EventBus if available
         if let Some(event_bus) = &self.event_bus {
             let event = Event::OrderMatched(OrderMatchedPayload {
@@ -625,41 +772,70 @@ impl ShardedMatchingWorker {
         }
 
         if let Some(blockchain) = &self.blockchain_service {
-             let blockchain = blockchain.clone();
-             let b_pda_owned = buy_order_pda.map(|s| s.to_string());
-             let s_pda_owned = sell_order_pda.map(|s| s.to_string());
-             let zone_num = zone_id.unwrap_or(1) as u32;
+            let blockchain = blockchain.clone();
+            let b_pda_owned = buy_order_pda.map(|s| s.to_string());
+            let s_pda_owned = sell_order_pda.map(|s| s.to_string());
+            let zone_num = zone_id.unwrap_or(1) as u32;
 
-             tokio::spawn(async move {
-                 if let Ok(authority) = blockchain.get_authority_keypair().await {
-                     let market_pda = Pubkey::find_program_address(&[b"market"], &blockchain.trading_program_id().unwrap_or_default()).0;
-                     if let (Some(b_pda), Some(s_pda)) = (b_pda_owned, s_pda_owned) {
-                         let match_u64 = (energy_amount * Decimal::from(1_000_000_000)).to_u64().unwrap_or(0);
-                         let _ = blockchain.execute_match_orders(&authority, &market_pda.to_string(), &b_pda, &s_pda, match_u64, zone_num).await;
-                     }
-                 }
-             });
+            tokio::spawn(async move {
+                if let Ok(authority) = blockchain.get_authority_keypair().await {
+                    let market_pda = Pubkey::find_program_address(
+                        &[b"market"],
+                        &blockchain.trading_program_id().unwrap_or_default(),
+                    )
+                    .0;
+                    if let (Some(b_pda), Some(s_pda)) = (b_pda_owned, s_pda_owned) {
+                        let match_u64 = (energy_amount * Decimal::from(1_000_000_000))
+                            .to_u64()
+                            .unwrap_or(0);
+                        let _ = blockchain
+                            .execute_match_orders(
+                                &authority,
+                                &market_pda.to_string(),
+                                &b_pda,
+                                &s_pda,
+                                match_u64,
+                                zone_num,
+                            )
+                            .await;
+                    }
+                }
+            });
         }
         Ok(match_id)
     }
 
-    async fn trigger_settlement(&self, _match_id: Uuid, buy_order_id: Uuid, sell_order_id: Uuid, buyer_id: Uuid, seller_id: Uuid, amount: Decimal, price: Decimal, cost: Decimal, epoch_id: Uuid, costs: (Decimal, Decimal, Decimal, Option<i32>, Option<i32>), buyer_token: Option<String>, seller_token: Option<String>) {
+    async fn trigger_settlement(
+        &self,
+        _match_id: Uuid,
+        buy_order_id: Uuid,
+        sell_order_id: Uuid,
+        buyer_id: Uuid,
+        seller_id: Uuid,
+        amount: Decimal,
+        price: Decimal,
+        cost: Decimal,
+        epoch_id: Uuid,
+        costs: (Decimal, Decimal, Decimal, Option<i32>, Option<i32>),
+        buyer_token: Option<String>,
+        seller_token: Option<String>,
+    ) {
         // Calculate settlement record (replicated from manager logic for batching)
         let total_value = cost;
         let fee_rate = Decimal::from_str("0.01").unwrap_or_default();
-        
+
         let loss_cost = costs.2;
         let wheeling_charge = costs.0;
-        
+
         let seller_base_price_total = total_value - wheeling_charge - loss_cost;
         let fee_amount = seller_base_price_total * fee_rate;
         let net_amount = seller_base_price_total - fee_amount;
-        
+
         let effective_energy = amount * (Decimal::ONE - costs.1);
-        
+
         let settlement_ulid = Ulid::new();
         let settlement_id = Uuid::from_bytes(settlement_ulid.to_bytes());
-        
+
         let settlement = Settlement {
             id: settlement_id,
             trade_id: Uuid::new_v4(), // In-memory reference ID
@@ -668,7 +844,7 @@ impl ShardedMatchingWorker {
             buy_order_id,
             sell_order_id,
             energy_amount: amount,
-            price, 
+            price,
             total_value,
             fee_amount,
             net_amount,
@@ -708,7 +884,7 @@ pub struct MatchingWorkerPool {
 
 impl MatchingWorkerPool {
     pub fn notify_zone(&self, zone_id: Option<i32>, order: Option<TradingOrderDb>) {
-        let shard_id = (zone_id.unwrap_or(0).abs() as u32) % self.num_shards;
+        let shard_id = zone_id.unwrap_or(0).unsigned_abs() % self.num_shards;
         if let Some(sender) = self.senders.get(shard_id as usize) {
             let _ = sender.try_send(order);
         }
@@ -725,7 +901,7 @@ pub struct OrderMatchingEngine {
     settlement: Option<SettlementService>,
     market_clearing: Option<MarketClearingService>,
     blockchain_service: Option<BlockchainService>,
-    grid_topology: GridTopologyService,
+    grid_topology: Arc<GridTopologyService>,
     market_data_service: Option<MarketDataService>,
     event_bus: Option<EventBus>,
 }
@@ -742,9 +918,12 @@ impl OrderMatchingEngine {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1);
-        
+
         if match_interval_secs != 1 {
-            info!("Order matching interval set to {} seconds (Shards: {})", match_interval_secs, num_shards);
+            info!(
+                "Order matching interval set to {} seconds (Shards: {})",
+                match_interval_secs, num_shards
+            );
         }
 
         Self {
@@ -755,10 +934,22 @@ impl OrderMatchingEngine {
             settlement: None,
             market_clearing: None,
             blockchain_service: None,
-            grid_topology: GridTopologyService::new(),
+            grid_topology: Arc::new(GridTopologyService::new()),
             market_data_service: None,
             event_bus: None,
         }
+    }
+
+    /// Set the matching interval
+    pub fn with_interval(mut self, interval_secs: u64) -> Self {
+        self.match_interval_secs = interval_secs;
+        self
+    }
+
+    /// Set the Grid Topology service
+    pub fn with_topology(mut self, grid_topology: Arc<GridTopologyService>) -> Self {
+        self.grid_topology = grid_topology;
+        self
     }
 
     /// Set the Market Data service for on-chain telemetry
@@ -808,8 +999,7 @@ impl OrderMatchingEngine {
 
         info!(
             "🚀 Starting sharded order matching engine (shards: {}, interval: {}s)",
-            num_shards,
-            self.match_interval_secs
+            num_shards, self.match_interval_secs
         );
 
         // Initialize and start workers
@@ -825,7 +1015,7 @@ impl OrderMatchingEngine {
                 self.match_interval_secs,
                 self.grid_topology.clone(),
             );
-            
+
             // Wire up dependencies
             worker.settlement = self.settlement.clone();
             worker.market_clearing = self.market_clearing.clone();
@@ -835,7 +1025,7 @@ impl OrderMatchingEngine {
 
             let worker = Arc::new(worker);
             let running = self.running.clone();
-            
+
             tokio::spawn(async move {
                 worker.run(running, rx).await;
             });
@@ -860,7 +1050,9 @@ impl OrderMatchingEngine {
         loop {
             {
                 let running = self.running.read().await;
-                if !*running { break; }
+                if !*running {
+                    break;
+                }
             }
 
             if let Err(e) = self.expire_stale_orders().await {
@@ -897,9 +1089,9 @@ impl OrderMatchingEngine {
     /// Expire orders that have passed their expiration time
     pub async fn expire_stale_orders(&self) -> Result<u64> {
         let now = chrono::Utc::now();
-        
+
         // Fetch stale orders that need expiry
-        let stale_orders_rows = sqlx::query!(
+        let stale_orders_rows = sqlx::query(
             r#"
             SELECT 
                 id, user_id, order_type, side, 
@@ -917,8 +1109,9 @@ impl OrderMatchingEngine {
         .await?;
 
         // use crate::api::handlers::websocket::broadcaster::broadcast_p2p_order_update;
-        let stale_orders: Vec<TradingOrderDb> = stale_orders_rows.into_iter().map(|row| {
-             TradingOrderDb {
+        let stale_orders: Vec<TradingOrderDb> = stale_orders_rows
+            .into_iter()
+            .map(|row| TradingOrderDb {
                 id: row.get("id"),
                 user_id: row.get("user_id"),
                 order_type: row.get("order_type"),
@@ -943,17 +1136,23 @@ impl OrderMatchingEngine {
                 trailing_offset: row.get("trailing_offset"),
                 triggered_at: row.get("triggered_at"),
                 last_peak_price: row.get("last_peak_price"),
-             }
-        }).collect();
+            })
+            .collect();
 
         let mut expired_count = 0;
         for order in stale_orders {
-            debug!("🕒 Expiring order {}: type={}, side={}, amount={}, status={}", 
-                order.id, order.order_type.as_str(), order.side.as_str(), order.energy_amount, order.status.as_str());
+            debug!(
+                "🕒 Expiring order {}: type={}, side={}, amount={}, status={}",
+                order.id,
+                order.order_type.as_str(),
+                order.side.as_str(),
+                order.energy_amount,
+                order.status.as_str()
+            );
 
             // 1. Update status to expired
-            sqlx::query!(
-                "UPDATE trading_orders SET status = 'expired', updated_at = NOW() WHERE id = $1"
+            sqlx::query(
+                "UPDATE trading_orders SET status = 'expired', updated_at = NOW() WHERE id = $1",
             )
             .bind(order.id)
             .execute(&self.db)
@@ -961,25 +1160,54 @@ impl OrderMatchingEngine {
 
             // 2. Process Refund/Unlock
             if let Some(market_clearing) = &self.market_clearing {
-                let remaining_amount = order.energy_amount - order.filled_amount.unwrap_or(Decimal::ZERO);
-                
+                let remaining_amount =
+                    order.energy_amount - order.filled_amount.unwrap_or(Decimal::ZERO);
+
                 if remaining_amount > Decimal::ZERO {
                     match order.side {
                         OrderSide::Buy => {
                             let refund_value = remaining_amount * order.price_per_kwh;
                             // The provided snippet for `receiver_wallet_addr` and `receiver_wallet` is incomplete and refers to an undefined `db_user`.
                             // Assuming it was meant to be part of a larger, separate change or a placeholder, it's omitted to maintain syntactic correctness.
-                            if let Err(e) = market_clearing.unlock_funds(order.user_id, order.id, refund_value, "Order Expired").await {
-                                error!("Failed to refund funds for expired order {}: {}", order.id, e);
+                            if let Err(e) = market_clearing
+                                .unlock_funds(
+                                    order.user_id,
+                                    order.id,
+                                    refund_value,
+                                    "Order Expired",
+                                )
+                                .await
+                            {
+                                error!(
+                                    "Failed to refund funds for expired order {}: {}",
+                                    order.id, e
+                                );
                             } else {
-                                debug!("💰 Refunded {} for expired buy order {}", refund_value, order.id);
+                                debug!(
+                                    "💰 Refunded {} for expired buy order {}",
+                                    refund_value, order.id
+                                );
                             }
                         }
                         OrderSide::Sell => {
-                            if let Err(e) = market_clearing.unlock_energy(order.user_id, order.id, remaining_amount, "Order Expired").await {
-                                error!("Failed to unlock energy for expired order {}: {}", order.id, e);
+                            if let Err(e) = market_clearing
+                                .unlock_energy(
+                                    order.user_id,
+                                    order.id,
+                                    remaining_amount,
+                                    "Order Expired",
+                                )
+                                .await
+                            {
+                                error!(
+                                    "Failed to unlock energy for expired order {}: {}",
+                                    order.id, e
+                                );
                             } else {
-                                debug!("⚡ Unlocked {} energy for expired sell order {}", remaining_amount, order.id);
+                                debug!(
+                                    "⚡ Unlocked {} energy for expired sell order {}",
+                                    remaining_amount, order.id
+                                );
                             }
                         }
                     }
@@ -992,26 +1220,31 @@ impl OrderMatchingEngine {
         if expired_count > 0 {
             info!("🧹 Expired {} stale orders totaling", expired_count);
         }
-        
+
         Ok(expired_count)
     }
 
-
     /// Manually trigger a matching cycle (for testing or API endpoints)
     /// Returns a summary of matched orders and total volume.
-    pub async fn trigger_matching(&self) -> Result<crate::domain::trading::models::MatchingSummary> {
+    pub async fn trigger_matching(
+        &self,
+    ) -> Result<crate::domain::trading::models::MatchingSummary> {
         info!("Manual matching trigger requested for all shards");
-        
-        let market_clearing = self.market_clearing.as_ref().ok_or_else(|| 
-            anyhow::anyhow!("MarketClearingService not initialized"))?;
+
+        let market_clearing = self
+            .market_clearing
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MarketClearingService not initialized"))?;
 
         // 1. Get current market epoch
-        let epoch = market_clearing.get_current_epoch().await?
+        let epoch = market_clearing
+            .get_current_epoch()
+            .await?
             .ok_or_else(|| anyhow::anyhow!("No active market epoch found"))?;
 
         // 2. Execute matching using the optimized clearing service
         let matches = market_clearing.run_order_matching(epoch.id).await?;
-        
+
         let matched_count = matches.len();
         let total_volume: Decimal = matches.iter().map(|m| m.matched_amount).sum();
         let match_ids = matches.iter().map(|m| m.id).collect();

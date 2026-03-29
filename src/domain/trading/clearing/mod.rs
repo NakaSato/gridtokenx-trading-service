@@ -1,17 +1,17 @@
-pub mod types;
-pub mod epoch;
-pub mod orders;
-pub mod matching;
 pub mod blockchain;
-pub mod escrow;
-pub mod revenue;
 pub mod depth;
+pub mod epoch;
+pub mod escrow;
+pub mod matching;
+pub mod orders;
+pub mod revenue;
+pub mod types;
 
-use std::sync::Arc;
-use sqlx::PgPool;
+use crate::core::config::Config;
+use crate::infra::db::DatabasePool;
+use chrono::{Timelike, Utc};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::FromPrimitive;
-use chrono::{Utc, Timelike};
+use std::sync::Arc;
 
 pub use types::*;
 
@@ -20,7 +20,8 @@ use crate::services::erc::ErcService;
 
 #[derive(Clone, Debug)]
 pub struct MarketClearingService {
-    db: PgPool,
+    db: DatabasePool,
+    config: Arc<Config>,
     blockchain_service: Arc<BlockchainService>,
     #[allow(dead_code)]
     wallet_service: WalletService,
@@ -32,18 +33,38 @@ pub struct MarketClearingService {
 #[derive(Clone, Debug)]
 pub struct WebSocketService;
 impl WebSocketService {
-    pub async fn broadcast_order_created(&self, _id: String, _amt: Decimal, _price: Decimal, _type: Option<String>, _user: String) {}
+    pub async fn broadcast_order_created(
+        &self,
+        _id: String,
+        _amt: Decimal,
+        _price: Decimal,
+        _type: Option<String>,
+        _user: String,
+    ) {
+    }
+    pub async fn broadcast_order_book_snapshot(
+        &self,
+        _bids: Vec<(String, String)>,
+        _asks: Vec<(String, String)>,
+        _best_bid: Option<String>,
+        _best_ask: Option<String>,
+        _mid_price: Option<String>,
+        _spread: Option<String>,
+    ) {
+    }
 }
 
 impl MarketClearingService {
     pub fn new(
-        db: PgPool,
+        db: DatabasePool,
+        config: Arc<Config>,
         blockchain_service: Arc<BlockchainService>,
         wallet_service: WalletService,
         erc_service: Arc<ErcService>,
     ) -> Self {
         Self {
             db,
+            config,
             blockchain_service,
             wallet_service,
             erc_service,
@@ -64,12 +85,12 @@ impl MarketClearingService {
     }
 
     /// Get a Time-of-Use (TOU) pricing multiplier based on the current hour.
-    /// 
+    ///
     /// This now also incorporates the dynamic `pricing.market_multiplier` from config.
     pub async fn get_tou_multiplier(&self) -> (Decimal, &'static str) {
         let hour = Utc::now().hour();
         let (base_mult, period) = Self::get_tou_multiplier_for_hour(hour);
-        
+
         // Placeholder for market multiplier (previously from P2PConfigService)
         let market_mult = Decimal::ONE;
 
@@ -105,12 +126,8 @@ impl MarketClearingService {
         }
 
         // Get best bid (highest buy price) and best ask (lowest sell price)
-        let best_bid = buy_orders.iter()
-            .map(|o| o.price_per_kwh)
-            .max()?;
-        let best_ask = sell_orders.iter()
-            .map(|o| o.price_per_kwh)
-            .min()?;
+        let best_bid = buy_orders.iter().map(|o| o.price_per_kwh).max()?;
+        let best_ask = sell_orders.iter().map(|o| o.price_per_kwh).min()?;
 
         // No clearing price if bid < ask (no overlap)
         if best_bid < best_ask {
@@ -121,11 +138,13 @@ impl MarketClearingService {
         let clearing_price = (best_bid + best_ask) / Decimal::from(2);
 
         // Calculate clearable volume (sum of orders that can trade)
-        let buy_volume: Decimal = buy_orders.iter()
+        let buy_volume: Decimal = buy_orders
+            .iter()
             .filter(|o| o.price_per_kwh >= best_ask)
             .map(|o| o.energy_amount)
             .sum();
-        let sell_volume: Decimal = sell_orders.iter()
+        let sell_volume: Decimal = sell_orders
+            .iter()
             .filter(|o| o.price_per_kwh <= best_bid)
             .map(|o| o.energy_amount)
             .sum();

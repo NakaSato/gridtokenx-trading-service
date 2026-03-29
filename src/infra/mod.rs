@@ -1,5 +1,5 @@
-pub mod db;
-pub mod cache;
 pub mod blockchain;
-pub mod logging;
+pub mod cache;
+pub mod db;
 pub mod events;
+pub mod logging;

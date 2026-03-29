@@ -3,8 +3,8 @@ use sqlx::PgPool;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::services::erc::types::{CertificateStats, ErcCertificate};
 use crate::infra::blockchain::BlockchainService;
+use crate::services::erc::types::{CertificateStats, ErcCertificate};
 
 /// Manager for Energy Renewable Certificate queries
 #[derive(Clone, Debug)]
@@ -25,53 +25,51 @@ impl ErcQueryManager {
 
     #[instrument(skip(self))]
     pub async fn get_user_stats(&self, user_id: Uuid) -> Result<CertificateStats> {
-        let total_certificates: (i64,) = sqlx::query_as(
+        let total_certificates: i64 = sqlx::query_scalar(
             r#"
-            SELECT COUNT(*) as count 
+            SELECT COUNT(*)
             FROM erc_certificates 
             WHERE user_id = $1
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_one(&self.db_pool)
         .await?;
-        
-        let total_certificates = total_certificates.0;
 
-        let _active_certificates: (i64,) = sqlx::query_as(
+        let _active_certificates: i64 = sqlx::query_scalar(
             r#"
-            SELECT COUNT(*) as count 
+            SELECT COUNT(*)
             FROM erc_certificates 
             WHERE user_id = $1 AND status = 'Active'
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_one(&self.db_pool)
         .await?;
 
-        let _retired_certificates: (i64,) = sqlx::query_as(
+        let _retired_certificates: i64 = sqlx::query_scalar(
             r#"
-            SELECT COUNT(*) as count 
+            SELECT COUNT(*)
             FROM erc_certificates 
             WHERE user_id = $1 AND status = 'Retired'
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_one(&self.db_pool)
         .await?;
 
-        let total_energy: (Option<rust_decimal::Decimal>,) = sqlx::query_as(
+        let total_energy: Option<rust_decimal::Decimal> = sqlx::query_scalar(
             r#"
-            SELECT SUM(kwh_amount) as total
+            SELECT SUM(kwh_amount)
             FROM erc_certificates 
             WHERE user_id = $1
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_one(&self.db_pool)
         .await?;
-        
-        let total_energy = total_energy.0.unwrap_or(rust_decimal::Decimal::ZERO);
+
+        let total_energy = total_energy.unwrap_or(rust_decimal::Decimal::ZERO);
 
         Ok(CertificateStats {
             total_certificates,
@@ -101,7 +99,7 @@ impl ErcQueryManager {
                 updated_at
             FROM erc_certificates
             WHERE certificate_id = $1
-            "#
+            "#,
         )
         .bind(certificate_id)
         .fetch_optional(&self.db_pool)
@@ -125,7 +123,7 @@ impl ErcQueryManager {
             FROM erc_certificates
             WHERE user_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(user_id)
         .fetch_all(&self.db_pool)
@@ -155,8 +153,7 @@ impl ErcQueryManager {
                     kwh_amount, issue_date, expiry_date,
                     issuer_wallet, status,
                     blockchain_tx_signature, metadata, settlement_id,
-                    created_at as "created_at!",
-                updated_at as "updated_at!"
+                    created_at, updated_at
                 FROM erc_certificates
                 WHERE user_id = $1 AND status = $2
                 ORDER BY {} {}
@@ -172,8 +169,7 @@ impl ErcQueryManager {
                     kwh_amount, issue_date, expiry_date,
                     issuer_wallet, status,
                     blockchain_tx_signature, metadata, settlement_id,
-                    created_at as "created_at!",
-                updated_at as "updated_at!"
+                    created_at, updated_at
                 FROM erc_certificates
                 WHERE user_id = $1
                 ORDER BY {} {}
@@ -259,7 +255,7 @@ impl ErcQueryManager {
             WHERE wallet_address = $1
             ORDER BY issue_date DESC
             LIMIT $2 OFFSET $3
-            "#
+            "#,
         )
         .bind(wallet_address)
         .bind(limit)
@@ -300,7 +296,7 @@ impl ErcQueryManager {
               AND kwh_amount >= $2
             ORDER BY kwh_amount ASC, issue_date ASC
             LIMIT 5
-            "#
+            "#,
         )
         .bind(user_id)
         .bind(min_kwh_amount)

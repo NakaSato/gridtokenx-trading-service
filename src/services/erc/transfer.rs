@@ -1,14 +1,10 @@
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::services::erc::types::{CertificateTransfer, ErcCertificate};
 use crate::infra::blockchain::BlockchainService;
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::Keypair,
-};
+use crate::services::erc::types::{CertificateTransfer, ErcCertificate};
+use solana_sdk::{pubkey::Pubkey, signature::Keypair};
 
 /// Manager for transferring ERC certificates
 #[derive(Clone, Debug)]
@@ -71,7 +67,7 @@ impl CertificateTransferManager {
                 issuer_wallet, status,
                 blockchain_tx_signature, metadata, settlement_id,
                 created_at, updated_at
-            "#
+            "#,
         )
         .bind(certificate_uuid)
         .bind(to_wallet)
@@ -89,7 +85,7 @@ impl CertificateTransferManager {
             )
             VALUES ($1, $2, $3, $4, NOW(), $5, NOW())
             RETURNING *
-            "#
+            "#,
         )
         .bind(Uuid::new_v4())
         .bind(certificate.id)

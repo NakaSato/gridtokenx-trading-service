@@ -4,8 +4,8 @@ use aes_gcm::{
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use bs58;
 use hmac::Hmac;
-use pbkdf2::pbkdf2;
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 use solana_client::rpc_client::RpcClient;
@@ -19,7 +19,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
-use bs58;
 
 /// Service for managing Solana wallets in development environment
 #[derive(Clone)]
@@ -71,7 +70,7 @@ impl WalletService {
     }
 
     /// Get wallet balance in lamports
-    pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
+    pub async fn get_balance(&self, pubkey: &Pubkey, _force_refresh: bool) -> Result<u64> {
         match self.rpc_client.get_balance(pubkey) {
             Ok(balance) => {
                 info!("Retrieved balance for {}: {} lamports", pubkey, balance);
@@ -268,37 +267,71 @@ impl WalletService {
     /// Initialize wallet from configuration
     /// Tries file first, then environment variable
     pub async fn initialize_authority(&self) -> Result<()> {
-        // Try loading from configured file path
-        if let Some(ref path) = self.wallet_path {
+        // 1. Load the keypair first
+        let loaded = if let Some(ref path) = self.wallet_path {
             if Path::new(path).exists() {
-                return self.load_from_file(path).await;
+                self.load_from_file(path).await.is_ok()
             } else {
                 warn!("Wallet file not found: {}", path);
+                false
+            }
+        } else {
+            false
+        };
+
+        if !loaded {
+            // Try loading from default locations
+            let default_paths = vec![
+                "./dev-wallet.json",
+                "../dev-wallet.json",
+                "../../dev-wallet.json",
+                "/app/dev-wallet.json",
+            ];
+
+            let mut found = false;
+            for path in default_paths {
+                if Path::new(path).exists() {
+                    debug!("Found wallet file at: {}", path);
+                    if self.load_from_file(path).await.is_ok() {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found {
+                // Try environment variable
+                if std::env::var("AUTHORITY_WALLET_PRIVATE_KEY").is_ok() {
+                    self.load_from_env().await?;
+                } else {
+                    return Err(anyhow!(
+                        "No authority wallet found. Set AUTHORITY_WALLET_PRIVATE_KEY env var or provide dev-wallet.json"
+                    ));
+                }
             }
         }
 
-        // Try loading from default locations
-        let default_paths = vec![
-            "./dev-wallet.json",
-            "../dev-wallet.json",
-            "/app/dev-wallet.json",
-        ];
-
-        for path in default_paths {
-            if Path::new(path).exists() {
-                debug!("Found wallet file at: {}", path);
-                return self.load_from_file(path).await;
+        // 2. Wait for the wallet to be funded (useful for startup race conditions)
+        if let Ok(keypair) = self.get_authority_keypair().await {
+            let pubkey = keypair.pubkey();
+            info!("Waiting for authority wallet {} to be funded...", pubkey);
+            
+            let mut attempts = 0;
+            while attempts < 30 {
+                // Use the newly updated get_balance signature with force_refresh=true
+                if let Ok(balance) = self.get_balance(&pubkey, true).await {
+                    if balance > 0 {
+                        info!("✅ Authority wallet funded: {} lamports", balance);
+                        return Ok(());
+                    }
+                }
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
+            warn!("⚠️ Authority wallet {} still has 0 balance after 30 seconds", pubkey);
         }
 
-        // Try environment variable
-        if std::env::var("AUTHORITY_WALLET_PRIVATE_KEY").is_ok() {
-            return self.load_from_env().await;
-        }
-
-        Err(anyhow!(
-            "No authority wallet found. Set AUTHORITY_WALLET_PRIVATE_KEY env var or provide dev-wallet.json"
-        ))
+        Ok(())
     }
 
     /// Get the authority keypair
@@ -323,14 +356,15 @@ impl WalletService {
     ) -> Result<(String, String, String)> {
         // 1. Generate salt
         let mut salt = [0u8; 16];
-        rand::rng().fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut salt);
 
         // 2. Secret Sharding: Mix password and master secret
         // This ensures the DB alone (salt+enc_key) is not enough to decrypt
         // and the App alone (master_secret) is not enough to decrypt.
         use hmac::Mac;
-        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(master_secret.as_bytes())
-            .map_err(|e| anyhow!("HMAC init failed: {}", e))?;
+        let mut mac =
+            <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(master_secret.as_bytes())
+                .map_err(|e| anyhow!("HMAC init failed: {}", e))?;
         mac.update(password.as_bytes());
         let sharded_key_material = mac.finalize().into_bytes();
 
@@ -341,7 +375,7 @@ impl WalletService {
 
         // 4. Generate IV (Nonce)
         let mut iv = [0u8; 12];
-        rand::rng().fill_bytes(&mut iv);
+        OsRng.fill_bytes(&mut iv);
         let nonce = Nonce::from_slice(&iv);
 
         // 5. Encrypt
@@ -379,8 +413,9 @@ impl WalletService {
 
         // 2. Secret Sharding: Mix password and master secret
         use hmac::Mac;
-        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(master_secret.as_bytes())
-            .map_err(|e| anyhow!("HMAC init failed: {}", e))?;
+        let mut mac =
+            <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(master_secret.as_bytes())
+                .map_err(|e| anyhow!("HMAC init failed: {}", e))?;
         mac.update(password.as_bytes());
         let sharded_key_material = mac.finalize().into_bytes();
 
@@ -425,20 +460,25 @@ impl WalletService {
     pub fn encrypt_to_bytes(data: &[u8], secret: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         // Use a dummy password since this is for direct encryption
         let (enc_b64, salt_b64, iv_b64) = Self::encrypt_private_key("direct", secret, data)?;
-        
+
         let enc_data = general_purpose::STANDARD.decode(enc_b64)?;
         let salt = general_purpose::STANDARD.decode(salt_b64)?;
         let iv = general_purpose::STANDARD.decode(iv_b64)?;
-        
+
         Ok((enc_data, salt, iv))
     }
 
     /// Decrypt bytes using a secret
-    pub fn decrypt_bytes(encrypted_data: &[u8], salt: &[u8], iv: &[u8], secret: &str) -> Result<Vec<u8>> {
+    pub fn decrypt_bytes(
+        encrypted_data: &[u8],
+        salt: &[u8],
+        iv: &[u8],
+        secret: &str,
+    ) -> Result<Vec<u8>> {
         let enc_b64 = general_purpose::STANDARD.encode(encrypted_data);
         let salt_b64 = general_purpose::STANDARD.encode(salt);
         let iv_b64 = general_purpose::STANDARD.encode(iv);
-        
+
         Self::decrypt_private_key("direct", secret, &enc_b64, &salt_b64, &iv_b64)
     }
 }

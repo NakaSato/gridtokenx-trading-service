@@ -1,7 +1,7 @@
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use rust_decimal::Decimal;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload")]
@@ -21,6 +21,7 @@ pub enum Event {
         id: Uuid,
         triggered_at: DateTime<Utc>,
     },
+    OrderCreated(crate::domain::trading::models::TradingOrderDb),
     ErcIssued(ErcIssuedPayload),
     SettlementProcessed(SettlementProcessedPayload),
 }

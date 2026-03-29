@@ -9,16 +9,29 @@ pub enum TransactionType {
 }
 
 impl TransactionType {
-    pub fn should_use_priority_fees(&self) -> bool { true }
+    pub fn should_use_priority_fees(&self) -> bool {
+        true
+    }
 }
 
 pub struct PriorityFeeService;
 impl PriorityFeeService {
-    pub fn recommend_priority_level(_t: TransactionType) -> u64 { 1000 }
-    pub fn recommend_compute_limit(_t: TransactionType) -> u32 { 200_000 }
-    pub fn add_priority_fee(_i: &mut Vec<solana_sdk::instruction::Instruction>, _l: u64, _c: Option<u32>) -> anyhow::Result<()> { Ok(()) }
+    pub fn recommend_priority_level(_t: TransactionType) -> u64 {
+        1000
+    }
+    pub fn recommend_compute_limit(_t: TransactionType) -> u32 {
+        200_000
+    }
+    pub fn add_priority_fee(
+        _i: &mut Vec<solana_sdk::instruction::Instruction>,
+        _l: u64,
+        _c: Option<u32>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 use anyhow::{anyhow, Result};
+use bs58;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     instruction::Instruction,
@@ -26,12 +39,11 @@ use solana_sdk::{
     signature::{Keypair, Signature, Signer},
     transaction::Transaction,
 };
+use spl_token_2022;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use bs58;
-use spl_token_2022;
 // use crate::api::middleware::metrics::{track_blockchain_operation, track_transaction_retry, track_rpc_error, track_priority_fee_recommended};
 fn track_blockchain_operation(_op: &str, _duration: f64, _success: bool) {}
 fn track_transaction_retry(_op: &str, _retry_count: u32) {}
@@ -44,7 +56,7 @@ impl BlockchainUtils {
     pub fn load_keypair_from_file(path: &str) -> anyhow::Result<solana_sdk::signature::Keypair> {
         let bytes = std::fs::read_to_string(path)?;
         let key_vec: Vec<u8> = serde_json::from_str(&bytes)?;
-        solana_sdk::signature::Keypair::from_bytes(&key_vec).map_err(|e| anyhow::anyhow!(e))
+        solana_sdk::signature::Keypair::try_from(key_vec.as_slice()).map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -132,7 +144,7 @@ impl TransactionHandler {
         }
 
         // NOTE: Priority fees are best added BEFORE transaction compilation.
-        // For raw transactions submitted here, we assume they either have fees 
+        // For raw transactions submitted here, we assume they either have fees
         // or we log that we cannot easily add them to a compiled message.
         debug!("Submitting pre-compiled transaction (skipping auto-priority-fee)");
 
@@ -148,14 +160,10 @@ impl TransactionHandler {
             duration.as_millis() as f64,
             true,
         );
-        info!(
-            "Transaction submitted successfully in {:?}",
-            duration
-        );
+        info!("Transaction submitted successfully in {:?}", duration);
 
         Ok(signature)
     }
-
 
     /// Simulate transaction with enhanced validation
     pub async fn simulate_transaction(&self, transaction: &Transaction) -> Result<()> {
@@ -206,7 +214,7 @@ impl TransactionHandler {
         tx_type_str: &'static str,
     ) -> Result<()> {
         debug!("Adding priority fees for transaction type: {}", tx_type_str);
-        
+
         // Map string type to TransactionType enum
         let tx_type = match tx_type_str {
             "token_minting" | "minting" => TransactionType::TokenMinting,
@@ -224,12 +232,8 @@ impl TransactionHandler {
         let priority_level = PriorityFeeService::recommend_priority_level(tx_type);
         let compute_limit = PriorityFeeService::recommend_compute_limit(tx_type);
 
-        PriorityFeeService::add_priority_fee(
-            instructions,
-            priority_level,
-            Some(compute_limit),
-        )?;
-        
+        PriorityFeeService::add_priority_fee(instructions, priority_level, Some(compute_limit))?;
+
         Ok(())
     }
 
@@ -243,7 +247,7 @@ impl TransactionHandler {
         let payer_keypair = self.get_payer_keypair().await?;
 
         // Validate transaction before signing
-        self.validate_transaction(&transaction).await?;
+        self.validate_transaction(transaction).await?;
 
         // Sign with proper fee payer
         transaction
@@ -347,7 +351,7 @@ impl TransactionHandler {
 
             if attempts > 1 {
                 warn!("Transaction retry attempt {}/{}", attempts, max_retries);
-                
+
                 // Exponential backoff with jitter
                 // delay = base_delay * 2^(attempts-2) + jitter
                 // For attempt 2: 500ms * 2^0 = 500ms
@@ -355,11 +359,11 @@ impl TransactionHandler {
                 // For attempt 4: 500ms * 2^2 = 2000ms
                 let backoff_power = 2u32.saturating_pow(attempts.saturating_sub(2));
                 let mut delay = base_delay.saturating_mul(backoff_power);
-                
+
                 // Add simple jitter (up to 25% of the delay)
                 let jitter_ms = (backoff_power as u64 * 125) % 500; // Very simple pseudo-jitter
                 delay += Duration::from_millis(jitter_ms);
-                
+
                 if delay > max_delay {
                     delay = max_delay;
                 }
@@ -382,7 +386,7 @@ impl TransactionHandler {
             match conn.send_and_confirm_transaction(&transaction) {
                 Ok(sig) => {
                     info!("Transaction submitted successfully on attempt {}", attempts);
-                    track_transaction_retry(attempts, true);
+                    track_transaction_retry("submit_transaction", attempts);
                     return Ok(sig);
                 }
                 Err(e) => {
@@ -399,29 +403,35 @@ impl TransactionHandler {
                             ref data,
                             ..
                         },
-                    ) = e.kind() {
-                        track_rpc_error("submit_transaction", *code);
-                        debug!("RPC error details: code={}, message={}, data={:?}", code, message, data);
-                        
+                    ) = e.kind()
+                    {
+                        track_rpc_error("submit_transaction", &code.to_string());
+                        debug!(
+                            "RPC error details: code={}, message={}, data={:?}",
+                            code, message, data
+                        );
+
                         // Handle non-retryable errors
                         // -32002: Transaction preflight check failed (often permanent if logic/funds)
                         // But some preflight errors are transient (e.g., account in use -429? No, that's rate limit)
                         if *code == -32002 && message.contains("insufficient funds") {
-                            track_transaction_retry(attempts, false);
-                            return Err(anyhow!("Permanent error: insufficient funds for transaction"));
+                            track_transaction_retry("submit_transaction", attempts);
+                            return Err(anyhow!(
+                                "Permanent error: insufficient funds for transaction"
+                            ));
                         }
                     }
 
                     // If we've reached max retries, return error
                     if attempts >= max_retries {
-                        track_transaction_retry(attempts, false);
+                        track_transaction_retry("submit_transaction", attempts);
                         return Err(anyhow!(
                             "Transaction failed after {} retries: {}",
                             max_retries,
                             e
                         ));
                     }
-                    
+
                     // Specific handling for common errors to adjust strategy
                     match e.kind() {
                         solana_client::client_error::ClientErrorKind::RpcError(
@@ -431,12 +441,18 @@ impl TransactionHandler {
                                 ..
                             },
                         ) => {
-                            if *code == -32005 { // Node is behind
-                                warn!("RPC Node is behind: {}. Retrying with extra delay.", message);
+                            if *code == -32005 {
+                                // Node is behind
+                                warn!(
+                                    "RPC Node is behind: {}. Retrying with extra delay.",
+                                    message
+                                );
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             }
                         }
-                        solana_client::client_error::ClientErrorKind::Reqwest(re) if re.is_timeout() => {
+                        solana_client::client_error::ClientErrorKind::Reqwest(re)
+                            if re.is_timeout() =>
+                        {
                             warn!("RPC request timeout. Retrying...");
                         }
                         _ => {}
@@ -481,13 +497,16 @@ impl TransactionHandler {
     }
 
     /// Enhanced account balance queries with caching
-    pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
+    pub async fn get_balance(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<u64> {
         let cache_key = format!("balance:{}", pubkey);
-
-        // Check cache first
-        if let Some(cached_balance) = self.get_cached_balance(&cache_key).await {
-            debug!("Using cached balance for {}: {}", pubkey, cached_balance);
-            return Ok(cached_balance);
+        
+        // Only check cache if NOT forcing a refresh
+        if !force_refresh {
+            // Check cache first
+            if let Some(cached_balance) = self.get_cached_balance(&cache_key).await {
+                debug!("Using cached balance for {}: {}", pubkey, cached_balance);
+                return Ok(cached_balance);
+            }
         }
 
         // Fetch from network
@@ -497,7 +516,11 @@ impl TransactionHandler {
             .map_err(|e| anyhow!("Failed to get balance: {}", e))?;
 
         // Update cache with short TTL
-        self.update_balance_cache(&cache_key, balance, 60).await;
+        // If force_refresh is true and balance is 0, we might want to skip caching 
+        // to allow immediate retry (common during startup race conditions)
+        if !force_refresh || balance > 0 {
+            self.update_balance_cache(&cache_key, balance, 60).await;
+        }
 
         self.return_connection(conn).await;
         Ok(balance)
@@ -588,8 +611,8 @@ impl TransactionHandler {
     }
 
     /// Get account balance in SOL
-    pub async fn get_balance_sol(&self, pubkey: &Pubkey) -> Result<f64> {
-        let lamports = self.get_balance(pubkey).await?;
+    pub async fn get_balance_sol(&self, pubkey: &Pubkey, force_refresh: bool) -> Result<f64> {
+        let lamports = self.get_balance(pubkey, force_refresh).await?;
         Ok(lamports as f64 / 1_000_000_000.0)
     }
 
@@ -662,7 +685,7 @@ impl TransactionHandler {
     }
 
     /// Build, sign, and send a transaction (ASYNC - no confirmation wait)
-    /// 
+    ///
     /// **Performance**: Returns immediately after sending (~100-300ms)
     /// Does NOT wait for confirmation. Use for background tasks where
     /// eventual consistency is acceptable.
@@ -688,7 +711,7 @@ impl TransactionHandler {
     }
 
     /// Build, sign, and send a transaction with priority (ASYNC - no confirmation wait)
-    /// 
+    ///
     /// **Performance**: Returns immediately after sending (~100-300ms)
     /// Does NOT wait for confirmation. Use for background tasks where
     /// eventual consistency is acceptable.
@@ -766,10 +789,7 @@ impl TransactionHandler {
                     return Ok(TransactionStatus::Finalized);
                 }
                 TransactionStatus::Confirmed(count) if count >= target_confirmations => {
-                    info!(
-                        "Transaction {} reached {} confirmations",
-                        signature, count
-                    );
+                    info!("Transaction {} reached {} confirmations", signature, count);
                     return Ok(TransactionStatus::Confirmed(count));
                 }
                 TransactionStatus::Failed(err) => {
@@ -802,17 +822,22 @@ impl TransactionHandler {
                     // Transaction succeeded, check confirmation level
                     let config = RpcTransactionConfig {
                         encoding: Some(UiTransactionEncoding::Json),
-                        commitment: Some(solana_sdk::commitment_config::CommitmentConfig::finalized()),
+                        commitment: Some(
+                            solana_sdk::commitment_config::CommitmentConfig::finalized(),
+                        ),
                         max_supported_transaction_version: Some(0),
                     };
 
-                    match self.rpc_client.get_transaction_with_config(signature, config) {
+                    match self
+                        .rpc_client
+                        .get_transaction_with_config(signature, config)
+                    {
                         Ok(tx) => {
                             if tx.slot > 0 {
                                 // Get current slot to calculate confirmations
                                 let current_slot = self.rpc_client.get_slot().unwrap_or(0);
                                 let confirmations = current_slot.saturating_sub(tx.slot);
-                                
+
                                 // Solana considers 32+ confirmations as finalized
                                 if confirmations >= 32 {
                                     Ok(TransactionStatus::Finalized)
@@ -869,7 +894,7 @@ impl TransactionHandler {
         // For now, use a simple heuristic based on recent blocks
         // Default priority fee: 0.00001 SOL = 10,000 lamports
         let default_priority_fee = 10_000u64;
-        
+
         // Try to get recent prioritization fees
         match self.rpc_client.get_recent_prioritization_fees(&[]) {
             Ok(fees) => {
@@ -877,7 +902,8 @@ impl TransactionHandler {
                     Ok(default_priority_fee)
                 } else {
                     // Calculate median priority fee
-                    let mut fee_values: Vec<u64> = fees.iter().map(|f| f.prioritization_fee).collect();
+                    let mut fee_values: Vec<u64> =
+                        fees.iter().map(|f| f.prioritization_fee).collect();
                     fee_values.sort();
                     let median = fee_values[fee_values.len() / 2];
                     // Add 20% buffer for reliability
@@ -889,15 +915,19 @@ impl TransactionHandler {
             Err(_) => {
                 track_priority_fee_recommended("default", default_priority_fee);
                 Ok(default_priority_fee)
-            },
+            }
         }
     }
 
     /// Check if account has sufficient SOL for transaction fees
-    pub async fn check_sufficient_sol(&self, pubkey: &Pubkey, required_fee: u64) -> Result<SolBalanceCheck> {
-        let balance = self.get_balance(pubkey).await?;
+    pub async fn check_sufficient_sol(
+        &self,
+        pubkey: &Pubkey,
+        required_fee: u64,
+    ) -> Result<SolBalanceCheck> {
+        let balance = self.get_balance(pubkey, true).await?;
         let rent_exempt_minimum = 890_880u64; // Approximate rent-exempt minimum for an account
-        
+
         let required_total = required_fee + rent_exempt_minimum;
         let sufficient = balance >= required_total;
 
@@ -906,7 +936,11 @@ impl TransactionHandler {
             required_fee,
             rent_exempt_minimum,
             sufficient,
-            deficit: if sufficient { 0 } else { required_total - balance },
+            deficit: if sufficient {
+                0
+            } else {
+                required_total - balance
+            },
         })
     }
 
@@ -953,7 +987,7 @@ impl TransactionHandler {
     }
 
     // ============ ESCROW METHODS ============
-    
+
     /// Derive escrow PDA for an order
     pub fn derive_escrow_pda(order_id: &[u8; 32], program_id: &Pubkey) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"escrow", order_id.as_ref()], program_id)
@@ -969,28 +1003,48 @@ impl TransactionHandler {
         amount: u64,
         decimals: u8,
     ) -> Result<Signature> {
-        info!("🔒 Locking {} tokens to escrow: {} -> {}", amount, buyer_ata, escrow_ata);
-        
+        info!(
+            "🔒 Locking {} tokens to escrow: {} -> {}",
+            amount, buyer_ata, escrow_ata
+        );
+
         let token_program = self.get_token_program_for_mint(token_mint).await?;
-        
+
         // Check if Token-2022
         let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?;
         let is_token_2022 = token_program == token_2022_program;
-        
+
         let transfer_ix = if is_token_2022 {
             spl_token_2022::instruction::transfer_checked(
-                &token_program, buyer_ata, token_mint, escrow_ata, &buyer_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                buyer_ata,
+                token_mint,
+                escrow_ata,
+                &buyer_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         } else {
             spl_token::instruction::transfer_checked(
-                &token_program, buyer_ata, token_mint, escrow_ata, &buyer_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                buyer_ata,
+                token_mint,
+                escrow_ata,
+                &buyer_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         };
 
         let payer: Keypair = self.get_payer_keypair().await?;
         let recent_blockhash = self.get_recent_blockhash().await?;
         let transaction = Transaction::new_signed_with_payer(
-            &[transfer_ix], Some(&payer.pubkey()), &[&payer, buyer_authority], recent_blockhash,
+            &[transfer_ix],
+            Some(&payer.pubkey()),
+            &[&payer, buyer_authority],
+            recent_blockhash,
         );
 
         let signature = self.submit_transaction(transaction).await?;
@@ -1008,28 +1062,48 @@ impl TransactionHandler {
         amount: u64,
         decimals: u8,
     ) -> Result<Signature> {
-        info!("✅ Releasing {} tokens from escrow: {} -> {}", amount, escrow_ata, seller_ata);
-        
+        info!(
+            "✅ Releasing {} tokens from escrow: {} -> {}",
+            amount, escrow_ata, seller_ata
+        );
+
         let token_program = self.get_token_program_for_mint(token_mint).await?;
-        
+
         // Check if Token-2022
         let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?;
         let is_token_2022 = token_program == token_2022_program;
-        
+
         let transfer_ix = if is_token_2022 {
             spl_token_2022::instruction::transfer_checked(
-                &token_program, escrow_ata, token_mint, seller_ata, &escrow_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                escrow_ata,
+                token_mint,
+                seller_ata,
+                &escrow_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         } else {
             spl_token::instruction::transfer_checked(
-                &token_program, escrow_ata, token_mint, seller_ata, &escrow_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                escrow_ata,
+                token_mint,
+                seller_ata,
+                &escrow_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         };
 
         let payer: Keypair = self.get_payer_keypair().await?;
         let recent_blockhash = self.get_recent_blockhash().await?;
         let transaction = Transaction::new_signed_with_payer(
-            &[transfer_ix], Some(&payer.pubkey()), &[&payer, escrow_authority], recent_blockhash,
+            &[transfer_ix],
+            Some(&payer.pubkey()),
+            &[&payer, escrow_authority],
+            recent_blockhash,
         );
 
         let signature = self.submit_transaction(transaction).await?;
@@ -1047,28 +1121,48 @@ impl TransactionHandler {
         amount: u64,
         decimals: u8,
     ) -> Result<Signature> {
-        info!("↩️ Refunding {} tokens from escrow: {} -> {}", amount, escrow_ata, buyer_ata);
-        
+        info!(
+            "↩️ Refunding {} tokens from escrow: {} -> {}",
+            amount, escrow_ata, buyer_ata
+        );
+
         let token_program = self.get_token_program_for_mint(token_mint).await?;
-        
+
         // Check if Token-2022
         let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?;
         let is_token_2022 = token_program == token_2022_program;
-        
+
         let transfer_ix = if is_token_2022 {
             spl_token_2022::instruction::transfer_checked(
-                &token_program, escrow_ata, token_mint, buyer_ata, &escrow_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                escrow_ata,
+                token_mint,
+                buyer_ata,
+                &escrow_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         } else {
             spl_token::instruction::transfer_checked(
-                &token_program, escrow_ata, token_mint, buyer_ata, &escrow_authority.pubkey(), &[], amount, decimals,
+                &token_program,
+                escrow_ata,
+                token_mint,
+                buyer_ata,
+                &escrow_authority.pubkey(),
+                &[],
+                amount,
+                decimals,
             )?
         };
 
         let payer: Keypair = self.get_payer_keypair().await?;
         let recent_blockhash = self.get_recent_blockhash().await?;
         let transaction = Transaction::new_signed_with_payer(
-            &[transfer_ix], Some(&payer.pubkey()), &[&payer, escrow_authority], recent_blockhash,
+            &[transfer_ix],
+            Some(&payer.pubkey()),
+            &[&payer, escrow_authority],
+            recent_blockhash,
         );
 
         let signature = self.submit_transaction(transaction).await?;
@@ -1079,10 +1173,11 @@ impl TransactionHandler {
     /// Get the token program ID for a given mint (Token vs Token-2022)
     pub async fn get_token_program_for_mint(&self, mint: &Pubkey) -> Result<Pubkey> {
         let conn = self.get_connection().await;
-        let account = conn.get_account(mint)
+        let account = conn
+            .get_account(mint)
             .map_err(|e| anyhow!("Failed to get mint account {}: {}", mint, e))?;
         self.return_connection(conn).await;
-        
+
         Ok(account.owner)
     }
 }
@@ -1151,10 +1246,7 @@ pub mod utils {
             return Err(anyhow!("Transfer amount cannot be zero"));
         }
 
-        if !is_valid_pubkey(from_ata)
-            || !is_valid_pubkey(to_ata)
-            || !is_valid_pubkey(mint_pubkey)
-        {
+        if !is_valid_pubkey(from_ata) || !is_valid_pubkey(to_ata) || !is_valid_pubkey(mint_pubkey) {
             return Err(anyhow!("Invalid public key in transfer instruction"));
         }
 
@@ -1165,12 +1257,12 @@ pub mod utils {
 
         // Use transfer_checked for Token-2022 compatibility
         let instruction = spl_token::instruction::transfer_checked(
-            &spl_token::ID,  // Use standard token program; caller can override for Token-2022
+            &spl_token::ID, // Use standard token program; caller can override for Token-2022
             from_ata,
             mint_pubkey,
             to_ata,
             owner,
-            &[],  // No multisig signers
+            &[], // No multisig signers
             amount,
             decimals,
         )?;
@@ -1248,7 +1340,7 @@ pub mod utils {
         // Check if the ATA already exists
         match rpc_client.get_account(&ata) {
             Ok(account) => {
-                if account.data.len() > 0 {
+                if !account.data.is_empty() {
                     debug!("ATA {} already exists for owner {}", ata, owner);
                     return Ok((ata, None));
                 }
@@ -1261,12 +1353,13 @@ pub mod utils {
         debug!("Creating ATA instruction for owner {} mint {}", owner, mint);
 
         // Create instruction to create the ATA
-        let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
-            payer,
-            owner,
-            mint,
-            &spl_token::ID,
-        );
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                payer,
+                owner,
+                mint,
+                &spl_token::ID,
+            );
 
         Ok((ata, Some(create_ata_ix)))
     }
@@ -1288,7 +1381,7 @@ pub mod utils {
         // Check if the ATA already exists
         match rpc_client.get_account(&ata) {
             Ok(account) => {
-                if account.data.len() > 0 {
+                if !account.data.is_empty() {
                     debug!("Token-2022 ATA {} already exists for owner {}", ata, owner);
                     return Ok((ata, None));
                 }
@@ -1298,14 +1391,18 @@ pub mod utils {
             }
         }
 
-        debug!("Creating Token-2022 ATA instruction for owner {} mint {}", owner, mint);
-
-        let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
-            payer,
-            owner,
-            mint,
-            &token_2022_program,
+        debug!(
+            "Creating Token-2022 ATA instruction for owner {} mint {}",
+            owner, mint
         );
+
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account(
+                payer,
+                owner,
+                mint,
+                &token_2022_program,
+            );
 
         Ok((ata, Some(create_ata_ix)))
     }
@@ -1313,12 +1410,10 @@ pub mod utils {
     /// Determine if a mint uses Token-2022
     pub async fn is_token_2022(rpc_client: &Arc<RpcClient>, mint: &Pubkey) -> Result<bool> {
         let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?;
-        
+
         match rpc_client.get_account(mint) {
             Ok(account) => Ok(account.owner == token_2022_program),
             Err(e) => Err(anyhow!("Failed to get mint account: {}", e)),
         }
     }
-
-
 }
