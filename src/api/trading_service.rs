@@ -1,17 +1,20 @@
-use tonic::{Request, Response, Status};
-use std::str::FromStr;
-use rust_decimal::prelude::ToPrimitive;
-use crate::trading_proto::trading_service_server::TradingService;
-use crate::trading_proto::*;
-use crate::startup::AppState;
-use crate::services::erc::IssueErcRequest as DomainIssueErcRequest;
-use crate::infra::db::schema::types::{OrderSide, OrderType, OrderStatus};
 use crate::domain::trading::models::TradingOrderDb;
-use rust_decimal::Decimal;
+use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType};
+use crate::services::erc::IssueErcRequest as DomainIssueErcRequest;
+use crate::startup::AppState;
+use crate::trading_proto::*;
+use crate::metrics;
+use chrono::Utc;
+use connectrpc::{Context, ConnectError};
+use buffa::view::OwnedView;
 use rust_decimal::prelude::FromPrimitive;
-use uuid::Uuid;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{info, error};
+use std::time::Instant;
+use tracing::{error, info};
+use uuid::Uuid;
 
 pub struct TradingServiceImpl {
     pub state: Arc<AppState>,
@@ -23,31 +26,38 @@ impl TradingServiceImpl {
     }
 }
 
-#[tonic::async_trait]
 impl TradingService for TradingServiceImpl {
-    async fn submit_order(&self, request: Request<SubmitOrderRequest>) -> Result<Response<TradingResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+    async fn submit_order(
+        &self,
+        ctx: Context,
+        request: OwnedView<SubmitOrderRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("submit_order");
+        let start = Instant::now();
         
-        let side = OrderSide::from_str(&req.side).map_err(|_| Status::invalid_argument("Invalid order side"))?;
-        let order_type = OrderType::from_str(&req.order_type).map_err(|_| Status::invalid_argument("Invalid order type"))?;
-        let amount = Decimal::from_f64(req.energy_amount).ok_or_else(|| Status::invalid_argument("Invalid energy_amount"))?;
-        let price = Decimal::from_f64(req.price_per_kwh).ok_or_else(|| Status::invalid_argument("Invalid price_per_kwh"))?;
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+
+        let side = OrderSide::from_str(request.side)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order side"))?;
+        let order_type = OrderType::from_str(request.order_type)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order type"))?;
+        let amount = Decimal::from_f64(request.energy_amount)
+            .ok_or_else(|| ConnectError::invalid_argument("Invalid energy_amount"))?;
+        let price = Decimal::from_f64(request.price_per_kwh)
+            .ok_or_else(|| ConnectError::invalid_argument("Invalid price_per_kwh"))?;
 
         let order_id = Uuid::new_v4();
 
-        // 1. Persist to DB
-        // In this architecture, the MatchingEngine usually fetches from DB or we notify it.
-        // For simplicity and alignment with the ported code, we'll insert into DB and then notify.
         let order = sqlx::query_as::<_, TradingOrderDb>(
             r#"
             INSERT INTO trading_orders (
-                id, user_id, side, order_type, energy_amount, price_per_kwh, 
-                filled_amount, status, created_at, session_token, meter_id
+                id, user_id, side, order_type, energy_amount, price_per_kwh,
+                filled_amount, status, created_at, session_token, meter_id, zone_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11)
             RETURNING *
-            "#
+            "#,
         )
         .bind(order_id)
         .bind(user_id)
@@ -57,32 +67,51 @@ impl TradingService for TradingServiceImpl {
         .bind(price)
         .bind(Decimal::ZERO)
         .bind(OrderStatus::Active)
-        .bind(req.session_token)
-        .bind(req.meter_id)
+        .bind(request.session_token)
+        .bind(Uuid::parse_str(request.meter_id).ok())
+        .bind(request.zone_id)
         .fetch_one(&self.state.db)
         .await
         .map_err(|e| {
             error!("Failed to persist order: {}", e);
-            Status::internal("Internal database error")
+            ConnectError::internal("Internal database error")
         })?;
 
-        // 2. Notify Matching Engine
-        self.state.matching_engine.notify_new_order(order.zone_id, Some(order)).await;
+        self.state
+            .matching_engine
+            .notify_new_order(order.zone_id, Some(order))
+            .await;
+        
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        metrics::record_order_submission(
+            &order_type.to_string(),
+            &side.to_string(),
+            true,
+            duration_ms
+        );
 
-        Ok(Response::new(TradingResponse {
+        Ok((TradingResponse {
             success: true,
             message: "Order submitted successfully".to_string(),
             id: Some(order_id.to_string()),
-        }))
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn cancel_order(&self, request: Request<CancelOrderRequest>) -> Result<Response<TradingResponse>, Status> {
-        let req = request.into_inner();
-        let order_id = Uuid::parse_str(&req.order_id).map_err(|_| Status::invalid_argument("Invalid order_id"))?;
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+    async fn cancel_order(
+        &self,
+        ctx: Context,
+        request: OwnedView<CancelOrderRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("cancel_order");
+        let start = Instant::now();
+        
+        let order_id = Uuid::parse_str(request.order_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
 
-        // 1. Update DB
-        sqlx::query!(
+        sqlx::query(
             "UPDATE trading_orders SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND user_id = $2"
         )
         .bind(order_id)
@@ -91,23 +120,27 @@ impl TradingService for TradingServiceImpl {
         .await
         .map_err(|e| {
             error!("Failed to cancel order: {}", e);
-            Status::internal("Database error")
+            ConnectError::internal("Database error")
         })?;
+        
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        metrics::record_order_cancellation(true, duration_ms);
 
-        // 2. The matching engine will periodically clean up or we can notify it
-        // For now, it will be removed in the next matching cycle if not found in DB
-        // or we could add a specific cleanup mechanism.
-
-        Ok(Response::new(TradingResponse {
+        Ok((TradingResponse {
             success: true,
             message: "Order cancelled successfully".to_string(),
             id: Some(order_id.to_string()),
-        }))
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn get_order(&self, request: Request<GetOrderRequest>) -> Result<Response<OrderResponse>, Status> {
-        let req = request.into_inner();
-        let order_id = Uuid::parse_str(&req.order_id).map_err(|_| Status::invalid_argument("Invalid order_id"))?;
+    async fn get_order(
+        &self,
+        ctx: Context,
+        request: OwnedView<GetOrderRequestView<'static>>,
+    ) -> Result<(OrderResponse, Context), ConnectError> {
+        let order_id = Uuid::parse_str(request.order_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
 
         let order = sqlx::query_as::<_, TradingOrderDb>(
             r#"
@@ -125,25 +158,34 @@ impl TradingService for TradingServiceImpl {
         .await
         .map_err(|e| {
             error!("Failed to fetch order: {}", e);
-            Status::not_found("Order not found")
+            ConnectError::not_found("Order not found")
         })?;
 
-        Ok(Response::new(OrderResponse {
+        Ok((OrderResponse {
             id: order.id.to_string(),
             user_id: order.user_id.to_string(),
             energy_amount: order.energy_amount.to_f64().unwrap_or(0.0),
             price_per_kwh: order.price_per_kwh.to_f64().unwrap_or(0.0),
-            filled_amount: order.filled_amount.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0),
-            side: order.side.as_str().to_string(),
-            status: order.status.as_str().to_string(),
-            created_at: order.created_at.to_rfc3339(),
-        }))
+            filled_amount: order
+                .filled_amount
+                .unwrap_or(Decimal::ZERO)
+                .to_f64()
+                .unwrap_or(0.0),
+            side: order.side.to_string(),
+            status: order.status.to_string(),
+            created_at: order.created_at.unwrap_or(Utc::now()).to_rfc3339(),
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn list_orders(&self, request: Request<ListOrdersRequest>) -> Result<Response<ListOrdersResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
-        
+    async fn list_orders(
+        &self,
+        ctx: Context,
+        request: OwnedView<ListOrdersRequestView<'static>>,
+    ) -> Result<(ListOrdersResponse, Context), ConnectError> {
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+
         let orders = sqlx::query_as::<_, TradingOrderDb>(
             r#"
             SELECT 
@@ -162,133 +204,279 @@ impl TradingService for TradingServiceImpl {
         .await
         .map_err(|e| {
             error!("Failed to list orders: {}", e);
-            Status::internal("Database error")
+            ConnectError::internal("Database error")
         })?;
 
-        let response_orders = orders.into_iter().map(|o| OrderResponse {
-            id: o.id.to_string(),
-            user_id: o.user_id.to_string(),
-            energy_amount: o.energy_amount.to_f64().unwrap_or(0.0),
-            price_per_kwh: o.price_per_kwh.to_f64().unwrap_or(0.0),
-            filled_amount: o.filled_amount.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0),
-            side: o.side.as_str().to_string(),
-            status: o.status.as_str().to_string(),
-            created_at: o.created_at.to_rfc3339(),
-        }).collect();
+        let response_orders = orders
+            .into_iter()
+            .map(|o| OrderResponse {
+                id: o.id.to_string(),
+                user_id: o.user_id.to_string(),
+                energy_amount: o.energy_amount.to_f64().unwrap_or(0.0),
+                price_per_kwh: o.price_per_kwh.to_f64().unwrap_or(0.0),
+                filled_amount: o
+                    .filled_amount
+                    .unwrap_or(Decimal::ZERO)
+                    .to_f64()
+                    .unwrap_or(0.0),
+                side: o.side.to_string(),
+                status: o.status.to_string(),
+                created_at: o.created_at.unwrap_or(Utc::now()).to_rfc3339(),
+                ..Default::default()
+            })
+            .collect();
 
-        Ok(Response::new(ListOrdersResponse { orders: response_orders }))
+        Ok((ListOrdersResponse {
+            orders: response_orders,
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn issue_erc(&self, request: Request<IssueErcRequest>) -> Result<Response<TradingResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
-        let amount = Decimal::from_f64(req.energy_amount).ok_or_else(|| Status::invalid_argument("Invalid energy_amount"))?;
+    async fn notify_order(
+        &self,
+        ctx: Context,
+        request: OwnedView<NotifyOrderRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let order_id = Uuid::parse_str(request.order_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
 
-        // Fetch user's wallet address from DB (assuming identity domain is shared or we have a table)
-        // For now, let's assume we can find it in a 'wallets' or 'users' table.
-        let wallet: (String,) = sqlx::query_as!("SELECT wallet_address FROM user_identity WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&self.state.db)
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch wallet for user {}: {}", user_id, e);
-                Status::not_found("User wallet not found")
-            })?;
+        let order = sqlx::query_as::<_, TradingOrderDb>(
+            r#"
+            SELECT 
+                id, user_id, side, order_type, energy_amount, price_per_kwh, 
+                filled_amount, status, expires_at, created_at, filled_at, epoch_id, zone_id, 
+                meter_id, refund_tx_signature, order_pda, order_index, session_token,
+                trigger_price, trigger_type, trigger_status, trailing_offset, triggered_at, last_peak_price
+            FROM trading_orders 
+            WHERE id = $1
+            "#,
+        )
+        .bind(order_id)
+        .fetch_one(&self.state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to fetch order for notification {}: {}", order_id, e);
+            ConnectError::not_found("Order not found")
+        })?;
+
+        self.state
+            .matching_engine
+            .notify_new_order(order.zone_id, Some(order))
+            .await;
+
+        Ok((TradingResponse {
+            success: true,
+            message: "Matching engine notified successfully".to_string(),
+            id: Some(order_id.to_string()),
+            ..Default::default()
+        }, ctx))
+    }
+
+    async fn issue_erc(
+        &self,
+        ctx: Context,
+        request: OwnedView<IssueERCRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("issue_erc");
+        let start = Instant::now();
+        
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+        let amount = Decimal::from_f64(request.energy_amount)
+            .ok_or_else(|| ConnectError::invalid_argument("Invalid energy_amount"))?;
+
+        let wallet: String =
+            sqlx::query_scalar("SELECT wallet_address FROM user_identity WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&self.state.db)
+                .await
+                .map_err(|e| {
+                    error!("Failed to fetch wallet for user {}: {}", user_id, e);
+                    ConnectError::not_found("User wallet not found")
+                })?;
 
         let domain_req = DomainIssueErcRequest {
-            wallet_address: wallet.0,
-            meter_id: Some(req.meter_id),
+            wallet_address: wallet,
+            meter_id: Some(request.meter_id.to_string()),
             kwh_amount: amount,
             expiry_date: None,
             metadata: None,
         };
 
-        // Issuer wallet from config or state
-        let issuer_wallet = &self.state.config.solana_programs.registry_program_id; // Placeholder
+        let issuer_wallet = &self.state.config.solana_programs.registry_program_id;
 
-        match self.state.erc_service.issue_certificate(user_id, issuer_wallet, domain_req, None).await {
-            Ok(cert) => {
-                Ok(Response::new(TradingResponse {
-                    success: true,
-                    message: "ERC issuance initiated".to_string(),
-                    id: Some(cert.certificate_id),
-                }))
-            }
+        let result = self
+            .state
+            .erc_service
+            .issue_certificate(user_id, issuer_wallet, domain_req, None)
+            .await;
+        
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::record_erc_operation("issue", success, duration_ms);
+        
+        if success {
+            metrics::record_erc_issuance(amount.to_f64().unwrap_or(0.0), true, duration_ms);
+        }
+
+        match result {
+            Ok(cert) => Ok((TradingResponse {
+                success: true,
+                message: "ERC issuance initiated".to_string(),
+                id: Some(cert.certificate_id),
+                ..Default::default()
+            }, ctx)),
             Err(e) => {
                 error!("ERC issuance failed: {}", e);
-                Err(Status::internal(format!("ERC issuance failed: {}", e)))
+                metrics::record_erc_issuance(amount.to_f64().unwrap_or(0.0), false, duration_ms);
+                Err(ConnectError::internal(format!("ERC issuance failed: {}", e)))
             }
         }
     }
 
-    async fn transfer_erc(&self, request: Request<TransferErcRequest>) -> Result<Response<TradingResponse>, Status> {
-        let req = request.into_inner();
-        let from_user_id = Uuid::parse_str(&req.from_user_id).map_err(|_| Status::invalid_argument("Invalid from_user_id"))?;
-        let to_user_id = Uuid::parse_str(&req.to_user_id).map_err(|_| Status::invalid_argument("Invalid to_user_id"))?;
-        let amount = Decimal::from_f64(req.amount).ok_or_else(|| Status::invalid_argument("Invalid amount"))?;
-
-        // 1. Find a certificate to transfer
-        let certs = self.state.erc_service.find_settlement_certificates(from_user_id, amount).await
-            .map_err(|e| Status::internal(format!("Failed to find suitable certificates: {}", e)))?;
+    async fn transfer_erc(
+        &self,
+        ctx: Context,
+        request: OwnedView<TransferERCRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("transfer_erc");
+        let start = Instant::now();
         
-        let cert = certs.first().ok_or_else(|| Status::not_found("No certificates found with sufficient amount"))?;
+        let from_user_id = Uuid::parse_str(request.from_user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid from_user_id"))?;
+        let to_user_id = Uuid::parse_str(request.to_user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid to_user_id"))?;
+        let amount = Decimal::from_f64(request.amount)
+            .ok_or_else(|| ConnectError::invalid_argument("Invalid amount"))?;
 
-        // 2. Fetch wallets (again, assuming shared DB for now)
-        let from_wallet: (String,) = sqlx::query_as("SELECT wallet_address FROM user_identity WHERE id = $1")
-            .bind(from_user_id)
-            .fetch_one(&self.state.db)
+        let certs = self
+            .state
+            .erc_service
+            .find_settlement_certificates(from_user_id, amount)
             .await
-            .map_err(|_| Status::not_found("Sender wallet not found"))?;
+            .map_err(|e| {
+                ConnectError::internal(format!("Failed to find suitable certificates: {}", e))
+            })?;
 
-        let to_wallet: (String,) = sqlx::query_as("SELECT wallet_address FROM user_identity WHERE id = $1")
-            .bind(to_user_id)
-            .fetch_one(&self.state.db)
-            .await
-            .map_err(|_| Status::not_found("Recipient wallet not found"))?;
+        let cert = certs
+            .first()
+            .ok_or_else(|| ConnectError::not_found("No certificates found with sufficient amount"))?;
 
-        // 3. Perform transfer
-        // Note: tx_signature here might be placeholder or managed by ErcService background
-        self.state.erc_service.transfer_certificate(cert.id, &from_wallet.0, &to_wallet.0, to_user_id, "OFFCHAIN_P2P").await
-            .map_err(|e| Status::internal(format!("Transfer failed: {}", e)))?;
+        let from_wallet: String =
+            sqlx::query_scalar("SELECT wallet_address FROM user_identity WHERE id = $1")
+                .bind(from_user_id)
+                .fetch_one(&self.state.db)
+                .await
+                .map_err(|_| ConnectError::not_found("Sender wallet not found"))?;
 
-        Ok(Response::new(TradingResponse {
+        let to_wallet: String =
+            sqlx::query_scalar("SELECT wallet_address FROM user_identity WHERE id = $1")
+                .bind(to_user_id)
+                .fetch_one(&self.state.db)
+                .await
+                .map_err(|_| ConnectError::not_found("Recipient wallet not found"))?;
+
+        let result = self
+            .state
+            .erc_service
+            .transfer_certificate(
+                cert.id,
+                &from_wallet,
+                &to_wallet,
+                to_user_id,
+                "OFFCHAIN_P2P",
+            )
+            .await;
+        
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::record_erc_operation("transfer", success, duration_ms);
+        
+        if success {
+            metrics::record_erc_transfer(amount.to_f64().unwrap_or(0.0), true, duration_ms);
+        }
+
+        result
+            .map_err(|e| ConnectError::internal(format!("Transfer failed: {}", e)))?;
+
+        Ok((TradingResponse {
             success: true,
             message: "ERC transfer successful".to_string(),
             id: Some(cert.certificate_id.clone()),
-        }))
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn retire_erc(&self, request: Request<RetireErcRequest>) -> Result<Response<TradingResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
-        let amount = Decimal::from_f64(req.amount).ok_or_else(|| Status::invalid_argument("Invalid amount"))?;
-
-        // Similar to transfer, find a certificate
-        let certs = self.state.erc_service.find_settlement_certificates(user_id, amount).await
-            .map_err(|e| Status::internal(format!("Failed to find suitable certificates: {}", e)))?;
+    async fn retire_erc(
+        &self,
+        ctx: Context,
+        request: OwnedView<RetireERCRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("retire_erc");
+        let start = Instant::now();
         
-        let cert = certs.first().ok_or_else(|| Status::not_found("No certificates found with sufficient amount"))?;
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+        let amount = Decimal::from_f64(request.amount)
+            .ok_or_else(|| ConnectError::invalid_argument("Invalid amount"))?;
 
-        self.state.erc_service.retire_certificate(cert.id).await
-            .map_err(|e| Status::internal(format!("Retirement failed: {}", e)))?;
+        let certs = self
+            .state
+            .erc_service
+            .find_settlement_certificates(user_id, amount)
+            .await
+            .map_err(|e| {
+                ConnectError::internal(format!("Failed to find suitable certificates: {}", e))
+            })?;
 
-        Ok(Response::new(TradingResponse {
+        let cert = certs
+            .first()
+            .ok_or_else(|| ConnectError::not_found("No certificates found with sufficient amount"))?;
+
+        let result = self
+            .state
+            .erc_service
+            .retire_certificate(cert.id)
+            .await;
+        
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::record_erc_operation("retire", success, duration_ms);
+        
+        if success {
+            metrics::record_erc_retirement(amount.to_f64().unwrap_or(0.0), true, duration_ms);
+        }
+
+        result
+            .map_err(|e| ConnectError::internal(format!("Retirement failed: {}", e)))?;
+
+        Ok((TradingResponse {
             success: true,
             message: "ERC retired successfully".to_string(),
             id: Some(cert.certificate_id.clone()),
-        }))
+            ..Default::default()
+        }, ctx))
     }
 
-    async fn get_erc_balance(&self, request: Request<GetErcBalanceRequest>) -> Result<Response<ErcBalanceResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+    async fn get_erc_balance(
+        &self,
+        ctx: Context,
+        request: OwnedView<GetERCBalanceRequestView<'static>>,
+    ) -> Result<(ERCBalanceResponse, Context), ConnectError> {
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
 
-        let stats = self.state.erc_service.get_user_stats(user_id).await
-            .map_err(|e| Status::internal(format!("Failed to fetch ERC stats: {}", e)))?;
+        let stats = self
+            .state
+            .erc_service
+            .get_user_stats(user_id)
+            .await
+            .map_err(|e| ConnectError::internal(format!("Failed to fetch ERC stats: {}", e)))?;
 
-        Ok(Response::new(ErcBalanceResponse {
+        Ok((ERCBalanceResponse {
             balance: stats.active_kwh.to_f64().unwrap_or(0.0),
             asset_type: "KWH_CERT".to_string(),
-        }))
+            ..Default::default()
+        }, ctx))
     }
 }
