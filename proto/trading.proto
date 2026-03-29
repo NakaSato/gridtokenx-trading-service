@@ -8,6 +8,7 @@ service TradingService {
   rpc CancelOrder (CancelOrderRequest) returns (TradingResponse);
   rpc GetOrder (GetOrderRequest) returns (OrderResponse);
   rpc ListOrders (ListOrdersRequest) returns (ListOrdersResponse);
+  rpc NotifyOrder (NotifyOrderRequest) returns (TradingResponse);
 
   // ERC Operations (Energy Registration & Carbon)
   rpc IssueERC (IssueERCRequest) returns (TradingResponse);
@@ -24,6 +25,7 @@ message SubmitOrderRequest {
   string order_type = 5; // "limit", "market", etc.
   string meter_id = 6;
   string session_token = 7;
+  optional int32 zone_id = 8;
 }
 
 message CancelOrderRequest {
@@ -38,6 +40,11 @@ message GetOrderRequest {
 message ListOrdersRequest {
   string user_id = 1;
   optional string status = 2;
+}
+
+message NotifyOrderRequest {
+  string order_id = 1;
+  optional int32 zone_id = 2;
 }
 
 message TradingResponse {
