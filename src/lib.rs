@@ -4,7 +4,9 @@ pub mod domain;
 pub mod infra;
 pub mod services;
 pub mod startup;
+pub mod metrics;
 
 pub mod trading_proto {
-    tonic::include_proto!("trading");
+    include!(concat!(env!("OUT_DIR"), "/_trading_include.rs"));
+    pub use trading::*;
 }
