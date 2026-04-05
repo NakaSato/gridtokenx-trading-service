@@ -1,14 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 
 use sqlx::Row;
-use std::str::FromStr;
+// use std::str::FromStr;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 use ulid::Ulid;
 use uuid::Uuid;
+use tokio_util::sync::CancellationToken;
 
 use super::types::{OrderMatch, Settlement};
 use super::MarketClearingService;
@@ -50,7 +50,6 @@ pub enum MarketEvent {
 }
 
 impl MarketClearingService {
-    /// Run order matching algorithm for an epoch (Orchestrator)
     pub async fn run_order_matching(&self, epoch_id: Uuid) -> Result<Vec<OrderMatch>> {
         info!(
             "🚀 Starting Batch Optimized order matching for epoch: {}",
@@ -58,7 +57,10 @@ impl MarketClearingService {
         );
 
         // 1. Data Pre-fetching (O(1) pop_front ready)
-        let (mut buy_orders, mut sell_orders) = self.get_order_book(epoch_id).await?;
+        let (mut buy_orders, mut sell_orders) = self.get_order_book(epoch_id)
+            .await
+            .context("Failed to fetch order book for matching")?;
+        
         if buy_orders.is_empty() || sell_orders.is_empty() {
             info!("No orders to match in epoch: {}", epoch_id);
             return Ok(vec![]);
@@ -71,13 +73,14 @@ impl MarketClearingService {
             .collect();
         let decrypted_wallets = Arc::new(
             self.fetch_and_decrypt_wallets_batch(user_ids.into_iter().collect())
-                .await?,
+                .await
+                .context("Failed to fetch and decrypt wallets for matching")?,
         );
         let (tou_multiplier, _) = self.get_tou_multiplier().await;
 
         // 2. Core Matching Engine (Memory-Only)
         let result =
-            Self::perform_matching(epoch_id, &mut buy_orders, &mut sell_orders, tou_multiplier)
+            Self::perform_matching(epoch_id, &mut buy_orders, &mut sell_orders, tou_multiplier, &self.token)
                 .await;
 
         if result.matches.is_empty() {
@@ -92,7 +95,8 @@ impl MarketClearingService {
             &result.order_updates,
             result.total_volume,
         )
-        .await?;
+        .await
+        .context("Failed to persist matching results to database")?;
 
         // 4. Post-Commit Processing
         self.handle_post_matching_actions(
@@ -119,6 +123,7 @@ impl MarketClearingService {
             crate::domain::trading::clearing::types::OrderBookEntry,
         >,
         tou_multiplier: Decimal,
+        token: &CancellationToken,
     ) -> MatchingResult {
         let mut matches = Vec::new();
         let mut settlements = Vec::new();
@@ -130,6 +135,11 @@ impl MarketClearingService {
         while let (Some(buy_order), Some(sell_order)) =
             (buy_orders.front_mut(), sell_orders.front_mut())
         {
+            if token.is_cancelled() {
+                info!("MATCH_LOOP_INTERRUPTED: Shutdown signal received during batch matching for epoch {}", epoch_id);
+                break;
+            }
+
             if buy_order.price_per_kwh < sell_order.price_per_kwh {
                 break;
             }
@@ -243,11 +253,22 @@ impl MarketClearingService {
             matches.len(),
             settlements.len()
         );
-        let mut tx = self.db.begin().await?;
+        let mut tx = self.db.begin()
+            .await
+            .context("Failed to start database transaction for matching persistence")?;
 
-        Self::persist_orders_batch(&mut tx, order_updates).await?;
-        Self::persist_matches_batch(&mut tx, epoch_id, matches, settlements).await?;
-        Self::persist_settlements_batch(&mut tx, epoch_id, settlements).await?;
+        Self::persist_orders_batch(&mut tx, order_updates)
+            .await
+            .context("Failed to persist order updates in matching batch")?;
+        
+        Self::persist_matches_batch(&mut tx, epoch_id, matches, settlements)
+            .await
+            .context("Failed to persist match records in matching batch")?;
+        
+        Self::persist_settlements_batch(&mut tx, epoch_id, settlements)
+            .await
+            .context("Failed to persist settlement records in matching batch")?;
+        
         Self::update_epoch_statistics(
             &mut tx,
             epoch_id,
@@ -255,9 +276,13 @@ impl MarketClearingService {
             matches.len() as i32,
             settlements,
         )
-        .await?;
+        .await
+        .context("Failed to update epoch statistics in matching batch")?;
 
-        tx.commit().await?;
+        let _: () = tx.commit()
+            .await
+            .context("Failed to commit matching persistence transaction")?;
+        
         Ok(())
     }
 
@@ -279,7 +304,8 @@ impl MarketClearingService {
             });
 
         sqlx::query(r#"UPDATE trading_orders AS t SET filled_amount = u.filled, status = u.status::order_status, updated_at = NOW() FROM UNNEST($1::uuid[], $2::numeric[], $3::text[]) AS u(id, filled, status) WHERE t.id = u.id"#)
-            .bind(&ids).bind(&filled).bind(&statuses).execute(&mut **tx).await?;
+            .bind(&ids).bind(&filled).bind(&statuses).execute(&mut **tx).await
+            .context("Failed to execute batch order update in trading engine")?;
         Ok(())
     }
 
@@ -301,7 +327,9 @@ impl MarketClearingService {
 
         sqlx::query(r#"INSERT INTO order_matches (id, epoch_id, buy_order_id, sell_order_id, matched_amount, match_price, settlement_id, match_time, status) SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::numeric[], $6::numeric[], $7::uuid[], $8::timestamptz[], $9::text[])"#)
             .bind(&m_ids).bind(vec![epoch_id; matches.len()]).bind(&m_buys).bind(&m_sells).bind(&m_amounts).bind(&m_prices).bind(&m_settlements)
-            .bind(vec![Utc::now(); matches.len()]).bind(vec!["settled".to_string(); matches.len()]).execute(&mut **tx).await?;
+            .bind(vec![Utc::now(); matches.len()]).bind(vec!["settled".to_string(); matches.len()])
+            .execute(&mut **tx).await
+            .context("Failed to execute batch match insertion in trading engine")?;
         Ok(())
     }
 
@@ -343,7 +371,9 @@ impl MarketClearingService {
             settlements.iter().map(|s| s.sell_payload.clone()).collect();
 
         sqlx::query(r#"INSERT INTO settlements (id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id, energy_amount, price_per_kwh, total_amount, fee_amount, wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id, net_amount, status, buy_signature, sell_signature, buy_payload, sell_payload, processed_at, updated_at) SELECT * FROM UNNEST($1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::uuid[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::numeric[], $13::numeric[], $14::numeric[], $15::int4[], $16::int4[], $17::numeric[], $18::text[], $19::text[], $20::text[], $21::bytea[], $22::bytea[], $23::timestamptz[], $24::timestamptz[])"#)
-            .bind(&s_ids).bind(vec![epoch_id; settlements.len()]).bind(&s_buyers).bind(&s_sellers).bind(&s_buy_orders).bind(&s_sell_orders).bind(&s_amounts).bind(&s_prices).bind(&s_totals).bind(&s_fees).bind(&s_wh).bind(&s_lf).bind(&s_lc).bind(&s_ee).bind(&s_bz).bind(&s_sz).bind(&s_net).bind(vec!["completed".to_string(); settlements.len()]).bind(&s_buy_sigs).bind(&s_sell_sigs).bind(&s_buy_payloads).bind(&s_sell_payloads).bind(vec![Utc::now(); settlements.len()]).bind(vec![Utc::now(); settlements.len()]).execute(&mut **tx).await?;
+            .bind(&s_ids).bind(vec![epoch_id; settlements.len()]).bind(&s_buyers).bind(&s_sellers).bind(&s_buy_orders).bind(&s_sell_orders).bind(&s_amounts).bind(&s_prices).bind(&s_totals).bind(&s_fees).bind(&s_wh).bind(&s_lf).bind(&s_lc).bind(&s_ee).bind(&s_bz).bind(&s_sz).bind(&s_net).bind(vec!["completed".to_string(); settlements.len()]).bind(&s_buy_sigs).bind(&s_sell_sigs).bind(&s_buy_payloads).bind(&s_sell_payloads).bind(vec![Utc::now(); settlements.len()]).bind(vec![Utc::now(); settlements.len()])
+            .execute(&mut **tx).await
+            .context("Failed to execute batch settlement insertion in trading engine")?;
         Ok(())
     }
 
@@ -360,7 +390,9 @@ impl MarketClearingService {
             Decimal::ZERO
         };
         sqlx::query("UPDATE market_epochs SET total_volume = COALESCE(total_volume, 0) + $1, matched_count = COALESCE(matched_count, 0) + $2, clearing_price = $3 WHERE id = $4")
-            .bind(total_volume).bind(matched_count).bind(clearing_price).bind(epoch_id).execute(&mut **tx).await?;
+            .bind(total_volume).bind(matched_count).bind(clearing_price).bind(epoch_id)
+            .execute(&mut **tx).await
+            .context("Failed to update epoch statistics in trading engine")?;
         Ok(())
     }
 
@@ -394,18 +426,21 @@ impl MarketClearingService {
             let settlement = settlement.clone();
             tokio::spawn(async move {
                 if let (Some(b_sig), Some(s_sig), Some(b_payload), Some(s_payload)) = (
-                    settlement.buy_signature,
-                    settlement.sell_signature,
-                    settlement.buy_payload,
-                    settlement.sell_payload,
+                    settlement.buy_signature.clone(),
+                    settlement.sell_signature.clone(),
+                    settlement.buy_payload.clone(),
+                    settlement.sell_payload.clone(),
                 ) {
-                    let market_pubkey = service
-                        .blockchain_service
-                        .trading_program_id()
-                        .unwrap_or_default();
-                    let (market_pda, _) =
-                        Pubkey::find_program_address(&[b"market"], &market_pubkey);
-                    let _ = service
+                    let trading_program_id = match service.blockchain_service.trading_program_id() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            error!("❌ Critical: Failed to get trading program ID for trade {}: {}", settlement.id, e);
+                            return;
+                        }
+                    };
+                    let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
+
+                    match service
                         .execute_offchain_settlement(
                             &market_pda,
                             settlement.buyer_id,
@@ -419,22 +454,40 @@ impl MarketClearingService {
                             settlement.wheeling_charge,
                             settlement.loss_cost,
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(sig) => info!(
+                            "✅ On-chain settlement successful for trade {}: {}",
+                            settlement.id, sig
+                        ),
+                        Err(e) => error!(
+                            "❌ On-chain settlement failed for trade {}: {:?}",
+                            settlement.id, e
+                        ),
+                    }
                 } else {
-                    let _ = service
+                    // Mock Escrow Releases
+                    if let Err(e) = service
                         .execute_escrow_release(
                             settlement.seller_id,
                             settlement.net_amount,
                             "currency",
                         )
-                        .await;
-                    let _ = service
+                        .await
+                    {
+                        error!("❌ Failed to release currency escrow for trade {}: {:?}", settlement.id, e);
+                    }
+                    
+                    if let Err(e) = service
                         .execute_escrow_release(
                             settlement.buyer_id,
                             settlement.effective_energy,
                             "energy",
                         )
-                        .await;
+                        .await
+                    {
+                        error!("❌ Failed to release energy escrow for trade {}: {:?}", settlement.id, e);
+                    }
                 }
             });
         }
@@ -453,8 +506,7 @@ impl MarketClearingService {
         >,
     ) -> Settlement {
         let total_amount = order_match.matched_amount * order_match.match_price;
-        let fee_rate =
-            Decimal::from_str("0.01").unwrap_or_else(|_| Decimal::from_parts(1, 0, 0, false, 2));
+        let fee_rate = Decimal::from_parts(1, 0, 0, false, 2); // 0.01 (1%)
         let fee_amount = total_amount * fee_rate;
 
         // Physical Grid Logic (Wheeling + Losses)
@@ -474,16 +526,24 @@ impl MarketClearingService {
                 loss_cost = *cached_lc;
                 effective_energy = *cached_ee;
             } else {
-                // Fallback Logic (Simulation of Grid Physics based on zone distance)
-                let distance = (b_zone - s_zone).unsigned_abs() as f64;
-                let wh_rate = 0.02 + (0.01 * distance);
-                let matched_f64 = order_match.matched_amount.to_f64().unwrap_or(0.0);
-                let price_f64 = order_match.match_price.to_f64().unwrap_or(0.0);
+                // Safe Grid Physics Calculation (using Decimal to avoid f64 precision loss)
+                let distance = Decimal::from((b_zone - s_zone).unsigned_abs());
+                
+                // Wheeling Charge: 0.02 + (0.01 * distance)
+                let wh_base = Decimal::from_parts(2, 0, 0, false, 2); // 0.02
+                let wh_dist_rate = Decimal::from_parts(1, 0, 0, false, 2); // 0.01
+                let total_wh_rate = wh_base + (wh_dist_rate * distance);
+                wheeling_charge = order_match.matched_amount * total_wh_rate;
 
-                wheeling_charge = Decimal::from_f64(wh_rate * matched_f64).unwrap_or(Decimal::ZERO);
-                loss_factor = Decimal::from_f64(0.01 + (0.005 * distance)).unwrap_or(Decimal::ZERO);
-                loss_cost = Decimal::from_f64(matched_f64 * price_f64 * (0.01 + 0.005 * distance))
-                    .unwrap_or(Decimal::ZERO);
+                // Loss Factor: 0.01 + (0.005 * distance)
+                let lf_base = Decimal::from_parts(1, 0, 0, false, 2); // 0.01
+                let lf_dist_rate = Decimal::from_parts(5, 0, 0, false, 3); // 0.005
+                loss_factor = lf_base + (lf_dist_rate * distance);
+
+                // Loss Cost: Matched Amount * Match Price * Loss Factor
+                loss_cost = order_match.matched_amount * order_match.match_price * loss_factor;
+                
+                // Effective Energy: Amount * (1 - Loss Factor)
                 effective_energy = order_match.matched_amount * (Decimal::ONE - loss_factor);
 
                 zone_cost_cache.insert(
@@ -538,11 +598,18 @@ impl MarketClearingService {
                 .bind(seller_id)
                 .fetch_optional(&db)
                 .await;
-            let wallet_addr = seller_row
-                .ok()
-                .flatten()
-                .and_then(|r| r.get::<Option<String>, _>("wallet_address"))
-                .unwrap_or_default();
+            
+            let wallet_addr = match seller_row {
+                Ok(Some(row)) => row.get::<Option<String>, _>("wallet_address").unwrap_or_default(),
+                Ok(None) => {
+                    error!("❌ REC Issuance Error: Seller {} not found in database", seller_id);
+                    return;
+                }
+                Err(e) => {
+                    error!("❌ REC Issuance Error: Failed to fetch seller {} from database: {:?}", seller_id, e);
+                    return;
+                }
+            };
 
             let cert_request = crate::services::erc::IssueErcRequest {
                 wallet_address: wallet_addr,
@@ -554,14 +621,17 @@ impl MarketClearingService {
                 ),
             };
 
-            let _ = erc_service
+            match erc_service
                 .issue_certificate(
                     seller_id,
                     "PlatformAuthority",
                     cert_request,
                     Some(settlement_id),
                 )
-                .await;
+                .await {
+                    Ok(_) => info!("✅ REC certificate issued for settlement {}", settlement_id),
+                    Err(e) => error!("❌ Failed to issue REC certificate for settlement {}: {:?}", settlement_id, e),
+                }
         });
     }
 }

@@ -12,6 +12,7 @@ use crate::infra::db::DatabasePool;
 use chrono::{Timelike, Utc};
 use rust_decimal::Decimal;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub use types::*;
 
@@ -28,6 +29,7 @@ pub struct MarketClearingService {
     erc_service: Arc<ErcService>,
     settlement_service: Option<crate::services::SettlementService>,
     websocket_service: WebSocketService,
+    token: CancellationToken,
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +63,7 @@ impl MarketClearingService {
         blockchain_service: Arc<BlockchainService>,
         wallet_service: WalletService,
         erc_service: Arc<ErcService>,
+        token: CancellationToken,
     ) -> Self {
         Self {
             db,
@@ -70,6 +73,7 @@ impl MarketClearingService {
             erc_service,
             settlement_service: None,
             websocket_service: WebSocketService,
+            token,
         }
     }
 

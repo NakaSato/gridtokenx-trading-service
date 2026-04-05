@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use ulid::Ulid;
+use tokio_util::sync::CancellationToken;
+
+use crate::utils::numeric::to_u64_atomic;
 
 use crate::{
     domain::trading::market_data::MarketDataManager as MarketDataService,
@@ -36,7 +39,6 @@ use crate::{
 use dashmap::DashMap;
 
 /// Events to be persisted to the database asynchronously
-
 pub struct ShardedMatchingWorker {
     shard_id: u32,
     num_shards: u32,
@@ -159,6 +161,7 @@ impl ShardedMatchingWorker {
     pub async fn run(
         &self,
         running: Arc<RwLock<bool>>,
+        token: CancellationToken,
         mut notify_rx: tokio::sync::mpsc::Receiver<Option<TradingOrderDb>>,
     ) {
         info!(
@@ -192,6 +195,10 @@ impl ShardedMatchingWorker {
                     } else {
                         debug!("Worker Shard {} triggered by manual notification", self.shard_id);
                     }
+                }
+                _ = token.cancelled() => {
+                    info!("🔄 Worker Shard {} shutting down...", self.shard_id);
+                    break;
                 }
                 else => break,
             }
@@ -500,7 +507,7 @@ impl ShardedMatchingWorker {
                 landed_price *= dynamic_mult;
 
                 if sell_order.zone_id == buy_order.zone_id {
-                    landed_price *= (Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT);
+                    landed_price *= Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT;
                 }
 
                 if landed_price <= buy_order.price_per_kwh {
@@ -708,17 +715,20 @@ impl ShardedMatchingWorker {
                 OrderStatus::Active
             };
 
-            // Async DB Update for Buy Order (via EventBus)
+            // Async DB Update for Buy Order (via EventBus) - ONLY if updated
+            let old_buy_filled = buy_order.filled_amount.unwrap_or(Decimal::ZERO);
             if let Some(event_bus) = &self.event_bus {
-                let event = Event::OrderUpdate {
-                    id: buy_order.id,
-                    filled_amount: buy_filled_amount,
-                    status: new_buy_status.to_string(),
-                };
-                let bus = event_bus.clone();
-                tokio::spawn(async move {
-                    let _ = bus.publish(&event).await;
-                });
+                if buy_filled_amount > old_buy_filled {
+                    let event = Event::OrderUpdate {
+                        id: buy_order.id,
+                        filled_amount: buy_filled_amount,
+                        status: new_buy_status.to_string(),
+                    };
+                    let bus = event_bus.clone();
+                    tokio::spawn(async move {
+                        let _ = bus.publish(&event).await;
+                    });
+                }
             }
 
             if new_buy_status == OrderStatus::Filled {
@@ -785,19 +795,26 @@ impl ShardedMatchingWorker {
                     )
                     .0;
                     if let (Some(b_pda), Some(s_pda)) = (b_pda_owned, s_pda_owned) {
-                        let match_u64 = (energy_amount * Decimal::from(1_000_000_000))
-                            .to_u64()
-                            .unwrap_or(0);
-                        let _ = blockchain
-                            .execute_match_orders(
-                                &authority,
-                                &market_pda.to_string(),
-                                &b_pda,
-                                &s_pda,
-                                match_u64,
-                                zone_num,
-                            )
-                            .await;
+                        match to_u64_atomic(energy_amount, 9, "match_amount") {
+                            Ok(match_u64) => {
+                                if let Err(e) = blockchain
+                                    .execute_match_orders(
+                                        &authority,
+                                        &market_pda.to_string(),
+                                        &b_pda,
+                                        &s_pda,
+                                        match_u64,
+                                        zone_num,
+                                    )
+                                    .await 
+                                {
+                                    error!("❌ On-chain matching failed for match {}: {:#}", match_id, e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("❌ Numeric conversion failed for match {}: {}", match_id, e);
+                            }
+                        }
                     }
                 }
             });
@@ -983,7 +1000,7 @@ impl OrderMatchingEngine {
     }
 
     /// Start the background matching engine
-    pub async fn start(&self) {
+    pub async fn start(&self, token: CancellationToken) {
         let mut running = self.running.write().await;
         if *running {
             warn!("Order matching engine is already running");
@@ -1025,9 +1042,10 @@ impl OrderMatchingEngine {
 
             let worker = Arc::new(worker);
             let running = self.running.clone();
+            let shard_token = token.clone();
 
             tokio::spawn(async move {
-                worker.run(running, rx).await;
+                worker.run(running, shard_token, rx).await;
             });
         }
 
@@ -1040,27 +1058,33 @@ impl OrderMatchingEngine {
 
         // Keep the main loop for global maintenance (like expiry)
         let engine = self.clone();
+        let maintenance_token = token.clone();
         tokio::spawn(async move {
-            engine.run_maintenance_loop().await;
+            engine.run_maintenance_loop(maintenance_token).await;
         });
     }
 
     /// Global maintenance loop (Expiry, Stats aggregation)
-    async fn run_maintenance_loop(&self) {
+    async fn run_maintenance_loop(&self, token: CancellationToken) {
         loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    if let Err(e) = self.expire_stale_orders().await {
+                        error!("❌ Error expiring stale orders: {}", e);
+                    }
+                }
+                _ = token.cancelled() => {
+                    info!("🔄 Matching engine maintenance loop shutting down...");
+                    break;
+                }
+            }
+
             {
                 let running = self.running.read().await;
                 if !*running {
                     break;
                 }
             }
-
-            if let Err(e) = self.expire_stale_orders().await {
-                error!("❌ Error expiring stale orders: {}", e);
-            }
-
-            // Sleep before next maintenance cycle
-            tokio::time::sleep(Duration::from_secs(60)).await; // Less frequent
         }
     }
 

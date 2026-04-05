@@ -587,7 +587,7 @@ impl TransactionHandler {
         Ok(status.is_some())
     }
 
-    /// Get trade record from blockchain - DISABLED
+    // Get trade record from blockchain - DISABLED
     // pub async fn get_trade_record(
     //     &self,
     //     _signature: &str,

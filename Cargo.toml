@@ -27,11 +27,19 @@ serde_json = { workspace = true }
 
 # Observability
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 regex = { workspace = true }
 axum = { workspace = true }
+
+# OpenTelemetry (SigNoz integration)
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+tonic = { workspace = true }
 
 # Utilities
 chrono = { workspace = true }
@@ -72,6 +80,7 @@ ipnetwork = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
 http-body = "1.0.0"
+tokio-util = "0.7.18"
 
 [build-dependencies]
 buffa-build = "0.2.0"

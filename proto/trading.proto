@@ -6,9 +6,12 @@ service TradingService {
   // Trading Operations
   rpc SubmitOrder (SubmitOrderRequest) returns (TradingResponse);
   rpc CancelOrder (CancelOrderRequest) returns (TradingResponse);
+  rpc UpdateOrder (UpdateOrderRequest) returns (TradingResponse);
   rpc GetOrder (GetOrderRequest) returns (OrderResponse);
   rpc ListOrders (ListOrdersRequest) returns (ListOrdersResponse);
   rpc NotifyOrder (NotifyOrderRequest) returns (TradingResponse);
+  rpc GetOrderBook (GetOrderBookRequest) returns (ListOrdersResponse);
+  rpc ListTrades (ListTradesRequest) returns (ListTradesResponse);
 
   // ERC Operations (Energy Registration & Carbon)
   rpc IssueERC (IssueERCRequest) returns (TradingResponse);
@@ -28,6 +31,13 @@ message SubmitOrderRequest {
   optional int32 zone_id = 8;
 }
 
+message UpdateOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+  optional double energy_amount = 3;
+  optional double price_per_kwh = 4;
+}
+
 message CancelOrderRequest {
   string order_id = 1;
   string user_id = 2;
@@ -40,6 +50,11 @@ message GetOrderRequest {
 message ListOrdersRequest {
   string user_id = 1;
   optional string status = 2;
+}
+
+message GetOrderBookRequest {
+  optional int32 zone_id = 1;
+  optional string side = 2;
 }
 
 message NotifyOrderRequest {
@@ -62,10 +77,37 @@ message OrderResponse {
   string side = 6;
   string status = 7;
   string created_at = 8;
+  optional int32 zone_id = 9;
 }
 
 message ListOrdersResponse {
   repeated OrderResponse orders = 1;
+}
+
+message ListTradesRequest {
+  string user_id = 1;
+  optional int32 limit = 2;
+  optional int32 zone_id = 3;
+}
+
+message TradeResponse {
+  string id = 1;
+  double quantity = 2;
+  double price = 3;
+  double total_value = 4;
+  string role = 5; // "buyer" or "seller"
+  string counterparty_id = 6;
+  string executed_at = 7;
+  string status = 8;
+  optional double wheeling_charge = 9;
+  optional double loss_cost = 10;
+  optional double effective_energy = 11;
+  optional int32 buyer_zone_id = 12;
+  optional int32 seller_zone_id = 13;
+}
+
+message ListTradesResponse {
+  repeated TradeResponse trades = 1;
 }
 
 message IssueERCRequest {

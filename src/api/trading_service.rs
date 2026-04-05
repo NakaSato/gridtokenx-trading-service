@@ -13,8 +13,25 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{error, info};
+use tracing::error;
 use uuid::Uuid;
+
+#[derive(Debug, sqlx::FromRow)]
+struct TradeDataRecord {
+    id: Uuid,
+    quantity: Decimal,
+    price: Decimal,
+    total_value: Option<Decimal>,
+    role: String,
+    counterparty_id: Uuid,
+    executed_at: chrono::DateTime<Utc>,
+    status: String,
+    wheeling_charge: Option<Decimal>,
+    loss_cost: Option<Decimal>,
+    effective_energy: Option<Decimal>,
+    buyer_zone_id: Option<i32>,
+    seller_zone_id: Option<i32>,
+}
 
 pub struct TradingServiceImpl {
     pub state: Arc<AppState>,
@@ -134,6 +151,53 @@ impl TradingService for TradingServiceImpl {
         }, ctx))
     }
 
+    async fn update_order(
+        &self,
+        ctx: Context,
+        request: OwnedView<UpdateOrderRequestView<'static>>,
+    ) -> Result<(TradingResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("update_order");
+        
+        let order_id = Uuid::parse_str(request.order_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+
+        let mut query_builder = sqlx::QueryBuilder::new("UPDATE trading_orders SET updated_at = NOW()");
+        
+        if let Some(amount) = request.energy_amount {
+            query_builder.push(", energy_amount = ");
+            query_builder.push_bind(Decimal::from_f64(amount).unwrap_or(Decimal::ZERO));
+        }
+        
+        if let Some(price) = request.price_per_kwh {
+            query_builder.push(", price_per_kwh = ");
+            query_builder.push_bind(Decimal::from_f64(price).unwrap_or(Decimal::ZERO));
+        }
+        
+        query_builder.push(" WHERE id = ");
+        query_builder.push_bind(order_id);
+        query_builder.push(" AND user_id = ");
+        query_builder.push_bind(user_id);
+        query_builder.push(" AND status = 'pending'");
+
+        let result = query_builder.build().execute(&self.state.db).await.map_err(|e| {
+            error!("Failed to update order: {}", e);
+            ConnectError::internal("Database error")
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ConnectError::not_found("Order not found or not in pending status"));
+        }
+
+        Ok((TradingResponse {
+            success: true,
+            message: "Order updated successfully".to_string(),
+            id: Some(order_id.to_string()),
+            ..Default::default()
+        }, ctx))
+    }
+
     async fn get_order(
         &self,
         ctx: Context,
@@ -228,6 +292,139 @@ impl TradingService for TradingServiceImpl {
 
         Ok((ListOrdersResponse {
             orders: response_orders,
+            ..Default::default()
+        }, ctx))
+    }
+
+    async fn get_order_book(
+        &self,
+        ctx: Context,
+        request: OwnedView<GetOrderBookRequestView<'static>>,
+    ) -> Result<(ListOrdersResponse, Context), ConnectError> {
+        let mut query = String::from(
+            r#"
+            SELECT 
+                id, user_id, side, order_type, energy_amount, price_per_kwh, 
+                filled_amount, status, expires_at, created_at, filled_at, epoch_id, zone_id, 
+                meter_id, refund_tx_signature, order_pda, order_index, session_token,
+                trigger_price, trigger_type, trigger_status, trailing_offset, triggered_at, last_peak_price
+            FROM trading_orders 
+            WHERE (status = 'pending' OR status = 'active')
+            "#
+        );
+
+        if let Some(zone_id) = request.zone_id {
+            query.push_str(&format!(" AND zone_id = {}", zone_id));
+        }
+
+        if let Some(side) = request.side {
+            query.push_str(&format!(" AND side = '{}'", side));
+        }
+
+        query.push_str(" ORDER BY price_per_kwh DESC LIMIT 200");
+
+        let orders = sqlx::query_as::<_, TradingOrderDb>(&query)
+            .fetch_all(&self.state.db)
+            .await
+            .map_err(|e| {
+                error!("Failed to fetch order book: {}", e);
+                ConnectError::internal("Database error")
+            })?;
+
+        let response_orders = orders
+            .into_iter()
+            .map(|o| OrderResponse {
+                id: o.id.to_string(),
+                user_id: o.user_id.to_string(),
+                energy_amount: o.energy_amount.to_f64().unwrap_or(0.0),
+                price_per_kwh: o.price_per_kwh.to_f64().unwrap_or(0.0),
+                filled_amount: o.filled_amount.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0),
+                side: o.side.to_string(),
+                status: o.status.to_string(),
+                created_at: o.created_at.unwrap_or(Utc::now()).to_rfc3339(),
+                zone_id: o.zone_id,
+                ..Default::default()
+            })
+            .collect();
+
+        Ok((ListOrdersResponse {
+            orders: response_orders,
+            ..Default::default()
+        }, ctx))
+    }
+
+    async fn list_trades(
+        &self,
+        ctx: Context,
+        request: OwnedView<ListTradesRequestView<'static>>,
+    ) -> Result<(ListTradesResponse, Context), ConnectError> {
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
+        let limit = request.limit.unwrap_or(50);
+
+        let trades_result = sqlx::query_as::<_, TradeDataRecord>(
+            r#"
+            SELECT 
+                om.id,
+                om.matched_amount as quantity,
+                om.match_price as price,
+                (om.matched_amount * om.match_price) as total_value,
+                CASE 
+                    WHEN b.user_id = $1 THEN 'buyer'
+                    ELSE 'seller'
+                END as role,
+                CASE 
+                    WHEN b.user_id = $1 THEN s.user_id
+                    ELSE b.user_id
+                END as counterparty_id,
+                om.match_time as executed_at,
+                om.status,
+                settle.wheeling_charge,
+                settle.loss_cost,
+                settle.effective_energy,
+                COALESCE(settle.buyer_zone_id, om.zone_id) as buyer_zone_id,
+                COALESCE(settle.seller_zone_id, om.zone_id) as seller_zone_id
+            FROM order_matches om
+            JOIN trading_orders b ON om.buy_order_id = b.id
+            JOIN trading_orders s ON om.sell_order_id = s.id
+            LEFT JOIN settlements settle ON om.settlement_id = settle.id
+            WHERE (b.user_id = $1 OR s.user_id = $1)
+            ORDER BY om.match_time DESC
+            LIMIT $2
+            "#
+        )
+        .bind(user_id)
+        .bind(limit as i64)
+        .fetch_all(&self.state.db)
+        .await;
+
+        let trades = trades_result.map_err(|e| {
+            error!("Failed to fetch trades: {}", e);
+            ConnectError::internal("Database error")
+        })?;
+
+        let response_trades = trades
+            .into_iter()
+            .map(|t| TradeResponse {
+                id: t.id.to_string(),
+                quantity: t.quantity.to_f64().unwrap_or(0.0),
+                price: t.price.to_f64().unwrap_or(0.0),
+                total_value: t.total_value.unwrap_or(Decimal::ZERO).to_f64().unwrap_or(0.0),
+                role: t.role,
+                counterparty_id: t.counterparty_id.to_string(),
+                executed_at: t.executed_at.to_rfc3339(),
+                status: t.status,
+                wheeling_charge: t.wheeling_charge.map(|d: Decimal| d.to_f64().unwrap_or(0.0)),
+                loss_cost: t.loss_cost.map(|d: Decimal| d.to_f64().unwrap_or(0.0)),
+                effective_energy: t.effective_energy.map(|d: Decimal| d.to_f64().unwrap_or(0.0)),
+                buyer_zone_id: t.buyer_zone_id,
+                seller_zone_id: t.seller_zone_id,
+                ..Default::default()
+            })
+            .collect();
+
+        Ok((ListTradesResponse {
+            trades: response_trades,
             ..Default::default()
         }, ctx))
     }

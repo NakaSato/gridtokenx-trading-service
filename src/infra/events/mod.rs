@@ -2,7 +2,7 @@ use crate::domain::events::Event;
 use anyhow::Result;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client, RedisResult};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct EventBus {

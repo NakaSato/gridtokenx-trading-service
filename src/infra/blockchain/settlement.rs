@@ -62,13 +62,13 @@ impl BlockchainSettlementProvider {
 
         // Collectors
         let fee_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }),
+            &{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }
         )?;
         let wheeling_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }),
+            &{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }
         )?;
         let loss_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }),
+            &{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }
         )?;
 
         let fee_collector_ata = self
@@ -207,13 +207,13 @@ impl BlockchainSettlementProvider {
 
         // Collectors
         let fee_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }),
+            &{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }
         )?;
         let wheeling_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }),
+            &{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }
         )?;
         let loss_collector = BlockchainService::parse_pubkey(
-            (&{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }),
+            &{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }
         )?;
 
         let fee_collector_ata = self

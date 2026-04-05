@@ -33,7 +33,7 @@ impl BlockchainUtils {
     /// The file should contain an array of 64 bytes representing the keypair
     pub fn load_keypair_from_file(filepath: &str) -> Result<Keypair> {
         use std::fs;
-        use std::path::Path;
+        // use std::path::Path;
 
         info!("Attempting to load keypair from: {}", filepath);
 

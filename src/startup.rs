@@ -16,8 +16,10 @@ use std::sync::Arc;
 use connectrpc::Server;
 use anyhow::Context as _;
 use tracing::{error, info};
-use axum::{Router, routing::get, response::IntoResponse, http::StatusCode};
+use axum::{Router, routing::get, response::IntoResponse, http::StatusCode, middleware};
 use std::sync::OnceLock;
+use tokio_util::sync::CancellationToken;
+// use tokio::signal;
 
 pub struct AppState {
     pub db: db::DatabasePool,
@@ -31,22 +33,38 @@ pub struct AppState {
     pub market_clearing: Arc<MarketClearingService>,
 }
 
-pub async fn run() -> anyhow::Result<()> {
-    let config = Arc::new(Config::from_env()?);
-    let addr: SocketAddr = format!("0.0.0.0:{}", 8092).parse()?; // Use a dedicated port
+pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
+    let config = Arc::new(Config::from_env().context("Failed to load configuration from environment")?);
+    let addr: SocketAddr = format!("0.0.0.0:{}", 8092)
+        .parse()
+        .context("Failed to parse trading service address")?; // Use a dedicated port
 
     // Initialize Database
-    let db_pool = db::setup_database(&config.database_url).await?;
+    let db_pool = db::setup_database(&config.database_url)
+        .await
+        .context("Failed to initialize database pool")?;
+
+    // Run database migrations
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .context("Failed to run database migrations")?;
+    info!("✅ Database migrations completed");
 
     // Initialize EventBus
-    let event_bus = EventBus::new(&config.redis_url).await?;
+    let event_bus = EventBus::new(&config.redis_url)
+        .await
+        .context("Failed to initialize event bus (Redis)")?;
 
     // Initialize Blockchain Service
-    let blockchain = Arc::new(BlockchainService::new(
-        config.solana_rpc_url.clone(),
-        config.environment.clone(),
-        config.solana_programs.clone(),
-    )?);
+    let blockchain = Arc::new(
+        BlockchainService::new(
+            config.solana_rpc_url.clone(),
+            config.environment.clone(),
+            config.solana_programs.clone(),
+        )
+        .context("Failed to initialize blockchain service")?,
+    );
 
     // Initialize Topology Service
     let grid_topology = Arc::new(GridTopologyService::new());
@@ -84,6 +102,7 @@ pub async fn run() -> anyhow::Result<()> {
             blockchain.clone(),
             wallet_service,
             erc_service.clone(),
+            token.clone(),
         )
         .with_settlement((*settlement_service).clone()),
     );
@@ -100,11 +119,12 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     // Start Matching Engine
-    matching_engine.start().await;
+    matching_engine.start(token.clone()).await;
 
     // Start Event Consumer for reactive matching
     let event_bus_clone = event_bus.clone();
     let matching_engine_clone = matching_engine.clone();
+    let consumer_token = token.clone();
     tokio::spawn(async move {
         let group_name = "trading-service-matcher";
         let consumer_name = format!("matcher-{}", uuid::Uuid::new_v4());
@@ -114,21 +134,25 @@ pub async fn run() -> anyhow::Result<()> {
 
         info!("🚀 Starting real-time order matching event consumer");
 
-        let result = event_bus_clone
-            .consume_events(group_name, &consumer_name, move |event| {
-                let engine = matching_engine_clone.clone();
-                async move {
-                    if let crate::domain::events::Event::OrderCreated(order) = event {
-                        info!("📥 Received real-time OrderCreated event: {}", order.id);
-                        engine.notify_new_order(order.zone_id, Some(order)).await;
+        tokio::select! {
+            result = event_bus_clone
+                .consume_events(group_name, &consumer_name, move |event| {
+                    let engine = matching_engine_clone.clone();
+                    async move {
+                        if let crate::domain::events::Event::OrderCreated(order) = event {
+                            info!("📥 Received real-time OrderCreated event: {}", order.id);
+                            engine.notify_new_order(order.zone_id, Some(order)).await;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-            })
-            .await;
-
-        if let Err(e) = result {
-            error!("Event consumer loop failed: {}", e);
+                }) => {
+                    if let Err(e) = result {
+                        error!("Event consumer loop failed: {}", e);
+                    }
+                },
+            _ = consumer_token.cancelled() => {
+                info!("🔄 Order matching event consumer shutting down...");
+            }
         }
     });
 
@@ -139,12 +163,20 @@ pub async fn run() -> anyhow::Result<()> {
         .unwrap_or(true);
 
     if enable_settlement {
+        let settlement_token = token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
-                interval.tick().await;
-                if let Err(e) = settlement_service_clone.process_pending_settlements().await {
-                    error!("Settlement processor error: {}", e);
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = settlement_service_clone.process_pending_settlements().await {
+                            error!("Settlement processor error: {}", e);
+                        }
+                    }
+                    _ = settlement_token.cancelled() => {
+                        info!("🔄 Settlement processor shutting down...");
+                        break;
+                    }
                 }
             }
         });
@@ -177,13 +209,19 @@ pub async fn run() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to bind metrics to {}: {}", metrics_addr, e))?;
     
     let metrics_app = Router::new()
-        .route("/metrics", get(get_metrics));
+        .route("/metrics", get(get_metrics))
+        .layer(middleware::from_fn(crate::api::middleware::otel_tracing::otel_tracing_middleware));
     
     info!("✅ Trading gRPC server listening on {}", addr);
     info!("✅ Trading metrics server listening on {}", metrics_addr);
 
     use futures::TryFutureExt;
-    let rest_handle = axum::serve(metrics_listener, metrics_app);
+    let rest_token = token.clone();
+    let rest_handle = axum::serve(metrics_listener, metrics_app)
+        .with_graceful_shutdown(async move {
+            rest_token.cancelled().await;
+        });
+        
     let grpc_handle = grpc_server.serve(addr).map_err(|e| anyhow::anyhow!(e.to_string()));
 
     tokio::select! {
@@ -196,7 +234,7 @@ pub async fn run() -> anyhow::Result<()> {
             if let Err(e) = res {
                 error!("gRPC server failed: {}", e);
             }
-        }
+        },
     };
 
     Ok(())
@@ -205,18 +243,21 @@ pub async fn run() -> anyhow::Result<()> {
 /// Metrics endpoint handler - exposes Prometheus-format metrics
 async fn get_metrics() -> impl IntoResponse {
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, Matcher};
-    static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    static PROMETHEUS_HANDLE: OnceLock<Option<PrometheusHandle>> = OnceLock::new();
 
-    let handle = PROMETHEUS_HANDLE.get_or_init(|| {
+    let handle_opt = PROMETHEUS_HANDLE.get_or_init(|| {
         PrometheusBuilder::new()
             .set_buckets_for_metric(
                 Matcher::Prefix("trading".to_string()),
                 &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
             )
-            .unwrap()
+            .ok()?
             .install_recorder()
-            .expect("failed to install prometheus recorder")
+            .ok()
     });
 
-    (StatusCode::OK, handle.render())
+    match handle_opt {
+        Some(handle) => (StatusCode::OK, handle.render()),
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "Metrics recorder failed to initialize".to_string()),
+    }
 }

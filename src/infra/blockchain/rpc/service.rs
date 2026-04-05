@@ -1028,16 +1028,11 @@ impl BlockchainService {
     }
 
     // ====================================================================
-    // Transaction Building & Signing (Phase 4) - delegated to TransactionHandler
-    // ====================================================================
-
-    /// Priority 4: Build, sign, and send a transaction with automatic priority fees
-    /// Returns transaction signature with enhanced performance monitoring
-    // ====================================================================
     // Transaction Building & Signing (Phase 4) - delegated to OnChainManager
     // ====================================================================
 
     /// Priority 4: Build, sign, and send a transaction with automatic priority fees
+    /// Returns transaction signature with enhanced performance monitoring
     pub async fn build_and_send_transaction(
         &self,
         instructions: Vec<Instruction>,
