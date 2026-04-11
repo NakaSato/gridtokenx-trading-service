@@ -358,4 +358,124 @@ impl GridTopologyService {
     ) -> Decimal {
         energy_amount * price * loss_factor
     }
+
+    /// Take a consistent snapshot of the current topology state for lock-free matching.
+    /// Call once at the start of each matching cycle to avoid repeated RwLock acquisitions.
+    pub async fn snapshot(&self) -> TopologySnapshot {
+        let branches = self.branches.read().await.clone();
+        let pricing = self.pricing_config.read().await.clone();
+        TopologySnapshot { branches, pricing }
+    }
 }
+
+/// Point-in-time snapshot of grid topology state for lock-free matching.
+/// Eliminates repeated RwLock acquisitions during the candidate evaluation loop.
+#[derive(Clone, Debug)]
+pub struct TopologySnapshot {
+    branches: HashMap<String, BranchSegment>,
+    pricing: GridPricingConfig,
+}
+
+impl TopologySnapshot {
+    /// Check if a trade of `amount` from `src` to `dst` is physically possible (lock-free)
+    pub fn can_accommodate_flow(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+        amount: Decimal,
+    ) -> bool {
+        match (from_zone, to_zone) {
+            (Some(sz), Some(dz)) if sz != dz => {
+                let (start, end) = if sz < dz { (sz, dz) } else { (dz, sz) };
+                for i in start..end {
+                    let key = format!("{}-{}", i, i + 1);
+                    if let Some(segment) = self.branches.get(&key) {
+                        if segment.current_flow_kwh + amount > segment.capacity_kwh {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Calculate wheeling charge from snapshot (lock-free)
+    pub fn calculate_wheeling_charge(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
+        match (from_zone, to_zone) {
+            (Some(mz), Some(bz)) => {
+                // 1. Check zone-pair specific override (both directions)
+                if let Some(&charge) = self
+                    .pricing
+                    .zone_pair_wheeling
+                    .get(&(mz, bz))
+                    .or_else(|| self.pricing.zone_pair_wheeling.get(&(bz, mz)))
+                {
+                    return charge;
+                }
+                // 2. Distance-based lookup
+                if mz == bz {
+                    self.pricing.wheeling_same_zone
+                } else {
+                    let distance = (mz - bz).abs();
+                    if let Some(&charge) = self.pricing.zone_wheeling.get(&distance) {
+                        charge
+                    } else if distance == 1 {
+                        self.pricing.wheeling_adjacent_zone
+                    } else {
+                        let distance_dec = Decimal::from(distance);
+                        self.pricing.wheeling_base_charge
+                            + (self.pricing.wheeling_distance_rate * distance_dec)
+                    }
+                }
+            }
+            _ => self.pricing.wheeling_fallback,
+        }
+    }
+
+    /// Calculate loss factor from snapshot (lock-free)
+    pub fn calculate_loss_factor(
+        &self,
+        from_zone: Option<i32>,
+        to_zone: Option<i32>,
+    ) -> Decimal {
+        match (from_zone, to_zone) {
+            (Some(mz), Some(bz)) => {
+                // 1. Check zone-pair specific override (both directions)
+                if let Some(&loss) = self
+                    .pricing
+                    .zone_pair_loss
+                    .get(&(mz, bz))
+                    .or_else(|| self.pricing.zone_pair_loss.get(&(bz, mz)))
+                {
+                    return loss.min(self.pricing.loss_max);
+                }
+                // 2. Distance-based lookup
+                if mz == bz {
+                    self.pricing.loss_same_zone
+                } else {
+                    let distance = (mz - bz).abs();
+                    if let Some(&loss) = self.pricing.zone_loss.get(&distance) {
+                        loss.min(self.pricing.loss_max)
+                    } else if distance == 1 {
+                        self.pricing.loss_adjacent_zone
+                    } else {
+                        let distance_dec = Decimal::from(distance);
+                        let loss = self.pricing.loss_base
+                            + (self.pricing.loss_distance_rate * distance_dec);
+                        loss.min(self.pricing.loss_max)
+                    }
+                }
+            }
+            _ => Decimal::from_f64(0.05).unwrap_or_default(),
+        }
+    }
+}
+

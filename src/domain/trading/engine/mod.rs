@@ -1,12 +1,16 @@
+pub mod fast_decimal;
+pub mod rehydration;
 pub mod types;
 
 use anyhow::Result;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
 use tracing::{debug, error, info, warn};
 
 fn track_order_matched(_strategy: &str, _amount: f64) {}
+use crate::domain::trading::engine::fast_decimal::FastPrice;
+use crate::metrics::record_matching_cycle;
 use solana_sdk::pubkey::Pubkey;
 use uuid::Uuid;
 
@@ -33,6 +37,7 @@ use crate::{
     },
     infra::db::schema::types::{OrderSide, OrderStatus},
     infra::{blockchain::BlockchainService, events::EventBus},
+    services::p2p_config::P2PConfigService,
     services::settlement::SettlementService,
 };
 
@@ -50,10 +55,13 @@ pub struct ShardedMatchingWorker {
     market_data_service: Option<MarketDataService>,
     event_bus: Option<EventBus>,
     match_interval_secs: u64,
+    p2p_config: Option<Arc<P2PConfigService>>,
     buy_orders: Arc<DashMap<Uuid, TradingOrderDb>>,
     sell_orders: Arc<DashMap<Uuid, TradingOrderDb>>,
     trigger_orders: Arc<DashMap<Uuid, TradingOrderDb>>,
     zone_prices: Arc<DashMap<i32, Decimal>>,
+    ohlc_aggregator: Option<Arc<crate::services::market_data::MarketDataService>>,
+}
 }
 
 impl ShardedMatchingWorker {
@@ -75,15 +83,22 @@ impl ShardedMatchingWorker {
             market_clearing: None,
             blockchain_service: None,
             event_bus: None,
+            p2p_config: None,
             buy_orders: Arc::new(DashMap::new()),
             sell_orders: Arc::new(DashMap::new()),
             trigger_orders: Arc::new(DashMap::new()),
             zone_prices: Arc::new(DashMap::new()),
+            market_data_aggregator: None,
         }
     }
 
+    pub fn with_ohlc_aggregator(mut self, aggregator: Arc<crate::services::market_data::MarketDataService>) -> Self {
+        self.ohlc_aggregator = Some(aggregator);
+        self
+    }
+
     async fn bootstrap_orders(&self) -> Result<()> {
-        use TradingOrderDb;
+        // Using local type aliases if needed
 
         info!(
             "Shard {} bootstrapping in-memory order book...",
@@ -98,7 +113,9 @@ impl ShardedMatchingWorker {
                 expires_at, created_at, filled_at, meter_id,
                 refund_tx_signature, order_pda, order_index, session_token,
                 trigger_price, trigger_type, trigger_status,
-                trailing_offset, triggered_at, last_peak_price
+                trailing_offset, triggered_at, last_peak_price,
+                blockchain_status, blockchain_tx_hash, blockchain_error, retry_count,
+                time_in_force
             FROM trading_orders
             WHERE status IN ('pending', 'active', 'partially_filled')
             AND (COALESCE(zone_id, 0) % $1) = $2
@@ -135,6 +152,11 @@ impl ShardedMatchingWorker {
                 trailing_offset: row.get("trailing_offset"),
                 triggered_at: row.get("triggered_at"),
                 last_peak_price: row.get("last_peak_price"),
+                blockchain_status: row.get("blockchain_status"),
+                blockchain_tx_hash: row.get("blockchain_tx_hash"),
+                blockchain_error: row.get("blockchain_error"),
+                retry_count: row.get("retry_count"),
+                time_in_force: row.get("time_in_force"),
             };
 
             if (order.trigger_price.is_some() || order.trigger_type.is_some())
@@ -156,6 +178,35 @@ impl ShardedMatchingWorker {
             self.trigger_orders.len()
         );
         Ok(())
+    }
+
+    /// Seed the worker with rehydrated orders from Kafka.
+    pub fn seed_orders(&self, orders: Vec<TradingOrderDb>) {
+        let mut b = 0;
+        let mut s = 0;
+        let mut t = 0;
+
+        for order in orders {
+            if (order.trigger_price.is_some() || order.trigger_type.is_some())
+                && order.trigger_status == Some(TriggerStatus::Pending)
+            {
+                self.trigger_orders.insert(order.id, order);
+                t += 1;
+            } else if order.side == OrderSide::Buy {
+                self.buy_orders.insert(order.id, order);
+                b += 1;
+            } else {
+                self.sell_orders.insert(order.id, order);
+                s += 1;
+            }
+        }
+
+        if b > 0 || s > 0 || t > 0 {
+            info!(
+                "Shard {} seeded with {} buy, {} sell, and {} trigger orders from rehydration",
+                self.shard_id, b, s, t
+            );
+        }
     }
 
     pub async fn run(
@@ -381,20 +432,28 @@ impl ShardedMatchingWorker {
         let hour = Utc::now().hour();
         let (base_mult, _) = MarketClearingService::get_tou_multiplier_for_hour(hour);
 
-        // Placeholder for market multiplier (previously from P2PConfigService)
-        let market_mult = Decimal::ONE;
+        let market_mult = if let Some(p2p) = &self.p2p_config {
+            Decimal::from_f64(p2p.get_f64("pricing.market_multiplier").await.unwrap_or(1.0))
+                .unwrap_or(Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
 
         base_mult * market_mult
     }
 
     async fn match_shard_cycle(&self) -> Result<usize> {
-        let start_time = std::time::Instant::now();
+        let cycle_start = std::time::Instant::now();
         let buy_count = self.buy_orders.len();
         let sell_count = self.sell_orders.len();
         info!(
             "Shard {} matching cycle started (Pools: {} buy, {} sell)",
             self.shard_id, buy_count, sell_count
         );
+
+        // [B4] Event batch collector to avoid individual tokio::spawn overhead
+        let mut match_events: Vec<crate::domain::events::Event> = Vec::new();
+
         // Evaluate triggers before matching
         if let Err(e) = self.check_triggers().await {
             error!("Shard {} trigger check failed: {}", self.shard_id, e);
@@ -404,27 +463,78 @@ impl ShardedMatchingWorker {
         if self.shard_id == 0 {
             self.grid_topology.reset_flows().await;
         }
-        // Collect orders with minimal allocation - use Vec with capacity hint
-        let buy_count = self.buy_orders.len();
-        let mut buy_orders: Vec<TradingOrderDb> = Vec::with_capacity(buy_count);
-        buy_orders.extend(self.buy_orders.iter().map(|o| o.value().clone()));
 
-        // Priority: Price-Time (not explicit in current logic but created_at is used below)
-        buy_orders.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        // [B2] Take a single topology snapshot for the entire cycle (lock-free after this)
+        let topo_snapshot = self.grid_topology.snapshot().await;
+
+        // [B6] Hoist dynamic multiplier outside sell-candidate loop
+        let dynamic_mult_dec = self.get_dynamic_multiplier().await;
+        // [PHASE 3] Convert to FastPrice (i128) once per cycle
+        let dynamic_mult = FastPrice::from(dynamic_mult_dec);
+
+        // [B1+B5] Collect lightweight sort keys instead of cloning full TradingOrderDb structs.
+        let mut buy_orders: Vec<FastOrder> = Vec::with_capacity(buy_count);
+        let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        for entry in self.buy_orders.iter() {
+            let v = entry.value();
+            
+            // [PHASE 3] Filter out expired orders
+            if let Some(expires_at) = v.expires_at {
+                if expires_at.timestamp_nanos_opt().unwrap_or(0) <= now_ns {
+                    continue;
+                }
+            }
+
+            buy_orders.push(FastOrder {
+                id: *entry.key(),
+                price: FastPrice::from(v.price_per_kwh),
+                zone_id: v.zone_id,
+                created_at_ns: v.created_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0),
+                expires_at_ns: v.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
+                user_id: v.user_id,
+                energy_amount: v.energy_amount,
+                filled_amount: v.filled_amount.unwrap_or(Decimal::ZERO),
+                time_in_force: v.time_in_force,
+                epoch_id: v.epoch_id,
+                order_pda: v.order_pda.clone(),
+                session_token: v.session_token.clone(),
+            });
+        }
+        buy_orders.sort_unstable_by(|a, b| a.created_at_ns.cmp(&b.created_at_ns));
 
         if buy_orders.is_empty() {
             return Ok(0);
         }
 
+        // Sell orders: sorted by (price ASC, created_at ASC) — cheapest first
         let sell_count = self.sell_orders.len();
-        let mut sell_orders: Vec<TradingOrderDb> = Vec::with_capacity(sell_count);
-        sell_orders.extend(self.sell_orders.iter().map(|o| o.value().clone()));
+        let mut sell_orders: Vec<FastOrder> = Vec::with_capacity(sell_count);
+        for entry in self.sell_orders.iter() {
+            let v = entry.value();
 
-        sell_orders.sort_by(|a, b| {
-            a.price_per_kwh
-                .cmp(&b.price_per_kwh)
-                .then_with(|| a.created_at.cmp(&b.created_at))
-        });
+            // [PHASE 3] Filter out expired orders
+            if let Some(expires_at) = v.expires_at {
+                if expires_at.timestamp_nanos_opt().unwrap_or(0) <= now_ns {
+                    continue;
+                }
+            }
+
+            sell_orders.push(FastOrder {
+                id: *entry.key(),
+                price: FastPrice::from(v.price_per_kwh),
+                zone_id: v.zone_id,
+                created_at_ns: v.created_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0),
+                expires_at_ns: v.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
+                user_id: v.user_id,
+                energy_amount: v.energy_amount,
+                filled_amount: v.filled_amount.unwrap_or(Decimal::ZERO),
+                time_in_force: v.time_in_force,
+                epoch_id: v.epoch_id,
+                order_pda: v.order_pda.clone(),
+                session_token: v.session_token.clone(),
+            });
+        }
+        sell_orders.sort_unstable_by(|a, b| a.price.cmp(&b.price).then_with(|| a.created_at_ns.cmp(&b.created_at_ns)));
 
         if sell_orders.is_empty() {
             return Ok(0);
@@ -432,118 +542,143 @@ impl ShardedMatchingWorker {
 
         let mut matches_created = 0;
 
-        // Try to match each buy order
-        for buy_order in buy_orders {
-            let mut buy_filled_amount = buy_order.filled_amount.unwrap_or(Decimal::ZERO);
-            let buy_energy_amount = buy_order.energy_amount;
-            let mut remaining_buy_amount = buy_energy_amount - buy_filled_amount;
+        struct Candidate {
+            id: Uuid,
+            landed_cost: FastPrice,
+            wheeling_charge_per_kwh: Decimal,
+            loss_factor: Decimal,
+            loss_cost_per_kwh: Decimal,
+            user_id: Uuid,
+            zone_id: Option<i32>,
+            epoch_id: Uuid,
+            order_pda: Option<String>,
+            session_token: Option<String>,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(256);
+        let mut geometry_cache: std::collections::HashMap<Option<i32>, (Decimal, Decimal, bool)> = std::collections::HashMap::with_capacity(16);
+
+        // Try to match each buy order — access fields directly without full clone
+        for buy in &buy_orders {
+            let mut remaining_buy_amount = buy.energy_amount - buy.filled_amount;
+            let buy_initial_filled = buy.filled_amount;
+            let mut buy_filled_current = buy.filled_amount;
 
             if remaining_buy_amount < OrderMatchingEngine::MIN_TRADE_AMOUNT {
                 continue;
             }
 
-            struct Candidate {
-                id: Uuid,
-                landed_cost: Decimal,
-                wheeling_charge_per_kwh: Decimal,
-                loss_factor: Decimal,
-                loss_cost_per_kwh: Decimal,
-            }
+            candidates.clear();
+            geometry_cache.clear();
 
-            let mut candidates: Vec<Candidate> = Vec::new();
-            /*
-            info!(
-                "  Analyzing Candidates for Buy Order {} (Zone {}, Price {}):",
-                buy_order.id,
-                buy_order.zone_id.unwrap_or(0),
-                buy_order.price_per_kwh
-            );
-            */
-
-            for sell_order in &sell_orders {
-                if buy_order.user_id == sell_order.user_id {
-                    debug!("    x Matching Prevention (Member ID check)");
+            for sell in &sell_orders {
+                if buy.user_id == sell.user_id {
                     continue;
                 }
 
-                let sell_filled = sell_order.filled_amount.unwrap_or(Decimal::ZERO);
-                let remaining_sell = sell_order.energy_amount - sell_filled;
+                let remaining_sell = sell.energy_amount - sell.filled_amount;
 
                 if remaining_sell < OrderMatchingEngine::MIN_TRADE_AMOUNT {
                     continue;
                 }
 
-                if !self
-                    .grid_topology
-                    .can_accommodate_flow(
-                        sell_order.zone_id,
-                        buy_order.zone_id,
+                // [PHASE 2 - GEOMETRY HOISTING]
+                // Use the geometry_cache to avoid redundant DB/Arc calls for the same zone pair
+                let (wheeling, loss, can_flow) = if sell.zone_id == buy.zone_id {
+                    (Decimal::ZERO, Decimal::ONE, true)
+                } else if let Some(&cached) = geometry_cache.get(&sell.zone_id) {
+                    cached
+                } else {
+                    let flow_allowed = topo_snapshot.can_accommodate_flow(
+                        sell.zone_id,
+                        buy.zone_id,
                         remaining_sell.min(remaining_buy_amount),
-                    )
-                    .await
-                {
+                    );
+                    
+                    if !flow_allowed {
+                        geometry_cache.insert(sell.zone_id, (Decimal::ZERO, Decimal::ZERO, false));
+                        (Decimal::ZERO, Decimal::ZERO, false)
+                    } else {
+                        let w = topo_snapshot.calculate_wheeling_charge(sell.zone_id, buy.zone_id);
+                        let l = topo_snapshot.calculate_loss_factor(sell.zone_id, buy.zone_id);
+                        geometry_cache.insert(sell.zone_id, (w, l, true));
+                        (w, l, true)
+                    }
+                };
+
+                if !can_flow {
                     continue;
                 }
 
-                let wheeling_charge = self
-                    .grid_topology
-                    .calculate_wheeling_charge(sell_order.zone_id, buy_order.zone_id)
-                    .await;
-                let loss_factor = self
-                    .grid_topology
-                    .calculate_loss_factor(sell_order.zone_id, buy_order.zone_id)
-                    .await;
-                debug!(
-                    "    - Wheeling: {}, Loss Factor: {}",
-                    wheeling_charge, loss_factor
-                );
+                let wheeling_fp = FastPrice::from(wheeling);
+                let loss_fp = FastPrice::from(loss);
+                
+                // [PHASE 3 - ARITHMETIC OPTIMIZATION]
+                // Using fixed-point i64 (FastPrice) for zero-allocation arithmetic
+                let extra_loss_raw = loss_fp.raw().saturating_sub(1_000_000_000); // (loss_factor - 1.0)
+                let loss_cost_extra_raw = (sell.price.raw() as i128 * extra_loss_raw as i128 / 1_000_000_000) as i64;
+                let mut landed_cost = FastPrice::from_raw(sell.price.raw() + wheeling_fp.raw() + loss_cost_extra_raw);
 
-                let sell_price = sell_order.price_per_kwh;
-                let loss_cost_unit = sell_price * loss_factor;
-                let mut landed_price = sell_price + wheeling_charge + loss_cost_unit;
+                // Apply dynamic multiplier (ToU)
+                landed_cost = landed_cost.checked_mul(dynamic_mult).unwrap_or(landed_cost);
 
-                // Apply dynamic multiplier (TOU * Market)
-                let dynamic_mult = self.get_dynamic_multiplier().await;
-                landed_price *= dynamic_mult;
-
-                if sell_order.zone_id == buy_order.zone_id {
-                    landed_price *= Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT;
+                // Apply Intra-zone discount
+                if sell.zone_id == buy.zone_id {
+                    let discount = FastPrice::from(Decimal::ONE - OrderMatchingEngine::INTRA_ZONE_DISCOUNT);
+                    landed_cost = landed_cost.checked_mul(discount).unwrap_or(landed_cost);
                 }
 
-                if landed_price <= buy_order.price_per_kwh {
-                    info!(
-                        "    ✓ Candidate Sell Order {} (Zone {}): Landed Price {} <= Buy Price {}",
-                        sell_order.id,
-                        sell_order.zone_id.unwrap_or(0),
-                        landed_price,
-                        buy_order.price_per_kwh
-                    );
+                if landed_cost <= buy.price {
                     candidates.push(Candidate {
-                        id: sell_order.id,
-                        landed_cost: landed_price,
-                        wheeling_charge_per_kwh: wheeling_charge,
-                        loss_factor,
-                        loss_cost_per_kwh: loss_cost_unit,
+                        id: sell.id,
+                        landed_cost,
+                        wheeling_charge_per_kwh: wheeling,
+                        loss_factor: loss,
+                        loss_cost_per_kwh: FastPrice::from_raw(loss_cost_extra_raw).to_decimal(),
+                        user_id: sell.user_id,
+                        zone_id: sell.zone_id,
+                        epoch_id: sell.epoch_id.unwrap_or_default(),
+                        order_pda: sell.order_pda.clone(),
+                        session_token: sell.session_token.clone(),
                     });
-                } else {
-                    info!(
-                        "    x Candidate Sell Order {} (Zone {}): Landed Price {} > Buy Price {}",
-                        sell_order.id,
-                        sell_order.zone_id.unwrap_or(0),
-                        landed_price,
-                        buy_order.price_per_kwh
-                    );
                 }
             }
 
             candidates.sort_by(|a, b| a.landed_cost.cmp(&b.landed_cost));
 
-            for candidate in candidates {
+            // [ADVANCED] Handle Time-In-Force Instructions
+            use crate::infra::db::schema::types::{TimeInForce, OrderStatus};
+            
+            if buy.time_in_force == TimeInForce::Fok {
+                let mut total_available = Decimal::ZERO;
+                for cand in &candidates {
+                    if let Some(sell_entry) = self.sell_orders.get(&cand.id) {
+                        let filled = sell_entry.filled_amount.unwrap_or(Decimal::ZERO);
+                        total_available += sell_entry.energy_amount - filled;
+                    }
+                }
+                
+                if total_available < remaining_buy_amount {
+                    debug!("    x FOK REJECTED: Insufficient aggregate liquidity (Available: {} < Requested: {})", total_available, remaining_buy_amount);
+                    // Cancel the order
+                    self.buy_orders.remove(&buy.id);
+                    if let Some(event_bus) = &self.event_bus {
+                        match_events.push(Event::OrderUpdate {
+                            id: buy.id,
+                            filled_amount: buy.filled_amount,
+                            status: OrderStatus::Cancelled.to_string(),
+                        });
+                    }
+                    continue;
+                }
+            }
+
+            for candidate in &candidates {
                 if remaining_buy_amount <= Decimal::ZERO {
                     break;
                 }
 
-                // Get the latest sell order state from mem
+                // Get the latest sell order state from DashMap
                 let sell_order_entry = match self.sell_orders.get_mut(&candidate.id) {
                     Some(entry) => entry,
                     None => continue,
@@ -556,17 +691,8 @@ impl ShardedMatchingWorker {
                     continue;
                 }
 
-                let match_amount = if remaining_buy_amount < remaining_sell {
-                    remaining_buy_amount
-                } else {
-                    remaining_sell
-                };
-                let landed_price = candidate.landed_cost;
-                let match_price = if sell_order_entry.created_at < buy_order.created_at {
-                    landed_price
-                } else {
-                    buy_order.price_per_kwh
-                };
+                let match_amount = remaining_buy_amount.min(remaining_sell);
+                let match_price = candidate.landed_cost.to_decimal();
 
                 let total_energy_cost = match_amount * match_price;
                 let total_wheeling = match_amount * candidate.wheeling_charge_per_kwh;
@@ -577,31 +703,23 @@ impl ShardedMatchingWorker {
                 let sell_order_pda = sell_order_entry.order_pda.clone();
                 let sell_order_session_token = sell_order_entry.session_token.clone();
                 let sell_order_zone_id = sell_order_entry.zone_id;
-                let epoch_id = match buy_order.epoch_id.or(sell_order_entry.epoch_id) {
-                    Some(id) => id,
-                    None => {
-                        error!(
-                            "❌ No epoch ID found for orders {} or {}. Skipping match.",
-                            buy_order.id, sell_order_id
-                        );
-                        drop(sell_order_entry);
-                        continue;
-                    }
-                };
+                let epoch_id = buy.epoch_id.unwrap_or_default(); // Use buy order's epoch (primary for matching)
 
-                // Drop the synchronous DashMap lock before async calls to prevent Tokio thread deadlocks
+                // Drop symbols before async to satisfy Send + Sync constraints and prevent deadlocks
                 drop(sell_order_entry);
 
                 match self
                     .create_order_match(
                         epoch_id,
-                        buy_order.id,
+                        buy.id,
                         sell_order_id,
+                        buy.user_id,
+                        sell_order_user_id,
                         match_amount,
                         match_price,
-                        buy_order.order_pda.as_deref(),
+                        buy.order_pda.as_deref(),
                         sell_order_pda.as_deref(),
-                        buy_order.zone_id,
+                        buy.zone_id,
                     )
                     .await
                 {
@@ -611,25 +729,39 @@ impl ShardedMatchingWorker {
 
                         if let Some(market_data) = &self.market_data_service {
                             let market_data = market_data.clone();
+                            let match_price_captured = match_price;
+                            let match_amount_captured = match_amount;
                             tokio::spawn(async move {
                                 let _ = market_data
-                                    .sync_price_history(match_price, match_amount)
+                                    .sync_price_history(match_price_captured, match_amount_captured)
                                     .await;
                             });
                         }
 
                         // Update local zone price for triggers
-                        let b_zone = buy_order.zone_id.unwrap_or(0);
+                        let b_zone = buy.zone_id.unwrap_or(0);
                         let s_zone = sell_order_zone_id.unwrap_or(0);
-                        debug!("Shard {} updated zone prices with match at {}: BuyZone={}, SellZone={}", self.shard_id, match_price, b_zone, s_zone);
                         self.zone_prices.insert(b_zone, match_price);
                         self.zone_prices.insert(s_zone, match_price);
 
+                        // [PHASE 6] Database OHLC Aggregation
+                        if let Some(aggregator) = &self.ohlc_aggregator {
+                            let agg = aggregator.clone();
+                            let zone_id = s_zone; // Using seller zone as trade location anchor
+                            let match_price_captured = match_price;
+                            let match_amount_captured = match_amount;
+                            tokio::spawn(async move {
+                                if let Err(e) = agg.on_order_matched(zone_id, match_price_captured, match_amount_captured, Utc::now()).await {
+                                    error!("Failed to aggregate market data for zone {}: {}", zone_id, e);
+                                }
+                            });
+                        }
+
                         self.trigger_settlement(
                             match_id,
-                            buy_order.id,
+                            buy.id,
                             sell_order_id,
-                            buy_order.user_id,
+                            buy.user_id,
                             sell_order_user_id,
                             match_amount,
                             match_price,
@@ -639,111 +771,110 @@ impl ShardedMatchingWorker {
                                 total_wheeling,
                                 candidate.loss_factor,
                                 total_loss_cost,
-                                buy_order.zone_id,
+                                buy.zone_id,
                                 sell_order_zone_id,
                             ),
-                            buy_order.session_token.clone(),
+                            buy.session_token.clone(),
                             sell_order_session_token.clone(),
                         )
                         .await;
 
                         self.grid_topology
-                            .record_flow(sell_order_zone_id, buy_order.zone_id, match_amount)
+                            .record_flow(sell_order_zone_id, buy.zone_id, match_amount)
                             .await;
 
-                        // Re-acquire lock to update order states safely
-                        let mut remove_sell_order = false;
-                        let mut sell_order_id_to_update = Uuid::default();
-
-                        if let Some(mut sell_order_entry) = self.sell_orders.get_mut(&candidate.id)
-                        {
-                            let sell_filled =
-                                sell_order_entry.filled_amount.unwrap_or(Decimal::ZERO);
+                        // Update states safely
+                        if let Some(mut sell_order_entry) = self.sell_orders.get_mut(&candidate.id) {
+                            let sell_filled = sell_order_entry.filled_amount.unwrap_or(Decimal::ZERO);
                             let new_sell_filled = sell_filled + match_amount;
                             sell_order_entry.filled_amount = Some(new_sell_filled);
-                            buy_filled_amount += match_amount;
+                            
+                            buy_filled_current += match_amount;
                             remaining_buy_amount -= match_amount;
 
-                            let new_sell_status =
-                                if new_sell_filled >= sell_order_entry.energy_amount {
-                                    OrderStatus::Filled
-                                } else {
-                                    OrderStatus::PartiallyFilled
-                                };
-                            sell_order_entry.status = new_sell_status.clone();
-                            sell_order_id_to_update = sell_order_entry.id;
-
-                            if new_sell_status == OrderStatus::Filled {
-                                remove_sell_order = true;
-                            }
-                        }
-
-                        // Release lock before doing async operations
-                        if remove_sell_order {
-                            self.sell_orders.remove(&candidate.id);
-                        }
-
-                        let new_sell_status =
-                            if (sell_filled + match_amount) >= remaining_sell + sell_filled {
+                            let new_sell_status = if new_sell_filled >= sell_order_entry.energy_amount {
                                 OrderStatus::Filled
                             } else {
                                 OrderStatus::PartiallyFilled
                             };
+                            sell_order_entry.status = new_sell_status.clone();
 
-                        // Async DB Update for Sell Order (via EventBus)
-                        if let Some(event_bus) = &self.event_bus {
-                            let event = Event::OrderUpdate {
-                                id: sell_order_id_to_update,
-                                filled_amount: sell_filled + match_amount,
-                                status: new_sell_status.to_string(),
-                            };
-                            let bus = event_bus.clone();
-                            tokio::spawn(async move {
-                                let _ = bus.publish(&event).await;
-                            });
+                            if let Some(_) = &self.event_bus {
+                                match_events.push(Event::OrderUpdate {
+                                    id: sell_order_id,
+                                    filled_amount: new_sell_filled,
+                                    status: new_sell_status.to_string(),
+                                });
+                            }
+
+                            if new_sell_status == OrderStatus::Filled {
+                                drop(sell_order_entry);
+                                self.sell_orders.remove(&candidate.id);
+                            }
                         }
                     }
                     Err(e) => error!("Failed to create match: {}", e),
                 }
             }
 
-            let new_buy_status = if buy_filled_amount >= buy_energy_amount {
+            let new_buy_status = if buy_filled_current >= buy.energy_amount {
                 OrderStatus::Filled
-            } else if buy_filled_amount > Decimal::ZERO {
+            } else if buy_filled_current > Decimal::ZERO {
                 OrderStatus::PartiallyFilled
             } else {
                 OrderStatus::Active
             };
 
-            // Async DB Update for Buy Order (via EventBus) - ONLY if updated
-            let old_buy_filled = buy_order.filled_amount.unwrap_or(Decimal::ZERO);
-            if let Some(event_bus) = &self.event_bus {
-                if buy_filled_amount > old_buy_filled {
-                    let event = Event::OrderUpdate {
-                        id: buy_order.id,
-                        filled_amount: buy_filled_amount,
+            if let Some(_) = &self.event_bus {
+                if buy_filled_current > buy_initial_filled {
+                    match_events.push(Event::OrderUpdate {
+                        id: buy.id,
+                        filled_amount: buy_filled_current,
                         status: new_buy_status.to_string(),
-                    };
-                    let bus = event_bus.clone();
-                    tokio::spawn(async move {
-                        let _ = bus.publish(&event).await;
                     });
                 }
             }
 
             if new_buy_status == OrderStatus::Filled {
-                self.buy_orders.remove(&buy_order.id);
+                self.buy_orders.remove(&buy.id);
+            } else if buy.time_in_force == TimeInForce::Ioc {
+                self.buy_orders.remove(&buy.id);
+                if let Some(_) = &self.event_bus {
+                    match_events.push(Event::OrderUpdate {
+                        id: buy.id,
+                        filled_amount: buy_filled_current,
+                        status: OrderStatus::Cancelled.to_string(),
+                    });
+                }
             } else {
-                if let Some(mut entry) = self.buy_orders.get_mut(&buy_order.id) {
-                    entry.filled_amount = Some(buy_filled_amount);
-                    entry.status = new_buy_status.clone();
+                if let Some(mut entry) = self.buy_orders.get_mut(&buy.id) {
+                    entry.filled_amount = Some(buy_filled_current);
+                    entry.status = new_buy_status;
                 }
             }
         }
 
-        let duration = start_time.elapsed();
-        info!("Shard {} matching cycle completed in {:?} (Pools: {} -> {} buy, {} -> {} sell). Matches created: {}", 
-            self.shard_id, duration, buy_count, self.buy_orders.len(), sell_count, self.sell_orders.len(), matches_created);
+        // [B4] Publish all collected events in a single batch call
+        if !match_events.is_empty() {
+            if let Some(event_bus) = &self.event_bus {
+                let _ = event_bus.publish_batch(&match_events).await;
+            }
+        }
+
+        let duration_ms = cycle_start.elapsed().as_secs_f64() * 1000.0;
+        record_matching_cycle(duration_ms, (buy_count + sell_count) as u64, matches_created as u64);
+        crate::metrics::record_matching_cycle_high_fidelity(duration_ms);
+
+        info!(
+            "Shard {} matching cycle completed in {:.2}ms (Pools: {} -> {} buy, {} -> {} sell). Matches created: {}",
+            self.shard_id,
+            duration_ms,
+            buy_count,
+            self.buy_orders.len(),
+            sell_count,
+            self.sell_orders.len(),
+            matches_created
+        );
 
         Ok(matches_created)
     }
@@ -753,6 +884,8 @@ impl ShardedMatchingWorker {
         epoch_id: Uuid,
         buy_order_id: Uuid,
         sell_order_id: Uuid,
+        buyer_id: Uuid,
+        seller_id: Uuid,
         energy_amount: Decimal,
         price_per_kwh: Decimal,
         buy_order_pda: Option<&str>,
@@ -760,6 +893,14 @@ impl ShardedMatchingWorker {
         zone_id: Option<i32>,
     ) -> Result<Uuid> {
         let match_id = Uuid::new_v4();
+
+        // Extract trace context for distributed tracing
+        use opentelemetry::propagation::TextMapPropagator;
+        let mut trace_context = std::collections::HashMap::new();
+        opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&opentelemetry::Context::current(), &mut trace_context);
+        });
+        let trace_context = if trace_context.is_empty() { None } else { Some(trace_context) };
 
         // Emit OrderMatched event via EventBus if available
         if let Some(event_bus) = &self.event_bus {
@@ -770,10 +911,11 @@ impl ShardedMatchingWorker {
                 sell_order_id,
                 amount: energy_amount,
                 price: price_per_kwh,
-                buyer_id: Uuid::new_v4(), // Placeholder or fetch actual buyer_id if needed
-                seller_id: Uuid::new_v4(), // Placeholder or fetch actual seller_id if needed
+                buyer_id,
+                seller_id,
                 timestamp: chrono::Utc::now(),
                 zone_id,
+                otel_trace_context: trace_context,
             });
             let bus = event_bus.clone();
             tokio::spawn(async move {
@@ -853,6 +995,14 @@ impl ShardedMatchingWorker {
         let settlement_ulid = Ulid::new();
         let settlement_id = Uuid::from_bytes(settlement_ulid.to_bytes());
 
+        // Extract trace context for propagation
+        use opentelemetry::propagation::TextMapPropagator;
+        let mut trace_context = std::collections::HashMap::new();
+        opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&opentelemetry::Context::current(), &mut trace_context);
+        });
+        let trace_context = if trace_context.is_empty() { None } else { Some(trace_context) };
+
         let settlement = Settlement {
             id: settlement_id,
             trade_id: Uuid::new_v4(), // In-memory reference ID
@@ -880,6 +1030,7 @@ impl ShardedMatchingWorker {
             erc_certificate_id: None,
             erc_transfer_tx: None,
             epoch_id,
+            trace_context,
         };
 
         // Emit SettlementRequested event via EventBus if available
@@ -908,6 +1059,23 @@ impl MatchingWorkerPool {
     }
 }
 
+/// Lightweight order representation for fast matching
+#[derive(Debug, Clone)]
+pub struct FastOrder {
+    pub id: Uuid,
+    pub price: FastPrice,
+    pub zone_id: Option<i32>,
+    pub created_at_ns: i64,
+    pub expires_at_ns: Option<i64>,
+    pub user_id: Uuid,
+    pub energy_amount: Decimal,
+    pub filled_amount: Decimal,
+    pub time_in_force: crate::infra::db::schema::types::TimeInForce,
+    pub epoch_id: Option<Uuid>,
+    pub order_pda: Option<String>,
+    pub session_token: Option<String>,
+}
+
 /// Background service that automatically matches orders with offers
 #[derive(Clone)]
 pub struct OrderMatchingEngine {
@@ -920,7 +1088,9 @@ pub struct OrderMatchingEngine {
     blockchain_service: Option<BlockchainService>,
     grid_topology: Arc<GridTopologyService>,
     market_data_service: Option<MarketDataService>,
+    ohlc_aggregator: Option<Arc<crate::services::market_data::MarketDataService>>,
     event_bus: Option<EventBus>,
+    p2p_config: Option<Arc<P2PConfigService>>,
 }
 
 impl OrderMatchingEngine {
@@ -953,7 +1123,9 @@ impl OrderMatchingEngine {
             blockchain_service: None,
             grid_topology: Arc::new(GridTopologyService::new()),
             market_data_service: None,
+            ohlc_aggregator: None,
             event_bus: None,
+            p2p_config: None,
         }
     }
 
@@ -969,9 +1141,9 @@ impl OrderMatchingEngine {
         self
     }
 
-    /// Set the Market Data service for on-chain telemetry
-    pub fn with_market_data(mut self, market_data_service: MarketDataService) -> Self {
-        self.market_data_service = Some(market_data_service);
+    /// Set the OHLC Aggregator service for price charting
+    pub fn with_ohlc_aggregator(mut self, aggregator: Arc<crate::services::market_data::MarketDataService>) -> Self {
+        self.ohlc_aggregator = Some(aggregator);
         self
     }
 
@@ -999,8 +1171,14 @@ impl OrderMatchingEngine {
         self
     }
 
-    /// Start the background matching engine
-    pub async fn start(&self, token: CancellationToken) {
+    /// Set the P2P config service
+    pub fn with_p2p_config(mut self, p2p_config: Arc<P2PConfigService>) -> Self {
+        self.p2p_config = Some(p2p_config);
+        self
+    }
+
+    /// Start the background matching engine, optionally seeding with rehydrated state.
+    pub async fn start(&self, token: CancellationToken, seed_state: Option<std::collections::HashMap<Uuid, TradingOrderDb>>) {
         let mut running = self.running.write().await;
         if *running {
             warn!("Order matching engine is already running");
@@ -1038,7 +1216,21 @@ impl OrderMatchingEngine {
             worker.market_clearing = self.market_clearing.clone();
             worker.blockchain_service = self.blockchain_service.clone();
             worker.market_data_service = self.market_data_service.clone();
+            worker.ohlc_aggregator = self.ohlc_aggregator.clone();
             worker.event_bus = self.event_bus.clone();
+            worker.p2p_config = self.p2p_config.clone();
+
+            // Seed with rehydrated orders if available
+            if let Some(state) = &seed_state {
+                let shard_orders: Vec<TradingOrderDb> = state.values()
+                    .filter(|o| (o.zone_id.unwrap_or(0) as u32 % num_shards) == i)
+                    .cloned()
+                    .collect();
+                
+                if !shard_orders.is_empty() {
+                    worker.seed_orders(shard_orders);
+                }
+            }
 
             let worker = Arc::new(worker);
             let running = self.running.clone();
@@ -1071,6 +1263,13 @@ impl OrderMatchingEngine {
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {
                     if let Err(e) = self.expire_stale_orders().await {
                         error!("❌ Error expiring stale orders: {}", e);
+                    }
+
+                    // Sync P2P config to GridTopology pricing cache
+                    if let (Some(p2p), topology) = (&self.p2p_config, &self.grid_topology) {
+                        if let Ok(active_configs) = p2p.get_all_active().await {
+                            topology.load_zone_pair_overrides(&active_configs).await;
+                        }
                     }
                 }
                 _ = token.cancelled() => {
@@ -1122,7 +1321,9 @@ impl OrderMatchingEngine {
                 energy_amount, price_per_kwh, filled_amount, status, 
                 expires_at, created_at, filled_at, epoch_id, zone_id, meter_id, refund_tx_signature, order_pda,
                 order_index,
-                trigger_price, trigger_type, trigger_status, trailing_offset, session_token, triggered_at, last_peak_price
+                trigger_price, trigger_type, trigger_status, trailing_offset, session_token, triggered_at, last_peak_price,
+                blockchain_status, blockchain_tx_hash, blockchain_error, retry_count,
+                time_in_force
             FROM trading_orders 
             WHERE status IN ('active', 'pending', 'partially_filled') 
             AND expires_at < $1
@@ -1160,6 +1361,11 @@ impl OrderMatchingEngine {
                 trailing_offset: row.get("trailing_offset"),
                 triggered_at: row.get("triggered_at"),
                 last_peak_price: row.get("last_peak_price"),
+                blockchain_status: row.get("blockchain_status"),
+                blockchain_tx_hash: row.get("blockchain_tx_hash"),
+                blockchain_error: row.get("blockchain_error"),
+                retry_count: row.get("retry_count"),
+                time_in_force: row.get("time_in_force"),
             })
             .collect();
 

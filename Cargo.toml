@@ -18,6 +18,7 @@ sqlx = { workspace = true, features = [
   "chrono",
   "uuid",
   "rust_decimal",
+  "ipnetwork",
 ] }
 rust_decimal = { workspace = true, features = ["serde-float", "maths"] }
 
@@ -37,7 +38,7 @@ axum = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
-tracing-opentelemetry = { workspace = true }
+tracing-opentelemetry = "0.32.1"
 opentelemetry-semantic-conventions = { workspace = true }
 tonic = { workspace = true }
 
@@ -62,7 +63,7 @@ spl-token = { workspace = true }
 spl-associated-token-account = { workspace = true }
 
 # gRPC
-connectrpc = { workspace = true }
+connectrpc = { workspace = true, features = ["client", "axum", "server"] }
 buffa = "0.2.0"
 
 # Others
@@ -76,11 +77,13 @@ base64 = { workspace = true }
 utoipa = { workspace = true }
 ulid = { workspace = true }
 validator = { workspace = true }
-ipnetwork = { workspace = true }
+ipnetwork = "0.20"
 strum = { workspace = true }
 strum_macros = { workspace = true }
 http-body = "1.0.0"
 tokio-util = "0.7.18"
+smallvec = { workspace = true }
+rdkafka = { workspace = true }
 
 [build-dependencies]
 buffa-build = "0.2.0"

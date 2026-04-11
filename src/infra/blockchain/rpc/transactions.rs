@@ -16,17 +16,39 @@ impl TransactionType {
 
 pub struct PriorityFeeService;
 impl PriorityFeeService {
-    pub fn recommend_priority_level(_t: TransactionType) -> u64 {
-        1000
+    pub fn recommend_priority_level(t: TransactionType) -> u64 {
+        match t {
+            TransactionType::Settlement => 5_000, // Higher priority for settlements
+            _ => 1_000,                          // Default
+        }
     }
-    pub fn recommend_compute_limit(_t: TransactionType) -> u32 {
-        200_000
+    pub fn recommend_compute_limit(t: TransactionType) -> u32 {
+        match t {
+            TransactionType::Settlement => 600_000, // Higher limit for batched settlements
+            _ => 200_000,
+        }
     }
     pub fn add_priority_fee(
-        _i: &mut Vec<solana_sdk::instruction::Instruction>,
-        _l: u64,
-        _c: Option<u32>,
+        instructions: &mut Vec<Instruction>,
+        priority_fee: u64,
+        compute_limit: Option<u32>,
     ) -> anyhow::Result<()> {
+        if let Some(limit) = compute_limit {
+            instructions.insert(
+                0,
+                solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(limit),
+            );
+        }
+
+        if priority_fee > 0 {
+            instructions.insert(
+                0,
+                solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(
+                    priority_fee,
+                ),
+            );
+        }
+
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload")]
@@ -32,6 +33,7 @@ pub struct SettlementProcessedPayload {
     pub tx_signature: String,
     pub status: String,
     pub timestamp: DateTime<Utc>,
+    pub otel_trace_context: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +47,7 @@ pub struct ErcIssuedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderMatchedPayload {
+    pub otel_trace_context: Option<HashMap<String, String>>,
     pub match_id: Uuid,
     pub epoch_id: Uuid,
     pub buy_order_id: Uuid,

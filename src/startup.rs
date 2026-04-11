@@ -3,13 +3,14 @@ use crate::core::config::Config;
 use crate::domain::{
     energy::GridTopologyService,
     trading::clearing::MarketClearingService,
-    trading::engine::OrderMatchingEngine,
+    trading::engine::{OrderMatchingEngine, rehydration::StateRehydrator},
     trading::settlement::{SettlementConfig, SettlementManager},
 };
 use crate::infra::blockchain::settlement::BlockchainSettlementProvider;
 use crate::infra::blockchain::{BlockchainService, WalletService};
-use crate::infra::{db, events::EventBus};
-use crate::services::{ErcService, SettlementService};
+use crate::infra::{db, events::{EventBus, kafka::KafkaTopics, kafka_consumer::KafkaConsumer}, logging::{AuditLogger, AuditWorker}};
+use crate::domain::vpp::VppRepository;
+use crate::services::{ErcService, SettlementService, P2PConfigService, TriggerEvaluator, RecurringEvaluator, MarketDataService};
 use crate::trading_proto::TradingServiceExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,6 +32,12 @@ pub struct AppState {
     pub matching_engine: Arc<OrderMatchingEngine>,
     pub grid_topology: Arc<GridTopologyService>,
     pub market_clearing: Arc<MarketClearingService>,
+    pub p2p_config: Arc<P2PConfigService>,
+    pub audit_logger: AuditLogger,
+    pub trigger_evaluator: Arc<TriggerEvaluator>,
+    pub recurring_evaluator: Arc<RecurringEvaluator>,
+    pub market_data_aggregator: Arc<MarketDataService>,
+    pub vpp_repository: Arc<VppRepository>,
 }
 
 pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
@@ -51,10 +58,29 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
         .context("Failed to run database migrations")?;
     info!("✅ Database migrations completed");
 
-    // Initialize EventBus
-    let event_bus = EventBus::new(&config.redis_url)
+    // Initialize EventBus (Kafka or Redis Streams based on config)
+    let event_bus = EventBus::new(
+        &config.redis_url,
+        config.kafka_enabled,
+        Some(&config.kafka_bootstrap_servers),
+        Some(&config.kafka_topic_prefix),
+    )
         .await
-        .context("Failed to initialize event bus (Redis)")?;
+        .context("Failed to initialize event bus")?;
+
+    // Initialize Audit Logging
+    let (audit_tx, audit_rx) = tokio::sync::mpsc::channel(1000);
+    let audit_logger = AuditLogger::new(db_pool.clone(), audit_tx);
+    let audit_worker = AuditWorker {
+        receiver: audit_rx,
+        logger: audit_logger.clone(),
+    };
+    
+    // Start Audit Worker
+    let _audit_handle = tokio::spawn(async move {
+        audit_worker.run().await;
+    });
+    info!("✅ Audit Logging initialized and worker started");
 
     // Initialize Blockchain Service
     let blockchain = Arc::new(
@@ -68,6 +94,10 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
 
     // Initialize Topology Service
     let grid_topology = Arc::new(GridTopologyService::new());
+
+    // Initialize P2P Config Service
+    let p2p_config = Arc::new(P2PConfigService::new(db_pool.clone()));
+    p2p_config.initialize().await.context("Failed to initialize P2P config cache")?;
 
     // Initialize ERC Service
     let erc_service = Arc::new(ErcService::new(
@@ -102,10 +132,34 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
             blockchain.clone(),
             wallet_service,
             erc_service.clone(),
+            audit_logger.clone(),
+            Some(event_bus.clone()),
             token.clone(),
         )
-        .with_settlement((*settlement_service).clone()),
+        .with_settlement((*settlement_service).clone())
+        .with_p2p_config(p2p_config.clone()),
     );
+
+    // Initialize Market Data Aggregator Service
+    let market_data_aggregator = Arc::new(
+        MarketDataService::new(db_pool.clone())
+    );
+
+    // Initialize VPP Infrastructure
+    let vpp_repository = Arc::new(VppRepository::new(db_pool.clone()));
+    let vpp_aggregator = Arc::new(crate::domain::vpp::aggregator::VppAggregator::new(vpp_repository.clone()));
+
+    // Start VPP Aggregator Kafka Consumer
+    if let Ok(brokers) = std::env::var("KAFKA_BOOTSTRAP_SERVERS") {
+        let topic = std::env::var("KAFKA_TOPIC_METER_READINGS").unwrap_or_else(|_| "meter.readings".to_string());
+        let aggregator_clone = vpp_aggregator.clone();
+        let aggregator_token = token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = aggregator_clone.run(&brokers, &topic, "trading-vpp-group", aggregator_token).await {
+                error!("❌ VPP Aggregator failed: {}", e);
+            }
+        });
+    }
 
     // Initialize Order Matching Engine
     let matching_engine = Arc::new(
@@ -114,12 +168,40 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
             .with_topology(grid_topology.clone())
             .with_event_bus(event_bus.clone())
             .with_blockchain((*blockchain).clone())
+            .with_ohlc_aggregator(market_data_aggregator.clone())
             .with_settlement((*settlement_service).clone())
-            .with_market_clearing((*market_clearing).clone()),
+            .with_market_clearing((*market_clearing).clone())
+            .with_p2p_config(p2p_config.clone()),
     );
 
-    // Start Matching Engine
-    matching_engine.start(token.clone()).await;
+    // [PHASE 4] Kafka-Driven Recovery (Rehydration)
+    let mut rehydrated_state = None;
+    if config.kafka_enabled {
+        info!("🔄 Initiating Kafka state rehydration...");
+        let topics = KafkaTopics::with_prefix(&config.kafka_topic_prefix);
+        let consumer_topics = vec![topics.orders_created, topics.orders_updated];
+        
+        match KafkaConsumer::new(&config.kafka_bootstrap_servers, consumer_topics, None) {
+            Ok(consumer) => {
+                let rehydrator = StateRehydrator::new(consumer);
+                match rehydrator.rehydrate().await {
+                    Ok(state) => {
+                        info!("✅ Rehydration successful: {} active orders recovered", state.len());
+                        rehydrated_state = Some(state);
+                    }
+                    Err(e) => {
+                        error!("❌ Rehydration failed: {}. Proceeding with clean state (DB bootstrap will follow).", e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("❌ Failed to initialize rehydration consumer: {}. Skipping.", e);
+            }
+        }
+    }
+
+    // Start Matching Engine with rehydrated state
+    matching_engine.start(token.clone(), rehydrated_state).await;
 
     // Start Event Consumer for reactive matching
     let event_bus_clone = event_bus.clone();
@@ -165,12 +247,33 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     if enable_settlement {
         let settlement_token = token.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = settlement_service_clone.process_pending_settlements().await {
-                            error!("Settlement processor error: {}", e);
+                        // Drain the queue: Process multiple batches in one tick if there's a backlog
+                        let mut batches_in_tick = 0;
+                        const MAX_BATCHES_PER_TICK: u32 = 10;
+                        
+                        while batches_in_tick < MAX_BATCHES_PER_TICK {
+                            match settlement_service_clone.process_pending_settlements().await {
+                                Ok(pending_count) => {
+                                    if pending_count == 0 {
+                                        break; // Queue is empty
+                                    }
+                                    batches_in_tick += 1;
+                                    
+                                    // If we processed a full batch (5), keep going immediately.
+                                    // Otherwise, wait for the next tick.
+                                    if pending_count <= 5 {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Settlement processor error: {}", e);
+                                    break;
+                                }
+                            }
                         }
                     }
                     _ = settlement_token.cancelled() => {
@@ -180,10 +283,62 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
                 }
             }
         });
-        info!("✅ Settlement Service started");
+        info!("✅ Settlement Service started (Drain-the-Queue mode enabled)");
     } else {
         info!("ℹ️ Settlement Service background loop is DISABLED via ENABLE_SETTLEMENT_PROCESSOR");
     }
+
+    // Initialize Trigger Evaluator Service
+    let trigger_evaluator = Arc::new(
+        TriggerEvaluator::new(db_pool.clone(), matching_engine.clone())
+    );
+
+    // Initialize Recurring Evaluator Service
+    let recurring_evaluator = Arc::new(
+        RecurringEvaluator::new(db_pool.clone(), matching_engine.clone())
+    );
+
+    // Start Trigger Evaluation Worker
+    let trigger_evaluator_clone = trigger_evaluator.clone();
+    let trigger_token = token.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = trigger_evaluator_clone.process_triggers().await {
+                        error!("Trigger evaluator error: {}", e);
+                    }
+                }
+                _ = trigger_token.cancelled() => {
+                    info!("🔄 Trigger evaluation worker shutting down...");
+                    break;
+                }
+            }
+        }
+    });
+    info!("✅ Trigger Evaluation Worker started");
+
+    // Start Recurring Evaluation Worker
+    let recurring_evaluator_clone = recurring_evaluator.clone();
+    let recurring_token = token.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = recurring_evaluator_clone.process_recurring_orders_with_metrics().await {
+                        error!("Recurring evaluator error: {}", e);
+                    }
+                }
+                _ = recurring_token.cancelled() => {
+                    info!("🔄 Recurring evaluation worker shutting down...");
+                    break;
+                }
+            }
+        }
+    });
+    info!("✅ Recurring Evaluation Worker started");
 
     let state = Arc::new(AppState {
         db: db_pool,
@@ -195,29 +350,37 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
         matching_engine,
         grid_topology,
         market_clearing,
+        p2p_config,
+        audit_logger,
+        trigger_evaluator,
+        recurring_evaluator,
+        market_data_aggregator,
+        vpp_repository,
     });
 
     let trading_service = TradingServiceImpl::new(state.clone());
     let grpc_router = Arc::new(trading_service).register(connectrpc::Router::new());
     let grpc_server = Server::new(grpc_router);
 
-    // Start metrics HTTP server on separate port
+    // Start REST HTTP server (metrics + settlement endpoint)
     let metrics_port = 8093;
     let metrics_addr = format!("0.0.0.0:{}", metrics_port);
     let metrics_listener = tokio::net::TcpListener::bind(&metrics_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind metrics to {}: {}", metrics_addr, e))?;
     
-    let metrics_app = Router::new()
+    let rest_app = Router::new()
         .route("/metrics", get(get_metrics))
-        .layer(middleware::from_fn(crate::api::middleware::otel_tracing::otel_tracing_middleware));
+        .route("/api/v1/settlement/generation-mint", axum::routing::post(settle_generation_mint_rest))
+        .layer(middleware::from_fn(crate::api::middleware::otel_tracing::otel_tracing_middleware))
+        .with_state(state.clone());
     
     info!("✅ Trading gRPC server listening on {}", addr);
-    info!("✅ Trading metrics server listening on {}", metrics_addr);
+    info!("✅ Trading REST server listening on {} (metrics + settlement)", metrics_addr);
 
     use futures::TryFutureExt;
     let rest_token = token.clone();
-    let rest_handle = axum::serve(metrics_listener, metrics_app)
+    let rest_handle = axum::serve(metrics_listener, rest_app)
         .with_graceful_shutdown(async move {
             rest_token.cancelled().await;
         });
@@ -227,7 +390,7 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     tokio::select! {
         res = rest_handle => {
             if let Err(e) = res {
-                error!("Metrics server failed: {}", e);
+                error!("REST server failed: {}", e);
             }
         }
         res = grpc_handle => {
@@ -238,6 +401,81 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     };
 
     Ok(())
+}
+
+// =============================================================================
+// REST Settlement Handler (Oracle Bridge → Trading Service)
+// =============================================================================
+
+#[derive(serde::Deserialize)]
+struct GenerationMintRequest {
+    meter_id: uuid::Uuid,
+    meter_serial: String,
+    user_id: uuid::Uuid,
+    start_time: chrono::DateTime<chrono::Utc>,
+    end_time: chrono::DateTime<chrono::Utc>,
+    energy_generated_kwh: rust_decimal::Decimal,
+    energy_consumed_kwh: rust_decimal::Decimal,
+    reading_count: u64,
+    signature: String,
+}
+
+#[derive(serde::Serialize)]
+struct GenerationMintResponse {
+    signature: String,
+    meter_serial: String,
+    amount_minted: rust_decimal::Decimal,
+    status: String,
+}
+
+async fn settle_generation_mint_rest(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::Json(payload): axum::Json<GenerationMintRequest>,
+) -> impl IntoResponse {
+    info!(
+        "💰 Settlement request received (REST): {} (Gen: {} kWh, Window: {} - {})",
+        payload.meter_serial,
+        payload.energy_generated_kwh,
+        payload.start_time,
+        payload.end_time
+    );
+
+    // 1. Verify Oracle signature is present
+    if payload.signature.is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+            "error": "Missing oracle signature"
+        }))).into_response();
+    }
+
+    // 2. Execute via SettlementService
+    match state.settlement_service
+        .execute_generation_mint(
+            payload.meter_id,
+            &payload.meter_serial,
+            payload.energy_generated_kwh,
+            payload.start_time.timestamp(),
+        )
+        .await
+    {
+        Ok(tx_signature) => {
+            info!(
+                "⛓️ Generation Mint Success: [Meter] {} - Minted: {} GRX - TX: {}",
+                payload.meter_serial, payload.energy_generated_kwh, tx_signature
+            );
+            (StatusCode::OK, axum::Json(serde_json::json!(GenerationMintResponse {
+                signature: tx_signature,
+                meter_serial: payload.meter_serial,
+                amount_minted: payload.energy_generated_kwh,
+                status: "settled".to_string(),
+            }))).into_response()
+        }
+        Err(e) => {
+            error!("❌ Generation mint failed for {}: {}", payload.meter_serial, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
+                "error": format!("On-chain minting failed: {}", e)
+            }))).into_response()
+        }
+    }
 }
 
 /// Metrics endpoint handler - exposes Prometheus-format metrics

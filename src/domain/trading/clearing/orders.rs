@@ -31,9 +31,12 @@ impl MarketClearingService {
                 (energy_amount - COALESCE(filled_amount, 0)) as energy_amount,
                 energy_amount as original_amount,
                 price_per_kwh, created_at, zone_id,
-                session_token, signature, payload_bytes
+                session_token, signature, payload_bytes,
+                time_in_force
             FROM trading_orders 
-            WHERE status IN ('pending', 'active', 'partially_filled') AND side = 'buy' AND epoch_id = $1 AND price_per_kwh IS NOT NULL
+            WHERE status IN ('pending', 'active', 'partially_filled') 
+            AND side = 'buy' AND epoch_id = $1 AND price_per_kwh IS NOT NULL
+            AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY price_per_kwh DESC, created_at ASC
             "#
         )
@@ -57,9 +60,12 @@ impl MarketClearingService {
                 (energy_amount - COALESCE(filled_amount, 0)) as energy_amount,
                 energy_amount as original_amount,
                 price_per_kwh, created_at, zone_id,
-                session_token, signature, payload_bytes
+                session_token, signature, payload_bytes,
+                time_in_force
             FROM trading_orders 
-            WHERE status IN ('pending', 'active', 'partially_filled') AND side = 'sell' AND epoch_id = $1 AND price_per_kwh IS NOT NULL
+            WHERE status IN ('pending', 'active', 'partially_filled') 
+            AND side = 'sell' AND epoch_id = $1 AND price_per_kwh IS NOT NULL
+            AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY price_per_kwh ASC, created_at ASC
             "#
         )
@@ -128,11 +134,10 @@ impl MarketClearingService {
         // 2. Insert order into DB (Must process first to satisfy FK for escrow_records)
         sqlx::query(
             r#"
-            INSERT INTO trading_orders (
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 filled_amount, status, expires_at, created_at, epoch_id, zone_id, meter_id,
-                is_confidential
-            ) VALUES ($1, $2, $3::order_type, $4::order_side, $5, $6, $7, $8::order_status, $9, $10, $11, $12, $13, $14)
+                is_confidential, time_in_force
+            ) VALUES ($1, $2, $3::order_type, $4::order_side, $5, $6, $7, $8::order_status, $9, $10, $11, $12, $13, $14, $15::time_in_force)
             "#
         )
         .bind(order_id)
@@ -149,6 +154,7 @@ impl MarketClearingService {
         .bind(zone_id)
         .bind(meter_id)
         .bind(false)
+        .bind(crate::infra::db::schema::types::TimeInForce::Gtc) // Default for simple create_order
         .execute(&mut *tx)
         .await?;
 
@@ -295,14 +301,56 @@ impl MarketClearingService {
             )
             .await;
 
-        // 2. Audit Log (Stubbed)
-        // self.audit_logger.log_async(crate::infra::logging::audit::AuditEvent::OrderCreated {
-        //     user_id,
-        //     order_id,
-        //     order_type: format!("{:?}", side),
-        //     amount: energy_amount.to_string(),
-        //     price: price_per_kwh_val.to_string(),
-        // });
+        // 2. Audit Log
+        self.audit_logger.log_async(crate::infra::logging::audit::AuditEvent::OrderCreated {
+            user_id,
+            order_id,
+            order_type: format!("{:?}", side),
+            amount: energy_amount.to_string(),
+            price: price_per_kwh_val.to_string(),
+        });
+
+        // 2.1 Publish event via EventBus if available
+        if let Some(event_bus) = &self.event_bus {
+            let order_db = crate::domain::trading::models::TradingOrderDb {
+                id: order_id,
+                user_id,
+                energy_amount,
+                price_per_kwh: price_per_kwh_val,
+                filled_amount: Some(Decimal::ZERO),
+                epoch_id: Some(epoch.id),
+                zone_id,
+                order_type,
+                side,
+                status: OrderStatus::Pending,
+                expires_at: Some(expires_at),
+                created_at: Some(now),
+                filled_at: None,
+                meter_id,
+                refund_tx_signature: None,
+                order_pda: None,
+                order_index: None,
+                session_token: session_token.map(|s| s.to_string()),
+                trigger_price: None,
+                trigger_type: None,
+                trigger_status: None,
+                trailing_offset: None,
+                triggered_at: None,
+                last_peak_price: None,
+                blockchain_status: Some("unprocessed".to_string()),
+                blockchain_tx_hash: None,
+                blockchain_error: None,
+                retry_count: 0,
+                time_in_force: crate::infra::db::schema::types::TimeInForce::Gtc,
+            };
+            let event = crate::domain::events::Event::OrderCreated(order_db);
+            let bus = event_bus.clone();
+            tokio::spawn(async move {
+                if let Err(e) = bus.publish(&event).await {
+                    error!("Failed to publish OrderCreated event for order {}: {}", order_id, e);
+                }
+            });
+        }
 
         // 3. On-Chain Order Creation
         self.execute_on_chain_order_creation(
@@ -344,6 +392,11 @@ impl MarketClearingService {
             trailing_offset: None,
             triggered_at: None,
             last_peak_price: None,
+            blockchain_status: Some("pending".to_string()),
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+            time_in_force: crate::infra::db::schema::types::TimeInForce::Gtc,
         };
 
         Ok(order)
@@ -380,8 +433,8 @@ impl MarketClearingService {
             INSERT INTO trading_orders (
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 filled_amount, status, expires_at, created_at, epoch_id, zone_id, 
-                signature, payload_bytes, is_confidential
-            ) VALUES ($1, $2, $3::order_type, $4::order_side, $5, $6, $7, $8::order_status, $9, $10, $11, $12, $13, $14, $15)
+                signature, payload_bytes, is_confidential, time_in_force
+            ) VALUES ($1, $2, $3::order_type, $4::order_side, $5, $6, $7, $8::order_status, $9, $10, $11, $12, $13, $14, $15, $16::time_in_force)
             "#
         )
         .bind(order_id)
@@ -399,6 +452,7 @@ impl MarketClearingService {
         .bind(signature)
         .bind(payload_bytes)
         .bind(false)
+        .bind(crate::infra::db::schema::types::TimeInForce::Gtc) // Default for relay
         .execute(&mut *tx)
         .await?;
 
@@ -486,13 +540,55 @@ impl MarketClearingService {
             )
             .await;
 
-        // self.audit_logger.log_async(crate::infra::logging::audit::AuditEvent::OrderCreated {
-        //     user_id,
-        //     order_id,
-        //     order_type: format!("Relayed {:?}", side),
-        //     amount: energy_amount.to_string(),
-        //     price: price_per_kwh.to_string(),
-        // });
+        self.audit_logger.log_async(crate::infra::logging::audit::AuditEvent::OrderCreated {
+            user_id,
+            order_id,
+            order_type: format!("Relayed {:?}", side),
+            amount: energy_amount.to_string(),
+            price: price_per_kwh.to_string(),
+        });
+
+        // 3.1 Publish event via EventBus
+        if let Some(event_bus) = &self.event_bus {
+            let order_db = crate::domain::trading::models::TradingOrderDb {
+                id: order_id,
+                user_id,
+                energy_amount,
+                price_per_kwh,
+                filled_amount: Some(Decimal::ZERO),
+                epoch_id: Some(epoch.id),
+                zone_id: Some(zone_id),
+                order_type: OrderType::Market, 
+                side,
+                status: OrderStatus::Pending,
+                expires_at: Some(expires_at),
+                created_at: Some(now),
+                filled_at: None,
+                meter_id: None,
+                refund_tx_signature: None,
+                order_pda: None,
+                order_index: None,
+                session_token: None,
+                trigger_price: None,
+                trigger_type: None,
+                trigger_status: None,
+                trailing_offset: None,
+                triggered_at: None,
+                last_peak_price: None,
+                blockchain_status: Some("unprocessed".to_string()),
+                blockchain_tx_hash: None,
+                blockchain_error: None,
+                retry_count: 0,
+                time_in_force: crate::infra::db::schema::types::TimeInForce::Gtc,
+            };
+            let event = crate::domain::events::Event::OrderCreated(order_db);
+            let bus = event_bus.clone();
+            tokio::spawn(async move {
+                if let Err(e) = bus.publish(&event).await {
+                    error!("Failed to publish Relayed OrderCreated event for order {}: {}", order_id, e);
+                }
+            });
+        }
 
         // Real-Time Market Depth Update
         let _ = self.broadcast_depth_update().await;
@@ -599,6 +695,11 @@ impl MarketClearingService {
             .await?;
 
             tx.commit().await?;
+
+            self.audit_logger.log_async(crate::infra::logging::audit::AuditEvent::OrderCancelled {
+                user_id,
+                order_id,
+            });
 
             info!(
                 "Cancelled order {} for user {} and refunded unfilled portion",

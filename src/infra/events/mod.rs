@@ -1,24 +1,146 @@
+pub mod kafka;
+pub mod kafka_consumer;
+
 use crate::domain::events::Event;
 use anyhow::Result;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client, RedisResult};
 use tracing::{error, info};
 
+pub use kafka::KafkaEventBus;
+
+/// Unified event bus that delegates to either Redis Streams or Kafka
+/// based on configuration. Controlled by `KAFKA_EVENTS_ENABLED` env var.
 #[derive(Clone)]
-pub struct EventBus {
-    connection_manager: ConnectionManager,
-    stream_name: String,
+pub enum EventBus {
+    Redis(RedisEventBus),
+    Kafka(KafkaEventBus),
 }
 
 impl std::fmt::Debug for EventBus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventBus")
+        match self {
+            Self::Redis(r) => f.debug_tuple("EventBus::Redis").field(r).finish(),
+            Self::Kafka(k) => f.debug_tuple("EventBus::Kafka").field(k).finish(),
+        }
+    }
+}
+
+impl EventBus {
+    /// Create the appropriate event bus based on configuration.
+    /// If `kafka_enabled` is true, connects to Kafka; otherwise falls back to Redis Streams.
+    pub async fn new(
+        redis_url: &str,
+        kafka_enabled: bool,
+        kafka_brokers: Option<&str>,
+        kafka_topic_prefix: Option<&str>,
+    ) -> Result<Self> {
+        if kafka_enabled {
+            if let Some(brokers) = kafka_brokers {
+                match KafkaEventBus::new(brokers, kafka_topic_prefix).await {
+                    Ok(kafka_bus) => {
+                        info!("✅ EventBus initialized with Kafka backend");
+                        return Ok(Self::Kafka(kafka_bus));
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to initialize Kafka EventBus, falling back to Redis: {}",
+                            e
+                        );
+                    }
+                }
+            } else {
+                error!("KAFKA_EVENTS_ENABLED=true but no KAFKA_BOOTSTRAP_SERVERS set, falling back to Redis");
+            }
+        }
+
+        // Default: Redis Streams
+        let redis_bus = RedisEventBus::new(redis_url).await?;
+        info!("✅ EventBus initialized with Redis Streams backend");
+        Ok(Self::Redis(redis_bus))
+    }
+
+    /// Legacy constructor for backward compatibility (always Redis)
+    pub async fn new_redis(redis_url: &str) -> Result<Self> {
+        let redis_bus = RedisEventBus::new(redis_url).await?;
+        Ok(Self::Redis(redis_bus))
+    }
+
+    pub async fn publish(&self, event: &Event) -> Result<String> {
+        match self {
+            Self::Redis(bus) => bus.publish(event).await,
+            Self::Kafka(bus) => bus.publish(event).await,
+        }
+    }
+
+    pub async fn publish_batch(&self, events: &[Event]) -> Result<usize> {
+        match self {
+            Self::Redis(bus) => bus.publish_batch(events).await,
+            Self::Kafka(bus) => bus.publish_batch(events).await,
+        }
+    }
+
+    pub async fn create_consumer_group(&self, group_name: &str) -> Result<()> {
+        match self {
+            Self::Redis(bus) => bus.create_consumer_group(group_name).await,
+            Self::Kafka(_) => {
+                // Kafka consumer groups are created automatically on first consume
+                info!(
+                    "Kafka consumer group '{}' will be auto-created on first consume",
+                    group_name
+                );
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn consume_events<F, Fut>(
+        &self,
+        group_name: &str,
+        consumer_name: &str,
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Event) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        match self {
+            Self::Redis(bus) => bus.consume_events(group_name, consumer_name, handler).await,
+            Self::Kafka(bus) => {
+                // For real-time matching, we use the Orders and Updates topics
+                let consumer_topics = vec![
+                    bus.topics.orders_created.clone(),
+                    bus.topics.orders_updated.clone(),
+                ];
+                
+                let consumer = crate::infra::events::kafka_consumer::KafkaConsumer::new(
+                    &bus.bootstrap_servers,
+                    consumer_topics,
+                    Some(group_name.to_string()),
+                )?;
+
+                consumer.stream(handler).await
+            }
+        }
+    }
+}
+
+/// Redis Streams-backed event bus (original implementation, now behind the enum).
+#[derive(Clone)]
+pub struct RedisEventBus {
+    connection_manager: ConnectionManager,
+    stream_name: String,
+}
+
+impl std::fmt::Debug for RedisEventBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisEventBus")
             .field("stream_name", &self.stream_name)
             .finish()
     }
 }
 
-impl EventBus {
+impl RedisEventBus {
     pub async fn new(redis_url: &str) -> Result<Self> {
         info!("Initializing Redis EventBus service");
 
@@ -59,6 +181,17 @@ impl EventBus {
                 Err(anyhow::anyhow!("Redis XADD failed: {}", e))
             }
         }
+    }
+
+    /// Batch publish events to Redis Streams (sequential XADD)
+    pub async fn publish_batch(&self, events: &[Event]) -> Result<usize> {
+        let mut count = 0;
+        for event in events {
+            if self.publish(event).await.is_ok() {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     pub async fn create_consumer_group(&self, group_name: &str) -> Result<()> {

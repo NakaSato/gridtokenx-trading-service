@@ -1,9 +1,10 @@
 //! OpenTelemetry initialization for GridTokenX services (SigNoz via OTEL Collector).
 //!
-//! Uses the pattern established in api-gateway's telemetry.rs: filter → otel → fmt.
+//! Uses the pattern established in api-services' telemetry.rs: filter → otel → fmt.
 
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_otlp::{SpanExporter, MetricExporter, WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
@@ -88,6 +89,9 @@ pub fn init_telemetry(service_name_default: &'static str) -> TelemetryGuard {
                 .build();
 
             global::set_tracer_provider(trace_provider.clone());
+            
+            // Set global propagator for context extraction (traceparent)
+            global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
 
             let tracer = trace_provider.tracer(service_name.clone());
             let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -132,11 +136,6 @@ fn init_metrics(service_name: &str, otlp_endpoint: &str, resource: &Resource) ->
         .with_tonic()
         .with_endpoint(otlp_endpoint);
 
-    if otlp_endpoint.starts_with("https://") {
-        exporter_builder = exporter_builder.with_tls_config(
-            tonic::transport::ClientTlsConfig::new().with_native_roots()
-        );
-    }
 
     let exporter = exporter_builder.build().map_err(|e| {
         eprintln!("[WARN] OTLP metrics exporter failed: {e}");
@@ -151,5 +150,23 @@ fn init_metrics(service_name: &str, otlp_endpoint: &str, resource: &Resource) ->
         .build();
 
     global::set_meter_provider(provider.clone());
+    
+    // Initialize standard counters and histograms for the trading service
+    let meter = provider.meter(Box::leak(service_name.to_string().into_boxed_str()));
+    
+    // Histogram for settlement latency (on-chain completion time)
+    let _ = meter
+        .f64_histogram("gridtokenx.trading.settlement_latency")
+        .with_description("Time taken for a settlement batch to be confirmed on-chain")
+        .with_unit("s")
+        .build();
+
+    // Histogram for matching cycle duration (loop iteration time)
+    let _ = meter
+        .f64_histogram("gridtokenx.trading.matching_cycle_duration")
+        .with_description("Time taken for a single matching engine cycle")
+        .with_unit("ms")
+        .build();
+
     Some(provider)
 }

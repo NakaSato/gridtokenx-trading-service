@@ -3,6 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::str::FromStr;
+use std::collections::HashMap;
 use tracing::info;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -61,6 +62,7 @@ pub struct Settlement {
     pub erc_certificate_id: Option<String>,
     pub erc_transfer_tx: Option<String>,
     pub epoch_id: Uuid,
+    pub trace_context: Option<HashMap<String, String>>,
 }
 
 /// Settlement transaction result
@@ -94,6 +96,8 @@ pub struct SettlementConfig {
     pub retry_attempts: u32,
     pub retry_delay_secs: u64,
     pub enable_real_blockchain: bool,
+    pub max_batch_size: usize,
+    pub priority_fee_micro_lamports: u64,
 }
 
 impl Default for SettlementConfig {
@@ -104,6 +108,8 @@ impl Default for SettlementConfig {
             retry_attempts: 3,
             retry_delay_secs: 5,
             enable_real_blockchain: true,
+            max_batch_size: 10,
+            priority_fee_micro_lamports: 5000,
         }
     }
 }
@@ -119,6 +125,16 @@ impl SettlementConfig {
         if let Ok(val) = std::env::var("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN") {
             if let Ok(enabled) = val.parse::<bool>() {
                 config.enable_real_blockchain = enabled;
+            }
+        }
+        if let Ok(val) = std::env::var("SETTLEMENT_MAX_BATCH_SIZE") {
+            if let Ok(size) = val.parse::<usize>() {
+                config.max_batch_size = size;
+            }
+        }
+        if let Ok(val) = std::env::var("SETTLEMENT_PRIORITY_FEE") {
+            if let Ok(fee) = val.parse::<u64>() {
+                config.priority_fee_micro_lamports = fee;
             }
         }
         config
@@ -145,6 +161,11 @@ pub struct SettlementManager {
 impl SettlementManager {
     pub fn new(db: PgPool, config: SettlementConfig) -> Self {
         Self { db, config }
+    }
+
+    /// Expose the database pool for cross-domain queries (e.g., meter ownership lookup)
+    pub fn db_pool(&self) -> PgPool {
+        self.db.clone()
     }
 
     /// Create a settlement record from a trade match (Business Logic)
@@ -203,6 +224,7 @@ impl SettlementManager {
             erc_certificate_id: None,
             erc_transfer_tx: None,
             epoch_id: trade.epoch_id,
+            trace_context: None, // Will be updated if trigger_settlement is used or needs propagation
         };
 
         sqlx::query(
@@ -211,9 +233,9 @@ impl SettlementManager {
                 id, buyer_id, seller_id, buy_order_id, sell_order_id,
                 energy_amount, price_per_kwh, total_amount, fee_amount, net_amount, status, created_at,
                 wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id, epoch_id,
-                buyer_session_token, seller_session_token
+                buyer_session_token, seller_session_token, trace_context
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             "#,
         )
         .bind(settlement.id)
@@ -237,6 +259,7 @@ impl SettlementManager {
         .bind(trade.epoch_id)
         .bind(&settlement.buyer_session_token)
         .bind(&settlement.seller_session_token)
+        .bind(settlement.trace_context.as_ref().map(|tc| serde_json::to_value(tc).unwrap_or_default()))
         .execute(&self.db)
         .await?;
 
@@ -251,7 +274,7 @@ impl SettlementManager {
                 price_per_kwh, total_amount, fee_amount, net_amount,
                 status, transaction_hash, created_at, processed_at,
                 wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id,
-                buyer_session_token, seller_session_token, erc_certificate_id, erc_transfer_tx, epoch_id
+                buyer_session_token, seller_session_token, erc_certificate_id, erc_transfer_tx, epoch_id, trace_context
             FROM settlements
             WHERE id = $1
             "#,
@@ -297,6 +320,8 @@ impl SettlementManager {
             erc_certificate_id: row.get("erc_certificate_id"),
             erc_transfer_tx: row.get("erc_transfer_tx"),
             epoch_id: row.get("epoch_id"),
+            trace_context: row.get::<Option<serde_json::Value>, _>("trace_context")
+                .and_then(|v| serde_json::from_value(v).ok()),
         })
     }
 
@@ -321,6 +346,20 @@ impl SettlementManager {
         sqlx::query("UPDATE settlements SET status = $1, updated_at = NOW() WHERE id = $2")
             .bind(status.to_string())
             .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(ApiError::Database)?;
+        Ok(())
+    }
+
+    /// Update status for a batch of settlements (single DB call)
+    pub async fn update_batch_status(&self, ids: &[Uuid], status: SettlementStatus) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query("UPDATE settlements SET status = $1, updated_at = NOW() WHERE id = ANY($2)")
+            .bind(status.to_string())
+            .bind(ids)
             .execute(&self.db)
             .await
             .map_err(ApiError::Database)?;
@@ -397,7 +436,7 @@ impl SettlementManager {
                 s.price_per_kwh, s.total_amount, s.fee_amount, s.net_amount,
                 s.status, s.transaction_hash, s.created_at, s.processed_at,
                 s.wheeling_charge, s.loss_factor, s.loss_cost, s.effective_energy, s.buyer_zone_id, s.seller_zone_id,
-                s.buyer_session_token, s.seller_session_token, s.erc_certificate_id, s.erc_transfer_tx, s.epoch_id,
+                s.buyer_session_token, s.seller_session_token, s.erc_certificate_id, s.erc_transfer_tx, s.epoch_id, s.trace_context,
                 u_b.wallet_address as buyer_wallet,
                 u_s.wallet_address as seller_wallet,
                 o_b.order_pda as buy_order_pda,
@@ -455,6 +494,8 @@ impl SettlementManager {
                 erc_certificate_id: row.get("erc_certificate_id"),
                 erc_transfer_tx: row.get("erc_transfer_tx"),
                 epoch_id: row.get("epoch_id"),
+                trace_context: row.get::<Option<serde_json::Value>, _>("trace_context")
+                    .and_then(|v| serde_json::from_value(v).ok()),
             };
 
             let buyer_wallet_str: String = row.get("buyer_wallet");
@@ -545,6 +586,28 @@ impl SettlementManager {
         Ok(())
     }
 
+    /// Update confirmation status for a batch of settlements sharing the same Solana signature
+    pub async fn update_batch_confirmed(
+        &self,
+        ids: &[Uuid],
+        tx_signature: &str,
+        status: SettlementStatus,
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE settlements SET status = $1, transaction_hash = $2, processed_at = NOW(), updated_at = NOW() WHERE id = ANY($3)"
+        )
+        .bind(status.to_string())
+        .bind(tx_signature)
+        .bind(ids)
+        .execute(&self.db)
+        .await
+        .map_err(ApiError::Database)?;
+        Ok(())
+    }
+
     pub async fn update_settlement_erc(
         &self,
         id: Uuid,
@@ -564,45 +627,56 @@ impl SettlementManager {
     }
 
     pub async fn finalize_escrow(&self, settlement: &Settlement) -> Result<()> {
+        self.finalize_batch_escrow(&[settlement.clone()]).await
+    }
+
+    /// Finalize multiple escrows in a single database transaction
+    pub async fn finalize_batch_escrow(&self, settlements: &[Settlement]) -> Result<()> {
+        if settlements.is_empty() {
+            return Ok(());
+        }
+
         let mut tx = self.db.begin().await.map_err(ApiError::Database)?;
 
-        sqlx::query(
-            "UPDATE users SET locked_energy = GREATEST(0, locked_energy - $1) WHERE id = $2",
-        )
-        .bind(settlement.energy_amount)
-        .bind(settlement.seller_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Database)?;
-
-        sqlx::query(
-            "UPDATE users SET locked_amount = GREATEST(0, locked_amount - $1) WHERE id = $2",
-        )
-        .bind(settlement.total_value)
-        .bind(settlement.buyer_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiError::Database)?;
-
-        sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
-            .bind(settlement.net_amount)
+        for settlement in settlements {
+            sqlx::query(
+                "UPDATE users SET locked_energy = GREATEST(0, locked_energy - $1) WHERE id = $2",
+            )
+            .bind(settlement.energy_amount)
             .bind(settlement.seller_id)
             .execute(&mut *tx)
             .await
             .map_err(ApiError::Database)?;
 
-        if settlement.fee_amount > Decimal::ZERO {
-            sqlx::query("INSERT INTO platform_revenue (settlement_id, amount, revenue_type, description) VALUES ($1, $2, 'platform_fee', $3)")
-                .bind(settlement.id)
-                .bind(settlement.fee_amount)
-                .bind(format!("Platform fee for settlement {}", settlement.id))
+            sqlx::query(
+                "UPDATE users SET locked_amount = GREATEST(0, locked_amount - $1) WHERE id = $2",
+            )
+            .bind(settlement.total_value)
+            .bind(settlement.buyer_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiError::Database)?;
+
+            sqlx::query("UPDATE users SET balance = balance + $1 WHERE id = $2")
+                .bind(settlement.net_amount)
+                .bind(settlement.seller_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(ApiError::Database)?;
+
+            if settlement.fee_amount > Decimal::ZERO {
+                sqlx::query("INSERT INTO platform_revenue (settlement_id, amount, revenue_type, description) VALUES ($1, $2, 'platform_fee', $3)")
+                    .bind(settlement.id)
+                    .bind(settlement.fee_amount)
+                    .bind(format!("Platform fee for settlement {}", settlement.id))
+                    .execute(&mut *tx).await.map_err(ApiError::Database)?;
+            }
+
+            sqlx::query("UPDATE escrow_records SET status = 'released', updated_at = NOW() WHERE order_id IN ($1, $2) AND status = 'locked'")
+                .bind(settlement.buy_order_id)
+                .bind(settlement.sell_order_id)
                 .execute(&mut *tx).await.map_err(ApiError::Database)?;
         }
-
-        sqlx::query("UPDATE escrow_records SET status = 'released', updated_at = NOW() WHERE order_id IN ($1, $2) AND status = 'locked'")
-            .bind(settlement.buy_order_id)
-            .bind(settlement.sell_order_id)
-            .execute(&mut *tx).await.map_err(ApiError::Database)?;
 
         tx.commit().await.map_err(ApiError::Database)?;
         Ok(())

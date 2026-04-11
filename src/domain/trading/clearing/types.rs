@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::infra::db::schema::types::{EpochStatus, OrderSide};
+use crate::infra::db::schema::types::{EpochStatus, OrderSide, TimeInForce};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MarketEpoch {
@@ -49,6 +50,8 @@ pub struct TradeMatch {
     pub matched_at: DateTime<Utc>,
     pub buyer_session_token: Option<String>,
     pub seller_session_token: Option<String>,
+    #[sqlx(skip)]
+    pub otel_trace_context: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -79,6 +82,8 @@ pub struct Settlement {
     pub sell_payload: Option<Vec<u8>>,
     pub retry_count: i32,
     pub error_message: Option<String>,
+    #[sqlx(skip)]
+    pub otel_trace_context: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -94,6 +99,7 @@ pub struct OrderBookEntry {
     pub session_token: Option<String>,
     pub signature: Option<String>,
     pub payload_bytes: Option<Vec<u8>>,
+    pub time_in_force: TimeInForce,
 }
 
 /// Market clearing price result from supply-demand intersection

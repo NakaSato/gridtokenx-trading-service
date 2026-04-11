@@ -144,5 +144,122 @@ pub mod types {
         Settled,
     }
 
-    // Removed manual Display implementations in favor of strum::Display
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
+    #[sqlx(type_name = "trigger_type", rename_all = "snake_case")]
+    #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
+    pub enum TriggerType {
+        StopLoss,
+        TakeProfit,
+        TrailingStop,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
+    #[sqlx(type_name = "trigger_status", rename_all = "snake_case")]
+    #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
+    pub enum TriggerStatus {
+        Pending,
+        Triggered,
+        Cancelled,
+        Expired,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
+    #[sqlx(type_name = "interval_type", rename_all = "snake_case")]
+    #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
+    pub enum IntervalType {
+        Hourly,
+        Daily,
+        Weekly,
+        Monthly,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
+    #[sqlx(type_name = "recurring_status", rename_all = "snake_case")]
+    #[serde(rename_all = "snake_case")]
+    #[strum(serialize_all = "snake_case")]
+    pub enum RecurringStatus {
+        Active,
+        Paused,
+        Completed,
+        Cancelled,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Serialize,
+        Deserialize,
+        sqlx::Type,
+        ToSchema,
+        strum::Display,
+        strum::EnumString,
+    )]
+    #[sqlx(type_name = "time_in_force", rename_all = "lowercase")]
+    #[serde(rename_all = "lowercase")]
+    #[strum(serialize_all = "lowercase")]
+    pub enum TimeInForce {
+        Gtc, // Good-Til-Cancelled
+        Fok, // Fill-or-Kill
+        Ioc, // Immediate-or-Cancel
+    }
+
+    impl Default for TimeInForce {
+        fn default() -> Self {
+            Self::Gtc
+        }
+    }
 }

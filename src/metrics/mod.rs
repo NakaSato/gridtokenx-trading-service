@@ -8,6 +8,7 @@
 //! - Blockchain operations
 
 use metrics::{counter, gauge, histogram};
+use opentelemetry::KeyValue;
 use std::time::Instant;
 
 /// Records order submission metrics
@@ -136,6 +137,17 @@ pub fn record_matching_cycle(duration_ms: f64, orders_processed: u64, matches: u
     histogram!("trading_matching_matches_per_cycle").record(matches as f64);
 }
 
+/// Records high-fidelity matching cycle duration for OTLP/SigNoz
+pub fn record_matching_cycle_high_fidelity(duration_ms: f64) {
+    let meter = opentelemetry::global::meter("gridtokenx-trading");
+    let histogram = meter
+        .f64_histogram("gridtokenx.trading.matching_cycle_duration")
+        .with_unit("ms")
+        .build();
+    
+    histogram.record(duration_ms, &[]);
+}
+
 /// Records blockchain settlement metrics
 pub fn record_blockchain_settlement(operation: &str, success: bool, duration_ms: f64) {
     counter!("trading_blockchain_settlements_total",
@@ -152,6 +164,17 @@ pub fn record_blockchain_settlement(operation: &str, success: bool, duration_ms:
             "operation" => operation.to_string()
         ).increment(1);
     }
+}
+
+/// Records high-fidelity settlement latency for OTLP/SigNoz
+pub fn record_settlement_latency_high_fidelity(duration_s: f64, batch_size: u64) {
+    let meter = opentelemetry::global::meter("gridtokenx-trading");
+    let histogram = meter
+        .f64_histogram("gridtokenx.trading.settlement_latency")
+        .with_unit("s")
+        .build();
+    
+    histogram.record(duration_s, &[KeyValue::new("batch_size", batch_size as i64)]);
 }
 
 /// Records gRPC request metrics for trading service
@@ -217,3 +240,35 @@ pub fn record_market_data_update(zone_id: &str, price: f64) {
 
     gauge!("trading_market_price", "zone" => zone_id.to_string()).set(price);
 }
+
+/// Records VPP aggregation metrics
+pub fn record_vpp_aggregation(cluster_id: &str, duration_ms: f64, success: bool) {
+    counter!("trading_vpp_aggregation_total",
+        "cluster" => cluster_id.to_string(),
+        "success" => success.to_string()
+    ).increment(1);
+
+    histogram!("trading_vpp_aggregation_duration_ms",
+        "cluster" => cluster_id.to_string()
+    ).record(duration_ms);
+}
+
+/// Records VPP cluster SOC
+pub fn record_vpp_cluster_soc(cluster_id: &str, soc: f64) {
+    gauge!("trading_vpp_cluster_soc", "cluster" => cluster_id.to_string()).set(soc);
+}
+
+/// Records DCA (Recurring Order) evaluation metrics
+pub fn record_dca_evaluation(duration_ms: f64, orders_evaluated: u64, orders_promoted: u64) {
+    histogram!("trading_dca_evaluation_duration_ms").record(duration_ms);
+    counter!("trading_dca_orders_evaluated_total").increment(orders_evaluated);
+    counter!("trading_dca_orders_promoted_total").increment(orders_promoted);
+}
+
+/// Records Market Data (OHLC) upsert metrics
+pub fn record_market_candle_update(zone_id: i32, duration_ms: f64) {
+    histogram!("trading_market_candle_upsert_duration_ms",
+        "zone" => zone_id.to_string()
+    ).record(duration_ms);
+}
+

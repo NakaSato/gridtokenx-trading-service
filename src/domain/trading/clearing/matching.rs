@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
-
 use sqlx::Row;
-// use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, debug};
 use ulid::Ulid;
 use uuid::Uuid;
+use crate::infra::db::schema::types::TimeInForce;
 use tokio_util::sync::CancellationToken;
 
 use super::types::{OrderMatch, Settlement};
@@ -132,101 +131,136 @@ impl MarketClearingService {
         let mut total_volume = Decimal::ZERO;
         let mut zone_cost_cache = std::collections::HashMap::new();
 
-        while let (Some(buy_order), Some(sell_order)) =
-            (buy_orders.front_mut(), sell_orders.front_mut())
-        {
+        while let Some(buy_order) = buy_orders.front_mut() {
             if token.is_cancelled() {
                 info!("MATCH_LOOP_INTERRUPTED: Shutdown signal received during batch matching for epoch {}", epoch_id);
                 break;
             }
 
-            if buy_order.price_per_kwh < sell_order.price_per_kwh {
-                break;
+            // [ADVANCED] Handle Fill-or-Kill (FOK)
+            if buy_order.time_in_force == TimeInForce::Fok {
+                let mut total_available = Decimal::ZERO;
+                for sell_order in sell_orders.iter() {
+                    if sell_order.price_per_kwh <= buy_order.price_per_kwh {
+                        total_available += sell_order.energy_amount;
+                    } else {
+                        break;
+                    }
+                }
+
+                if total_available < buy_order.energy_amount {
+                    debug!("    x FOK REJECTED in Batch: Insufficient liquidity (Available: {} < Requested: {})", total_available, buy_order.energy_amount);
+                    order_updates.push((buy_order.order_id, buy_order.original_amount - buy_order.energy_amount, OrderStatus::Cancelled));
+                    buy_orders.pop_front();
+                    continue;
+                }
             }
 
-            let base_match_price =
-                (buy_order.price_per_kwh + sell_order.price_per_kwh) / Decimal::from(2);
-            let match_price = base_match_price * tou_multiplier;
-            let match_amount = buy_order.energy_amount.min(sell_order.energy_amount);
+            let mut matched_in_this_pass = false;
 
-            if match_amount > Decimal::ZERO {
-                let match_id = Uuid::from_bytes(Ulid::new().to_bytes());
-                let settlement_id = Uuid::from_bytes(Ulid::new().to_bytes());
-
-                let order_match = OrderMatch {
-                    id: match_id,
-                    epoch_id,
-                    buy_order_id: buy_order.order_id,
-                    sell_order_id: sell_order.order_id,
-                    matched_amount: match_amount,
-                    match_price,
-                    match_time: Utc::now(),
-                    status: "pending".to_string(),
-                };
-                matches.push(order_match);
-
-                let settlement = Self::prepare_settlement_memory(
-                    matches.last().unwrap(),
-                    buy_order,
-                    sell_order,
-                    settlement_id,
-                    &mut zone_cost_cache,
-                )
-                .await;
-                settlements.push(settlement);
-
-                buy_order.energy_amount -= match_amount;
-                sell_order.energy_amount -= match_amount;
-                total_volume += match_amount;
-
-                // Track Order Updates & Events
-                let buy_filled = buy_order.original_amount - buy_order.energy_amount;
-                let buy_status = if buy_order.energy_amount <= Decimal::ZERO {
-                    OrderStatus::Filled
-                } else {
-                    OrderStatus::PartiallyFilled
-                };
-                order_updates.push((buy_order.order_id, buy_filled, buy_status.clone()));
-
-                websocket_events.push(MarketEvent::P2POrderUpdate {
-                    order_id: buy_order.order_id,
-                    user_id: buy_order.user_id,
-                    side: "buy".to_string(),
-                    status: buy_status.to_string(),
-                    original_amount: buy_order.original_amount.to_string(),
-                    filled_amount: buy_filled.to_string(),
-                    remaining_amount: buy_order.energy_amount.to_string(),
-                    price_per_kwh: buy_order.price_per_kwh.to_string(),
-                    timestamp: Utc::now(),
-                });
-
-                let sell_filled = sell_order.original_amount - sell_order.energy_amount;
-                let sell_status = if sell_order.energy_amount <= Decimal::ZERO {
-                    OrderStatus::Filled
-                } else {
-                    OrderStatus::PartiallyFilled
-                };
-                order_updates.push((sell_order.order_id, sell_filled, sell_status.clone()));
-
-                websocket_events.push(MarketEvent::P2POrderUpdate {
-                    order_id: sell_order.order_id,
-                    user_id: sell_order.user_id,
-                    side: "sell".to_string(),
-                    status: sell_status.to_string(),
-                    original_amount: sell_order.original_amount.to_string(),
-                    filled_amount: sell_filled.to_string(),
-                    remaining_amount: sell_order.energy_amount.to_string(),
-                    price_per_kwh: sell_order.price_per_kwh.to_string(),
-                    timestamp: Utc::now(),
-                });
-
-                if buy_order.energy_amount <= Decimal::ZERO {
-                    buy_orders.pop_front();
+            while let Some(sell_order) = sell_orders.front_mut() {
+                if buy_order.price_per_kwh < sell_order.price_per_kwh {
+                    break;
                 }
-                if sell_order.energy_amount <= Decimal::ZERO {
-                    sell_orders.pop_front();
+
+                let base_match_price =
+                    (buy_order.price_per_kwh + sell_order.price_per_kwh) / Decimal::from(2);
+                let match_price = base_match_price * tou_multiplier;
+                let match_amount = buy_order.energy_amount.min(sell_order.energy_amount);
+
+                if match_amount > Decimal::ZERO {
+                    matched_in_this_pass = true;
+                    let match_id = Uuid::from_bytes(Ulid::new().to_bytes());
+                    let settlement_id = Uuid::from_bytes(Ulid::new().to_bytes());
+
+                    let order_match = OrderMatch {
+                        id: match_id,
+                        epoch_id,
+                        buy_order_id: buy_order.order_id,
+                        sell_order_id: sell_order.order_id,
+                        matched_amount: match_amount,
+                        match_price,
+                        match_time: Utc::now(),
+                        status: "pending".to_string(),
+                    };
+                    matches.push(order_match);
+
+                    let settlement = Self::prepare_settlement_memory(
+                        matches.last().unwrap(),
+                        buy_order,
+                        sell_order,
+                        settlement_id,
+                        &mut zone_cost_cache,
+                    )
+                    .await;
+                    settlements.push(settlement);
+
+                    buy_order.energy_amount -= match_amount;
+                    sell_order.energy_amount -= match_amount;
+                    total_volume += match_amount;
+
+                    // Track Order Updates & Events
+                    let buy_filled = buy_order.original_amount - buy_order.energy_amount;
+                    let buy_status = if buy_order.energy_amount <= Decimal::ZERO {
+                        OrderStatus::Filled
+                    } else {
+                        OrderStatus::PartiallyFilled
+                    };
+                    order_updates.push((buy_order.order_id, buy_filled, buy_status.clone()));
+
+                    websocket_events.push(MarketEvent::P2POrderUpdate {
+                        order_id: buy_order.order_id,
+                        user_id: buy_order.user_id,
+                        side: "buy".to_string(),
+                        status: buy_status.to_string(),
+                        original_amount: buy_order.original_amount.to_string(),
+                        filled_amount: buy_filled.to_string(),
+                        remaining_amount: buy_order.energy_amount.to_string(),
+                        price_per_kwh: buy_order.price_per_kwh.to_string(),
+                        timestamp: Utc::now(),
+                    });
+
+                    let sell_filled = sell_order.original_amount - sell_order.energy_amount;
+                    let sell_status = if sell_order.energy_amount <= Decimal::ZERO {
+                        OrderStatus::Filled
+                    } else {
+                        OrderStatus::PartiallyFilled
+                    };
+                    order_updates.push((sell_order.order_id, sell_filled, sell_status.clone()));
+
+                    websocket_events.push(MarketEvent::P2POrderUpdate {
+                        order_id: sell_order.order_id,
+                        user_id: sell_order.user_id,
+                        side: "sell".to_string(),
+                        status: sell_status.to_string(),
+                        original_amount: sell_order.original_amount.to_string(),
+                        filled_amount: sell_filled.to_string(),
+                        remaining_amount: sell_order.energy_amount.to_string(),
+                        price_per_kwh: sell_order.price_per_kwh.to_string(),
+                        timestamp: Utc::now(),
+                    });
+
+                    if sell_order.energy_amount <= Decimal::ZERO {
+                        sell_orders.pop_front();
+                    }
+
+                    if buy_order.energy_amount <= Decimal::ZERO {
+                        break;
+                    }
+                } else {
+                    break;
                 }
-            } else {
+            }
+
+            // [ADVANCED] Handle IOC and Order Completion
+            if buy_order.energy_amount <= Decimal::ZERO {
+                buy_orders.pop_front();
+            } else if buy_order.time_in_force == TimeInForce::Ioc {
+                debug!("    ! IOC REMAINDER CANCELLED in Batch: {} kWh remaining", buy_order.energy_amount);
+                order_updates.push((buy_order.order_id, buy_order.original_amount - buy_order.energy_amount, OrderStatus::Cancelled));
+                buy_orders.pop_front();
+            } else if !matched_in_this_pass {
+                // No more compatible sell orders in this epoch for this GTC order
                 break;
             }
         }
@@ -239,6 +273,7 @@ impl MarketClearingService {
             total_volume,
         }
     }
+
 
     async fn persist_matching_results(
         &self,
@@ -582,6 +617,7 @@ impl MarketClearingService {
             sell_payload: sell_order.payload_bytes.clone(),
             retry_count: 0,
             error_message: None,
+            otel_trace_context: None, // Will be populated by caller if needed
         }
     }
 
@@ -663,6 +699,7 @@ mod tests {
             session_token: None,
             signature: None,
             payload_bytes: None,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
@@ -676,6 +713,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -701,6 +739,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -724,6 +763,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -753,6 +793,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -777,6 +818,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -803,6 +845,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.2),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -826,6 +869,7 @@ mod tests {
             &mut buy_orders,
             &mut sell_orders,
             dec!(1.0),
+            &CancellationToken::new(),
         )
         .await;
 

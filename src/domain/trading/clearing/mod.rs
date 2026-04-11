@@ -10,6 +10,7 @@ pub mod types;
 use crate::core::config::Config;
 use crate::infra::db::DatabasePool;
 use chrono::{Timelike, Utc};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +18,10 @@ use tokio_util::sync::CancellationToken;
 pub use types::*;
 
 use crate::infra::blockchain::{BlockchainService, WalletService};
+use crate::infra::events::EventBus;
+use crate::infra::logging::AuditLogger;
 use crate::services::erc::ErcService;
+use crate::services::p2p_config::P2PConfigService;
 
 #[derive(Clone, Debug)]
 pub struct MarketClearingService {
@@ -28,6 +32,9 @@ pub struct MarketClearingService {
     wallet_service: WalletService,
     erc_service: Arc<ErcService>,
     settlement_service: Option<crate::services::SettlementService>,
+    p2p_config: Option<Arc<P2PConfigService>>,
+    audit_logger: AuditLogger,
+    event_bus: Option<EventBus>,
     websocket_service: WebSocketService,
     token: CancellationToken,
 }
@@ -63,6 +70,8 @@ impl MarketClearingService {
         blockchain_service: Arc<BlockchainService>,
         wallet_service: WalletService,
         erc_service: Arc<ErcService>,
+        audit_logger: AuditLogger,
+        event_bus: Option<EventBus>,
         token: CancellationToken,
     ) -> Self {
         Self {
@@ -72,6 +81,9 @@ impl MarketClearingService {
             wallet_service,
             erc_service,
             settlement_service: None,
+            p2p_config: None,
+            audit_logger,
+            event_bus,
             websocket_service: WebSocketService,
             token,
         }
@@ -83,8 +95,8 @@ impl MarketClearingService {
         self
     }
 
-    /// Set the P2P config service (Deprecated in microservice)
-    pub fn with_p2p_config(self) -> Self {
+    pub fn with_p2p_config(mut self, p2p_config: Arc<P2PConfigService>) -> Self {
+        self.p2p_config = Some(p2p_config);
         self
     }
 
@@ -95,8 +107,12 @@ impl MarketClearingService {
         let hour = Utc::now().hour();
         let (base_mult, period) = Self::get_tou_multiplier_for_hour(hour);
 
-        // Placeholder for market multiplier (previously from P2PConfigService)
-        let market_mult = Decimal::ONE;
+        let market_mult = if let Some(p2p) = &self.p2p_config {
+            Decimal::from_f64(p2p.get_f64("pricing.market_multiplier").await.unwrap_or(1.0))
+                .unwrap_or(Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
 
         (base_mult * market_mult, period)
     }

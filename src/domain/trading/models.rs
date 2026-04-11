@@ -6,7 +6,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType};
+pub use crate::services::erc::{ErcCertificate, IssueErcRequest, CertificateTransfer, CertificateStats, ErcMetadata, ErcAttribute, ErcProperties, ErcFile};
+
+use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TradingOrder {
@@ -31,6 +33,11 @@ pub struct TradingOrder {
     pub order_pda: Option<String>,
     pub order_index: Option<i64>,
     pub session_token: Option<String>,
+    pub blockchain_status: Option<String>,
+    pub blockchain_tx_hash: Option<String>,
+    pub blockchain_error: Option<String>,
+    pub retry_count: i32,
+    pub time_in_force: TimeInForce,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -60,6 +67,12 @@ pub struct TradingOrderDb {
     pub trailing_offset: Option<Decimal>,
     pub triggered_at: Option<DateTime<Utc>>,
     pub last_peak_price: Option<Decimal>,
+    // Blockchain sync fields
+    pub blockchain_status: Option<String>,
+    pub blockchain_tx_hash: Option<String>,
+    pub blockchain_error: Option<String>,
+    pub retry_count: i32,
+    pub time_in_force: TimeInForce,
 }
 
 impl From<TradingOrderDb> for TradingOrder {
@@ -83,6 +96,11 @@ impl From<TradingOrderDb> for TradingOrder {
             order_pda: db.order_pda,
             order_index: db.order_index,
             session_token: db.session_token,
+            blockchain_status: db.blockchain_status,
+            blockchain_tx_hash: db.blockchain_tx_hash,
+            blockchain_error: db.blockchain_error,
+            retry_count: db.retry_count,
+            time_in_force: db.time_in_force,
         }
     }
 }

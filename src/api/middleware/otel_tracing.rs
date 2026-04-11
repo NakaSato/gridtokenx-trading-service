@@ -1,18 +1,34 @@
-//! Axum middleware for OpenTelemetry distributed tracing
+//! Axum middleware for OpenTelemetry distributed tracing with context propagation
 //!
 //! This middleware automatically creates spans for incoming HTTP requests,
-//! capturing standard attributes like HTTP method, status code, duration, etc.
+//! capturing standard attributes and extracting parent context from headers
+//! (e.g., traceparent) to support distributed tracing across microservices.
 
 use axum::{
     extract::{MatchedPath, Request},
     middleware::Next,
     response::Response,
 };
+use axum::http;
+use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{Span, SpanKind, Tracer};
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{global, Context, KeyValue};
 use std::time::Instant;
 
-/// Middleware that creates OpenTelemetry spans for HTTP requests
+/// Utility to extract OpenTelemetry context from Axum/http headers
+struct HeaderExtractor<'a>(&'a http::HeaderMap);
+
+impl<'a> opentelemetry::propagation::Extractor for HeaderExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+/// Middleware that creates OpenTelemetry spans for HTTP requests, supporting context propagation
 pub async fn otel_tracing_middleware(request: Request, next: Next) -> Response {
     let start = Instant::now();
 
@@ -25,6 +41,12 @@ pub async fn otel_tracing_middleware(request: Request, next: Next) -> Response {
         .unwrap_or_else(|| uri.path().to_string());
 
     let headers = request.headers();
+    
+    // 1. Extract parent context from headers (e.g., traceparent from Kong or Oracle Bridge)
+    let parent_context = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    });
+
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -37,6 +59,8 @@ pub async fn otel_tracing_middleware(request: Request, next: Next) -> Response {
         .unwrap_or("unknown");
 
     let tracer = global::tracer("gridtokenx-trading-service");
+    
+    // 2. Start new span linked to parent context
     let mut span = tracer
         .span_builder(format!("{} {}", method, matched_path))
         .with_kind(SpanKind::Server)
@@ -48,7 +72,7 @@ pub async fn otel_tracing_middleware(request: Request, next: Next) -> Response {
             KeyValue::new("client.address", client_ip.to_string()),
             KeyValue::new("network.protocol.name", "http"),
         ])
-        .start(&tracer);
+        .start_with_context(&tracer, &parent_context);
 
     let response = next.run(request).await;
 

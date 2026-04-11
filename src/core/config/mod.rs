@@ -20,6 +20,12 @@ pub struct Config {
     pub solana_programs: SolanaProgramsConfig,
     pub encryption_secret: String,
     pub iam_service_url: String,
+    /// Enable Kafka-backed event sourcing (falls back to Redis Streams if false)
+    pub kafka_enabled: bool,
+    /// Kafka bootstrap servers (e.g., "localhost:29092")
+    pub kafka_bootstrap_servers: String,
+    /// Topic prefix for trading events (default: "trading")
+    pub kafka_topic_prefix: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +91,14 @@ impl Config {
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_SERVICE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8090".to_string()),
+            kafka_enabled: env::var("KAFKA_EVENTS_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
+            kafka_bootstrap_servers: env::var("KAFKA_BOOTSTRAP_SERVERS")
+                .unwrap_or_else(|_| "localhost:29092".to_string()),
+            kafka_topic_prefix: env::var("KAFKA_TOPIC_PREFIX")
+                .unwrap_or_else(|_| "trading".to_string()),
         })
     }
 }

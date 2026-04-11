@@ -19,7 +19,7 @@ impl BlockchainSettlementProvider {
         Self { blockchain }
     }
 
-    /// Execute atomic settlement on-chain using the trading program
+    #[tracing::instrument(skip(self, settlement), fields(settlement_id = %settlement.id))]
     pub async fn execute_atomic_settlement(
         &self,
         settlement: &Settlement,
@@ -134,6 +134,7 @@ impl BlockchainSettlementProvider {
     }
 
     /// Execute direct energy token transfer (Secondary/Fallback)
+    #[tracing::instrument(skip(self, settlement, seller_keypair), fields(settlement_id = %settlement.id))]
     pub async fn execute_energy_transfer(
         &self,
         settlement: &Settlement,
@@ -178,12 +179,19 @@ impl BlockchainSettlementProvider {
         })
     }
 
-    /// Execute multiple settlements in a single atomic Solana transaction
+    #[tracing::instrument(skip(self, inputs), fields(batch_count = inputs.len()))]
     pub async fn execute_batched_settlements(
         &self,
-        settlements: Vec<(&Settlement, Pubkey, Pubkey, Pubkey, Pubkey)>,
+        inputs: Vec<(
+            &crate::domain::trading::settlement::Settlement,
+            Pubkey,
+            Pubkey,
+            Pubkey,
+            Pubkey,
+        )>,
+        priority_fee: u64,
     ) -> crate::core::error::Result<Vec<SettlementTransaction>> {
-        if settlements.is_empty() {
+        if inputs.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -229,7 +237,7 @@ impl BlockchainSettlementProvider {
         let mut instructions = Vec::new();
         let mut settlement_ids = Vec::new();
 
-        for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in settlements
+        for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs
         {
             // ATAs
             let buyer_currency_ata = self
@@ -293,6 +301,11 @@ impl BlockchainSettlementProvider {
             settlement_ids.push(settlement.id);
         }
 
+        // Add priority fee if provided
+        if priority_fee > 0 {
+            self.blockchain.add_priority_fee_to_instructions(&mut instructions, "settlement")?;
+        }
+
         let signature = self
             .blockchain
             .execute_batched_instructions(&platform_authority, instructions)
@@ -312,5 +325,46 @@ impl BlockchainSettlementProvider {
             .collect();
 
         Ok(tx_results)
+    }
+
+    /// Execute on-chain generation mint (directly minting GRX to prosumer wallet)
+    /// Called by the Oracle Bridge after a 15-minute billing window closes.
+    #[tracing::instrument(skip(self), fields(wallet = %user_wallet, amount = %amount_kwh))]
+    pub async fn execute_generation_mint(
+        &self,
+        user_wallet: &Pubkey,
+        amount_kwh: Decimal,
+        _timestamp: i64,
+    ) -> crate::core::error::Result<String> {
+        let platform_authority = self
+            .blockchain
+            .get_authority_keypair()
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
+
+        let energy_mint_str = std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default();
+        let energy_mint = BlockchainService::parse_pubkey(&energy_mint_str)?;
+
+        // Calculate atomic units for energy (9 decimal places for GRX)
+        let amount_atomic = ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000i64)).trunc())
+            .unwrap_or(0);
+
+        // Calculate User ATA
+        let user_ata = self.blockchain.calculate_ata_address(user_wallet, &energy_mint)?;
+
+        // 1. Build Instruction (Using Energy Token Program)
+        let instruction = self.blockchain.instruction_builder().build_mint_instruction(
+            &user_ata.to_string(),
+            amount_atomic
+        ).map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
+
+        // 2. Execute Transaction
+        let signature = self.blockchain.build_and_send_transaction_with_priority(
+            vec![instruction],
+            &[&platform_authority],
+            "generation_mint",
+        ).await.map_err(|e| ApiError::Internal(format!("Blockchain mint failed: {}", e)))?;
+
+        Ok(signature.to_string())
     }
 }
