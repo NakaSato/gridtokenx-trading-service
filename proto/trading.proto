@@ -13,6 +13,10 @@ service TradingService {
   rpc GetOrderBook (GetOrderBookRequest) returns (ListOrdersResponse);
   rpc ListTrades (ListTradesRequest) returns (ListTradesResponse);
 
+  // Settlement Operations
+  rpc ExecuteSettlement (ExecuteSettlementRequest) returns (SettlementResponse);
+  rpc BatchExecuteSettlements (BatchExecuteSettlementsRequest) returns (BatchSettlementResponse);
+
   // ERC Operations (Energy Registration & Carbon)
   rpc IssueERC (IssueERCRequest) returns (TradingResponse);
   rpc TransferERC (TransferERCRequest) returns (TradingResponse);
@@ -464,5 +468,37 @@ message DispatchVppRequest {
   string cluster_id = 1;
   string dispatch_mode = 2; // "idle", "charge", "discharge", "balancing"
   double target_soc = 3;
+}
+
+// Settlement Messages
+message ExecuteSettlementRequest {
+  string settlement_id = 1;
+  string buy_order_pda = 2;
+  string sell_order_pda = 3;
+  string buyer_wallet = 4;
+  string seller_wallet = 5;
+  double energy_amount = 6;
+  double price = 7;
+  optional double wheeling_charge = 8;
+  optional double loss_cost = 9;
+}
+
+message BatchExecuteSettlementsRequest {
+  repeated ExecuteSettlementRequest settlements = 1;
+}
+
+message SettlementResponse {
+  bool success = 1;
+  string message = 2;
+  string signature = 3;
+  uint64 slot = 4;
+}
+
+message BatchSettlementResponse {
+  bool success = 1;
+  string message = 2;
+  string signature = 3;
+  uint64 slot = 4;
+  repeated string settlement_ids = 5;
 }
 
