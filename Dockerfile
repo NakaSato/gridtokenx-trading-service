@@ -55,8 +55,8 @@ WORKDIR /app
 # Copy binary from builder stage
 COPY --from=builder /app/target/release/gridtokenx-trading-service /app/trading-service
 
-# Expose gRPC port
-EXPOSE 50052
+# Expose gRPC port (5020) and HTTP metrics port (4020)
+EXPOSE 5020 4020
 
 # Run the binary
 ENTRYPOINT ["/app/trading-service"]
