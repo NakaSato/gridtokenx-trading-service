@@ -62,7 +62,6 @@ pub struct ShardedMatchingWorker {
     zone_prices: Arc<DashMap<i32, Decimal>>,
     ohlc_aggregator: Option<Arc<crate::services::market_data::MarketDataService>>,
 }
-}
 
 impl ShardedMatchingWorker {
     pub fn new(
@@ -88,7 +87,7 @@ impl ShardedMatchingWorker {
             sell_orders: Arc::new(DashMap::new()),
             trigger_orders: Arc::new(DashMap::new()),
             zone_prices: Arc::new(DashMap::new()),
-            market_data_aggregator: None,
+            ohlc_aggregator: None,
         }
     }
 
@@ -111,11 +110,10 @@ impl ShardedMatchingWorker {
                 id, user_id, energy_amount, price_per_kwh, filled_amount,
                 epoch_id, zone_id, order_type, side, status,
                 expires_at, created_at, filled_at, meter_id,
-                refund_tx_signature, order_pda, order_index, session_token,
-                trigger_price, trigger_type, trigger_status,
-                trailing_offset, triggered_at, last_peak_price,
+                refund_tx_signature, order_pda, order_index,
+                trigger_price, trigger_type, trigger_status, trailing_offset, session_token, triggered_at, last_peak_price,
                 blockchain_status, blockchain_tx_hash, blockchain_error, retry_count,
-                time_in_force
+                time_in_force, limit_price
             FROM trading_orders
             WHERE status IN ('pending', 'active', 'partially_filled')
             AND (COALESCE(zone_id, 0) % $1) = $2
@@ -132,6 +130,7 @@ impl ShardedMatchingWorker {
                 user_id: row.get("user_id"),
                 energy_amount: row.get("energy_amount"),
                 price_per_kwh: row.get("price_per_kwh"),
+                limit_price: row.get("limit_price"),
                 filled_amount: row.get("filled_amount"),
                 epoch_id: row.get("epoch_id"),
                 zone_id: row.get("zone_id"),
@@ -235,7 +234,7 @@ impl ShardedMatchingWorker {
                 Some(order_opt) = notify_rx.recv() => {
                     // Reactive match triggered by new order
                     if let Some(order) = order_opt {
-                        debug!("Worker Shard {} received new order reactive injection: {}", self.shard_id, order.id);
+                        info!("Worker Shard {} received new order reactive injection: {}", self.shard_id, order.id);
                         if order.trigger_price.is_some() || order.trigger_type.is_some() {
                              self.trigger_orders.insert(order.id, order);
                         } else if order.side == OrderSide::Buy {
@@ -548,11 +547,11 @@ impl ShardedMatchingWorker {
             wheeling_charge_per_kwh: Decimal,
             loss_factor: Decimal,
             loss_cost_per_kwh: Decimal,
-            user_id: Uuid,
-            zone_id: Option<i32>,
-            epoch_id: Uuid,
-            order_pda: Option<String>,
-            session_token: Option<String>,
+            _user_id: Uuid,
+            _zone_id: Option<i32>,
+            _epoch_id: Uuid,
+            _order_pda: Option<String>,
+            _session_token: Option<String>,
         }
 
         let mut candidates: Vec<Candidate> = Vec::with_capacity(256);
@@ -635,11 +634,11 @@ impl ShardedMatchingWorker {
                         wheeling_charge_per_kwh: wheeling,
                         loss_factor: loss,
                         loss_cost_per_kwh: FastPrice::from_raw(loss_cost_extra_raw).to_decimal(),
-                        user_id: sell.user_id,
-                        zone_id: sell.zone_id,
-                        epoch_id: sell.epoch_id.unwrap_or_default(),
-                        order_pda: sell.order_pda.clone(),
-                        session_token: sell.session_token.clone(),
+                        _user_id: sell.user_id,
+                        _zone_id: sell.zone_id,
+                        _epoch_id: sell.epoch_id.unwrap_or_default(),
+                        _order_pda: sell.order_pda.clone(),
+                        _session_token: sell.session_token.clone(),
                     });
                 }
             }
@@ -662,7 +661,7 @@ impl ShardedMatchingWorker {
                     debug!("    x FOK REJECTED: Insufficient aggregate liquidity (Available: {} < Requested: {})", total_available, remaining_buy_amount);
                     // Cancel the order
                     self.buy_orders.remove(&buy.id);
-                    if let Some(event_bus) = &self.event_bus {
+                    if let Some(_event_bus) = &self.event_bus {
                         match_events.push(Event::OrderUpdate {
                             id: buy.id,
                             filled_amount: buy.filled_amount,
@@ -863,7 +862,6 @@ impl ShardedMatchingWorker {
 
         let duration_ms = cycle_start.elapsed().as_secs_f64() * 1000.0;
         record_matching_cycle(duration_ms, (buy_count + sell_count) as u64, matches_created as u64);
-        crate::metrics::record_matching_cycle_high_fidelity(duration_ms);
 
         info!(
             "Shard {} matching cycle completed in {:.2}ms (Pools: {} -> {} buy, {} -> {} sell). Matches created: {}",
@@ -894,13 +892,6 @@ impl ShardedMatchingWorker {
     ) -> Result<Uuid> {
         let match_id = Uuid::new_v4();
 
-        // Extract trace context for distributed tracing
-        use opentelemetry::propagation::TextMapPropagator;
-        let mut trace_context = std::collections::HashMap::new();
-        opentelemetry::global::get_text_map_propagator(|propagator| {
-            propagator.inject_context(&opentelemetry::Context::current(), &mut trace_context);
-        });
-        let trace_context = if trace_context.is_empty() { None } else { Some(trace_context) };
 
         // Emit OrderMatched event via EventBus if available
         if let Some(event_bus) = &self.event_bus {
@@ -915,7 +906,6 @@ impl ShardedMatchingWorker {
                 seller_id,
                 timestamp: chrono::Utc::now(),
                 zone_id,
-                otel_trace_context: trace_context,
             });
             let bus = event_bus.clone();
             tokio::spawn(async move {
@@ -995,13 +985,6 @@ impl ShardedMatchingWorker {
         let settlement_ulid = Ulid::new();
         let settlement_id = Uuid::from_bytes(settlement_ulid.to_bytes());
 
-        // Extract trace context for propagation
-        use opentelemetry::propagation::TextMapPropagator;
-        let mut trace_context = std::collections::HashMap::new();
-        opentelemetry::global::get_text_map_propagator(|propagator| {
-            propagator.inject_context(&opentelemetry::Context::current(), &mut trace_context);
-        });
-        let trace_context = if trace_context.is_empty() { None } else { Some(trace_context) };
 
         let settlement = Settlement {
             id: settlement_id,
@@ -1030,7 +1013,7 @@ impl ShardedMatchingWorker {
             erc_certificate_id: None,
             erc_transfer_tx: None,
             epoch_id,
-            trace_context,
+
         };
 
         // Emit SettlementRequested event via EventBus if available
@@ -1054,7 +1037,11 @@ impl MatchingWorkerPool {
     pub fn notify_zone(&self, zone_id: Option<i32>, order: Option<TradingOrderDb>) {
         let shard_id = zone_id.unwrap_or(0).unsigned_abs() % self.num_shards;
         if let Some(sender) = self.senders.get(shard_id as usize) {
-            let _ = sender.try_send(order);
+            if let Err(e) = sender.try_send(order) {
+                warn!("Failed to send order to shard {}: {}", shard_id, e);
+            }
+        } else {
+             warn!("Shard {} not found in pool (Total shards: {})", shard_id, self.num_shards);
         }
     }
 }
@@ -1305,7 +1292,12 @@ impl OrderMatchingEngine {
     pub async fn notify_new_order(&self, zone_id: Option<i32>, order: Option<TradingOrderDb>) {
         let pool = self.worker_pool.read().await;
         if let Some(pool) = pool.as_ref() {
+            if let Some(ref o) = order {
+                info!("Notifying engine of new order {} in zone {:?}", o.id, zone_id);
+            }
             pool.notify_zone(zone_id, order);
+        } else {
+            warn!("Engine received notification but worker_pool is not initialized");
         }
     }
 
@@ -1323,7 +1315,7 @@ impl OrderMatchingEngine {
                 order_index,
                 trigger_price, trigger_type, trigger_status, trailing_offset, session_token, triggered_at, last_peak_price,
                 blockchain_status, blockchain_tx_hash, blockchain_error, retry_count,
-                time_in_force
+                time_in_force, limit_price
             FROM trading_orders 
             WHERE status IN ('active', 'pending', 'partially_filled') 
             AND expires_at < $1
@@ -1366,6 +1358,7 @@ impl OrderMatchingEngine {
                 blockchain_error: row.get("blockchain_error"),
                 retry_count: row.get("retry_count"),
                 time_in_force: row.get("time_in_force"),
+                limit_price: row.get("limit_price"),
             })
             .collect();
 

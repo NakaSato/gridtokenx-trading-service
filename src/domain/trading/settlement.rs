@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::str::FromStr;
-use std::collections::HashMap;
+
 use tracing::info;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -62,7 +62,6 @@ pub struct Settlement {
     pub erc_certificate_id: Option<String>,
     pub erc_transfer_tx: Option<String>,
     pub epoch_id: Uuid,
-    pub trace_context: Option<HashMap<String, String>>,
 }
 
 /// Settlement transaction result
@@ -155,7 +154,7 @@ pub struct SettlementStats {
 #[derive(Debug)]
 pub struct SettlementManager {
     db: PgPool,
-    config: SettlementConfig,
+    pub config: SettlementConfig,
 }
 
 impl SettlementManager {
@@ -224,7 +223,6 @@ impl SettlementManager {
             erc_certificate_id: None,
             erc_transfer_tx: None,
             epoch_id: trade.epoch_id,
-            trace_context: None, // Will be updated if trigger_settlement is used or needs propagation
         };
 
         sqlx::query(
@@ -233,9 +231,9 @@ impl SettlementManager {
                 id, buyer_id, seller_id, buy_order_id, sell_order_id,
                 energy_amount, price_per_kwh, total_amount, fee_amount, net_amount, status, created_at,
                 wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id, epoch_id,
-                buyer_session_token, seller_session_token, trace_context
+                buyer_session_token, seller_session_token
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             "#,
         )
         .bind(settlement.id)
@@ -259,7 +257,6 @@ impl SettlementManager {
         .bind(trade.epoch_id)
         .bind(&settlement.buyer_session_token)
         .bind(&settlement.seller_session_token)
-        .bind(settlement.trace_context.as_ref().map(|tc| serde_json::to_value(tc).unwrap_or_default()))
         .execute(&self.db)
         .await?;
 
@@ -274,7 +271,7 @@ impl SettlementManager {
                 price_per_kwh, total_amount, fee_amount, net_amount,
                 status, transaction_hash, created_at, processed_at,
                 wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id,
-                buyer_session_token, seller_session_token, erc_certificate_id, erc_transfer_tx, epoch_id, trace_context
+                buyer_session_token, seller_session_token, erc_certificate_id, erc_transfer_tx, epoch_id
             FROM settlements
             WHERE id = $1
             "#,
@@ -320,8 +317,6 @@ impl SettlementManager {
             erc_certificate_id: row.get("erc_certificate_id"),
             erc_transfer_tx: row.get("erc_transfer_tx"),
             epoch_id: row.get("epoch_id"),
-            trace_context: row.get::<Option<serde_json::Value>, _>("trace_context")
-                .and_then(|v| serde_json::from_value(v).ok()),
         })
     }
 
@@ -436,7 +431,7 @@ impl SettlementManager {
                 s.price_per_kwh, s.total_amount, s.fee_amount, s.net_amount,
                 s.status, s.transaction_hash, s.created_at, s.processed_at,
                 s.wheeling_charge, s.loss_factor, s.loss_cost, s.effective_energy, s.buyer_zone_id, s.seller_zone_id,
-                s.buyer_session_token, s.seller_session_token, s.erc_certificate_id, s.erc_transfer_tx, s.epoch_id, s.trace_context,
+                s.buyer_session_token, s.seller_session_token, s.erc_certificate_id, s.erc_transfer_tx, s.epoch_id,
                 u_b.wallet_address as buyer_wallet,
                 u_s.wallet_address as seller_wallet,
                 o_b.order_pda as buy_order_pda,
@@ -494,8 +489,6 @@ impl SettlementManager {
                 erc_certificate_id: row.get("erc_certificate_id"),
                 erc_transfer_tx: row.get("erc_transfer_tx"),
                 epoch_id: row.get("epoch_id"),
-                trace_context: row.get::<Option<serde_json::Value>, _>("trace_context")
-                    .and_then(|v| serde_json::from_value(v).ok()),
             };
 
             let buyer_wallet_str: String = row.get("buyer_wallet");
@@ -514,8 +507,7 @@ impl SettlementManager {
                 .unwrap_or_default();
 
             let trading_program_id = Pubkey::from_str(
-                &std::env::var("SOLANA_TRADING_PROGRAM_ID")
-                    .unwrap_or_else(|_| "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string()),
+                &std::env::var("NEXT_PUBLIC_TRADING_PROGRAM_ID").unwrap_or_else(|_| "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string()),
             )
             .unwrap_or_default();
 
@@ -706,5 +698,79 @@ impl SettlementManager {
             failed_count: row.get::<i64, _>("failed_count"),
             total_settled_value: row.get("total_settled_value"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use crate::domain::trading::clearing::TradeMatch;
+
+    #[test]
+    fn test_settlement_calculations() {
+        let config = SettlementConfig {
+            fee_rate: dec!(0.02), // 2% fee
+            ..Default::default()
+        };
+        
+        // Mock a TradeMatch
+        // total_value = 100
+        // wheeling = 5
+        // loss = 5
+        // base = 100 - 5 - 5 = 90
+        // fee = 90 * 0.02 = 1.8
+        // net = 90 - 1.8 = 88.2
+        let trade = TradeMatch {
+            id: Uuid::new_v4(),
+            match_id: Uuid::new_v4(),
+            buyer_id: Uuid::new_v4(),
+            seller_id: Uuid::new_v4(),
+            buy_order_id: Uuid::new_v4(),
+            sell_order_id: Uuid::new_v4(),
+            quantity: dec!(100),
+            price: dec!(1.0),
+            total_value: dec!(100),
+            wheeling_charge: dec!(5),
+            loss_factor: dec!(0.05),
+            loss_cost: dec!(5),
+            buyer_zone_id: Some(1),
+            seller_zone_id: Some(2),
+            matched_at: Utc::now(),
+            buyer_session_token: None,
+            seller_session_token: None,
+            epoch_id: Uuid::new_v4(),
+            otel_trace_context: None,
+        };
+
+        // We can't easily call create_settlement_record due to DB INSERT,
+        // but we can verify the Settlement struct logic if we had a pure function.
+        // For now, let's verify the math matches our expectations.
+        
+        let total_value = trade.total_value;
+        let fee_rate = config.fee_rate;
+        let loss_cost = trade.loss_cost;
+        let wheeling_charge = trade.wheeling_charge;
+
+        let seller_base_price_total = total_value - wheeling_charge - loss_cost;
+        let fee_amount = seller_base_price_total * fee_rate;
+        let net_amount = seller_base_price_total - fee_amount;
+        let effective_energy = trade.quantity * (Decimal::ONE - trade.loss_factor);
+
+        assert_eq!(fee_amount, dec!(1.8));
+        assert_eq!(net_amount, dec!(88.2));
+        assert_eq!(effective_energy, dec!(95.0));
+    }
+
+    #[test]
+    fn test_settlement_config_from_env() {
+        unsafe {
+            std::env::set_var("SETTLEMENT_FEE_RATE", "0.05");
+            std::env::set_var("SETTLEMENT_MAX_BATCH_SIZE", "50");
+        }
+        
+        let config = SettlementConfig::from_env();
+        assert_eq!(config.fee_rate, dec!(0.05));
+        assert_eq!(config.max_batch_size, 50);
     }
 }

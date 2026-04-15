@@ -8,7 +8,7 @@
 //! - Blockchain operations
 
 use metrics::{counter, gauge, histogram};
-use opentelemetry::KeyValue;
+
 use std::time::Instant;
 
 /// Records order submission metrics
@@ -137,16 +137,6 @@ pub fn record_matching_cycle(duration_ms: f64, orders_processed: u64, matches: u
     histogram!("trading_matching_matches_per_cycle").record(matches as f64);
 }
 
-/// Records high-fidelity matching cycle duration for OTLP/SigNoz
-pub fn record_matching_cycle_high_fidelity(duration_ms: f64) {
-    let meter = opentelemetry::global::meter("gridtokenx-trading");
-    let histogram = meter
-        .f64_histogram("gridtokenx.trading.matching_cycle_duration")
-        .with_unit("ms")
-        .build();
-    
-    histogram.record(duration_ms, &[]);
-}
 
 /// Records blockchain settlement metrics
 pub fn record_blockchain_settlement(operation: &str, success: bool, duration_ms: f64) {
@@ -166,16 +156,6 @@ pub fn record_blockchain_settlement(operation: &str, success: bool, duration_ms:
     }
 }
 
-/// Records high-fidelity settlement latency for OTLP/SigNoz
-pub fn record_settlement_latency_high_fidelity(duration_s: f64, batch_size: u64) {
-    let meter = opentelemetry::global::meter("gridtokenx-trading");
-    let histogram = meter
-        .f64_histogram("gridtokenx.trading.settlement_latency")
-        .with_unit("s")
-        .build();
-    
-    histogram.record(duration_s, &[KeyValue::new("batch_size", batch_size as i64)]);
-}
 
 /// Records gRPC request metrics for trading service
 pub struct GrpcMetricsTimer {

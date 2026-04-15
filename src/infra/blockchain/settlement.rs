@@ -40,10 +40,10 @@ impl BlockchainSettlementProvider {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
-        // Mints from env
-        let energy_mint_str = std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG ENERGY_MINT: '{}'", energy_mint_str);
+        // Mints: Energy Token is derived, Currency from env
+        let energy_mint = self.blockchain.instruction_builder().get_mint_pda()
+             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
-        let energy_mint = BlockchainService::parse_pubkey(&energy_mint_str)?;
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // ATAs
@@ -207,10 +207,10 @@ impl BlockchainSettlementProvider {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
-        // Mints from env
-        let energy_mint_str = std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG ENERGY_MINT: '{}'", energy_mint_str);
+        // Mints: Energy Token is derived, Currency from env
+        let energy_mint = self.blockchain.instruction_builder().get_mint_pda()
+             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
-        let energy_mint = BlockchainService::parse_pubkey(&energy_mint_str)?;
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // Collectors
@@ -276,20 +276,20 @@ impl BlockchainSettlementProvider {
             let instruction = self
                 .blockchain
                 .build_atomic_settlement_instruction(
-                    &market_pda,
-                    &buy_order_pda,
-                    &sell_order_pda,
-                    &buyer_currency_ata,
-                    &seller_energy_ata,
-                    &seller_currency_ata,
-                    &buyer_energy_ata,
-                    &fee_collector_ata,
-                    &wheeling_collector_ata,
-                    &loss_collector_ata,
-                    &energy_mint,
-                    &currency_mint,
-                    &platform_authority.pubkey(),
-                    &platform_authority.pubkey(),
+                    market_pda,
+                    buy_order_pda,
+                    sell_order_pda,
+                    buyer_currency_ata,
+                    seller_energy_ata,
+                    seller_currency_ata,
+                    buyer_energy_ata,
+                    fee_collector_ata,
+                    wheeling_collector_ata,
+                    loss_collector_ata,
+                    energy_mint,
+                    currency_mint,
+                    platform_authority.pubkey(),
+                    platform_authority.pubkey(),
                     amount_atomic,
                     price_atomic,
                     wheeling_val,
@@ -303,12 +303,12 @@ impl BlockchainSettlementProvider {
 
         // Add priority fee if provided
         if priority_fee > 0 {
-            self.blockchain.add_priority_fee_to_instructions(&mut instructions, "settlement")?;
+            self.blockchain.add_priority_fee_to_instructions(&mut instructions, "settlement").await?;
         }
 
         let signature = self
             .blockchain
-            .execute_batched_instructions(&platform_authority, instructions)
+            .execute_batched_instructions(&[&platform_authority], instructions)
             .await
             .map_err(|e| ApiError::Internal(format!("Batch settlement execution failed: {}", e)))?;
 
@@ -342,27 +342,34 @@ impl BlockchainSettlementProvider {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
-        let energy_mint_str = std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default();
-        let energy_mint = BlockchainService::parse_pubkey(&energy_mint_str)?;
+        let mint_pda = self.blockchain.instruction_builder().get_mint_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive mint PDA: {}", e)))?;
+        let token_info_pda = self.blockchain.instruction_builder().get_token_info_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive token info PDA: {}", e)))?;
 
         // Calculate atomic units for energy (9 decimal places for GRX)
         let amount_atomic = ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000i64)).trunc())
             .unwrap_or(0);
 
         // Calculate User ATA
-        let user_ata = self.blockchain.calculate_ata_address(user_wallet, &energy_mint)?;
+        let user_ata = self.blockchain.calculate_ata_address(user_wallet, &mint_pda)?;
 
         // 1. Build Instruction (Using Energy Token Program)
-        let instruction = self.blockchain.instruction_builder().build_mint_instruction(
-            &user_ata.to_string(),
+        let instruction = self.blockchain.instruction_builder().build_mint_to_wallet_instruction(
+            mint_pda,
+            token_info_pda,
+            user_ata,
+            *user_wallet,
             amount_atomic
         ).map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
 
         // 2. Execute Transaction
-        let signature = self.blockchain.build_and_send_transaction_with_priority(
-            vec![instruction],
+        let mut instructions = vec![instruction];
+        self.blockchain.add_priority_fee_to_instructions(&mut instructions, "token_minting").await?;
+        
+        let signature = self.blockchain.build_and_send_transaction(
+            instructions,
             &[&platform_authority],
-            "generation_mint",
         ).await.map_err(|e| ApiError::Internal(format!("Blockchain mint failed: {}", e)))?;
 
         Ok(signature.to_string())

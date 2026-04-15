@@ -617,7 +617,7 @@ impl MarketClearingService {
             sell_payload: sell_order.payload_bytes.clone(),
             retry_count: 0,
             error_message: None,
-            otel_trace_context: None, // Will be populated by caller if needed
+
         }
     }
 

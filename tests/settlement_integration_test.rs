@@ -65,7 +65,8 @@ async fn test_settlement_numeric_integrity() {
         "http://localhost:8899".to_string(),
         "localnet".to_string(),
         program_ids,
-    ).unwrap());
+        None,
+    ).await.unwrap());
 
     let _provider = BlockchainSettlementProvider::new(blockchain.clone());
 

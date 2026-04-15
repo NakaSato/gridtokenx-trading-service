@@ -31,7 +31,7 @@ impl Default for MarketDataConfig {
         Self {
             sync_interval_secs: 30, // Sync every 30s by default
             enabled: true,
-            trading_program_id: "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string(),
+            trading_program_id: "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string(),
         }
     }
 }
@@ -129,7 +129,7 @@ impl MarketDataManager {
         self.blockchain
             .execute_update_depth(
                 &self.market_pubkey,
-                zone_id,
+                zone_id as u32,
                 buy_prices,
                 buy_amounts,
                 sell_prices,

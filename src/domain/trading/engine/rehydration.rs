@@ -4,7 +4,7 @@ use crate::domain::trading::models::TradingOrderDb;
 use crate::infra::db::schema::types::OrderStatus;
 use crate::infra::events::kafka_consumer::KafkaConsumer;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 /// Service responsible for replaying Kafka history to reconstruct order book state.

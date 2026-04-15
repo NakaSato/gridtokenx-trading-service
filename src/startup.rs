@@ -1,5 +1,6 @@
 use crate::api::trading_service::TradingServiceImpl;
 use crate::core::config::Config;
+use gridtokenx_blockchain_core::auth::ServiceRole;
 use crate::domain::{
     energy::GridTopologyService,
     trading::clearing::MarketClearingService,
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use connectrpc::Server;
 use anyhow::Context as _;
 use tracing::{error, info};
-use axum::{Router, routing::get, response::IntoResponse, http::StatusCode, middleware};
+use axum::{Router, routing::get, response::IntoResponse, http::StatusCode};
 use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
 // use tokio::signal;
@@ -42,9 +43,11 @@ pub struct AppState {
 
 pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     let config = Arc::new(Config::from_env().context("Failed to load configuration from environment")?);
-    let addr: SocketAddr = format!("0.0.0.0:{}", 8092)
-        .parse()
-        .context("Failed to parse trading service address")?; // Use a dedicated port
+    let addr: SocketAddr = std::env::var("TRADING_GRPC_PORT")
+        .unwrap_or_else(|_| "5020".to_string())
+        .parse::<u16>()
+        .map(|p| format!("0.0.0.0:{}", p).parse().unwrap())
+        .context("Failed to parse trading gRPC service address")?;
 
     // Initialize Database
     let db_pool = db::setup_database(&config.database_url)
@@ -85,10 +88,12 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     // Initialize Blockchain Service
     let blockchain = Arc::new(
         BlockchainService::new(
-            config.solana_rpc_url.clone(),
+            config.chain_bridge_url.clone(),
             config.environment.clone(),
             config.solana_programs.clone(),
+            None, // No specific metrics registry for now
         )
+        .await
         .context("Failed to initialize blockchain service")?,
     );
 
@@ -174,6 +179,9 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
             .with_p2p_config(p2p_config.clone()),
     );
 
+    // Initialize Participant Service for identity sync
+    let participant_service = Arc::new(crate::domain::trading::participant::ParticipantService::new(db_pool.clone()));
+
     // [PHASE 4] Kafka-Driven Recovery (Rehydration)
     let mut rehydrated_state = None;
     if config.kafka_enabled {
@@ -206,6 +214,8 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     // Start Event Consumer for reactive matching
     let event_bus_clone = event_bus.clone();
     let matching_engine_clone = matching_engine.clone();
+    let participant_service_clone = participant_service.clone();
+    let db_pool_clone = db_pool.clone();
     let consumer_token = token.clone();
     tokio::spawn(async move {
         let group_name = "trading-service-matcher";
@@ -220,10 +230,107 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
             result = event_bus_clone
                 .consume_events(group_name, &consumer_name, move |event| {
                     let engine = matching_engine_clone.clone();
+                    let participant_sync = participant_service_clone.clone();
+                    let db = db_pool_clone.clone();
                     async move {
-                        if let crate::domain::events::Event::OrderCreated(order) = event {
-                            info!("📥 Received real-time OrderCreated event: {}", order.id);
-                            engine.notify_new_order(order.zone_id, Some(order)).await;
+                        match event {
+                            crate::domain::events::Event::OrderCreated(order) => {
+                                info!("📥 Received real-time OrderCreated event: {}", order.id);
+                                engine.notify_new_order(order.zone_id, Some(order)).await;
+                            }
+                            crate::domain::events::Event::UserRegistered(payload) => {
+                                info!("📥 Received real-time UserRegistered event: {}", payload.user_id);
+                                if let Err(e) = participant_sync.initialize_participant(payload).await {
+                                    error!("❌ Failed to initialize participant: {}", e);
+                                }
+                            }
+                            crate::domain::events::Event::UserOnboarded(payload) => {
+                                info!("📥 Received real-time UserOnboarded event: {}", payload.user_id);
+                                if let Err(e) = participant_sync.process_onboarding(payload).await {
+                                    error!("❌ Failed to process on-chain onboarding: {}", e);
+                                }
+                            }
+                            crate::domain::events::Event::UserWalletLinked(payload) => {
+                                info!("📥 Received real-time UserWalletLinked event: {}", payload.user_id);
+                                if let Err(e) = participant_sync.sync_wallet_metadata(payload).await {
+                                    error!("❌ Failed to sync wallet metadata: {}", e);
+                                }
+                            }
+                            crate::domain::events::Event::OrderUpdate { id, filled_amount, status } => {
+                                info!("📥 Persisting OrderUpdate: {} -> {}", id, status);
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE trading_orders SET filled_amount = $1, status = $2::order_status, updated_at = NOW() WHERE id = $3"
+                                )
+                                .bind(filled_amount)
+                                .bind(status)
+                                .bind(id)
+                                .execute(&db)
+                                .await {
+                                    error!("❌ Failed to persist order update: {}", e);
+                                }
+                            }
+                            crate::domain::events::Event::OrderMatched(payload) => {
+                                info!("📥 Persisting OrderMatched: {}", payload.match_id);
+                                if let Err(e) = sqlx::query(
+                                    r#"
+                                    INSERT INTO order_matches (id, epoch_id, buy_order_id, sell_order_id, matched_amount, match_price, match_time, status, zone_id, created_at, updated_at)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+                                    "#
+                                )
+                                .bind(payload.match_id)
+                                .bind(if payload.epoch_id.is_nil() { None } else { Some(payload.epoch_id) })
+                                .bind(payload.buy_order_id)
+                                .bind(payload.sell_order_id)
+                                .bind(payload.amount)
+                                .bind(payload.price)
+                                .bind(payload.timestamp)
+                                .bind("pending")
+                                .bind(payload.zone_id)
+                                .execute(&db)
+                                .await {
+                                    error!("❌ Failed to persist order match: {}", e);
+                                }
+                            }
+                            crate::domain::events::Event::SettlementRequested(s) => {
+                                info!("📥 Persisting SettlementRequested: {}", s.id);
+                                if let Err(e) = sqlx::query(
+                                    r#"
+                                    INSERT INTO settlements (
+                                        id, buyer_id, seller_id, buy_order_id, sell_order_id,
+                                        energy_amount, price_per_kwh, total_amount, fee_amount, net_amount, status, created_at,
+                                        wheeling_charge, loss_factor, loss_cost, effective_energy, buyer_zone_id, seller_zone_id, epoch_id,
+                                        buyer_session_token, seller_session_token
+                                    )
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                                    "#,
+                                )
+                                .bind(s.id)
+                                .bind(s.buyer_id)
+                                .bind(s.seller_id)
+                                .bind(s.buy_order_id)
+                                .bind(s.sell_order_id)
+                                .bind(s.energy_amount)
+                                .bind(s.price)
+                                .bind(s.total_value)
+                                .bind(s.fee_amount)
+                                .bind(s.net_amount)
+                                .bind(s.status.to_string())
+                                .bind(s.created_at)
+                                .bind(s.wheeling_charge)
+                                .bind(s.loss_factor)
+                                .bind(s.loss_cost)
+                                .bind(s.effective_energy)
+                                .bind(s.buyer_zone_id)
+                                .bind(s.seller_zone_id)
+                                .bind(if s.epoch_id.is_nil() { None } else { Some(s.epoch_id) })
+                                .bind(&s.buyer_session_token)
+                                .bind(&s.seller_session_token)
+                                .execute(&db)
+                                .await {
+                                    error!("❌ Failed to persist settlement: {}", e);
+                                }
+                            }
+                            _ => {}
                         }
                         Ok(())
                     }
@@ -363,7 +470,10 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     let grpc_server = Server::new(grpc_router);
 
     // Start REST HTTP server (metrics + settlement endpoint)
-    let metrics_port = 8093;
+    let metrics_port = std::env::var("TRADING_HTTP_PORT")
+        .unwrap_or_else(|_| "4020".to_string())
+        .parse::<u16>()
+        .unwrap_or(4020);
     let metrics_addr = format!("0.0.0.0:{}", metrics_port);
     let metrics_listener = tokio::net::TcpListener::bind(&metrics_addr)
         .await
@@ -372,7 +482,8 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
     let rest_app = Router::new()
         .route("/metrics", get(get_metrics))
         .route("/api/v1/settlement/generation-mint", axum::routing::post(settle_generation_mint_rest))
-        .layer(middleware::from_fn(crate::api::middleware::otel_tracing::otel_tracing_middleware))
+
+        .layer(axum::Extension(ServiceRole::TradingApi))
         .with_state(state.clone());
     
     info!("✅ Trading gRPC server listening on {}", addr);
@@ -411,12 +522,12 @@ pub async fn run(token: CancellationToken) -> anyhow::Result<()> {
 struct GenerationMintRequest {
     meter_id: uuid::Uuid,
     meter_serial: String,
-    user_id: uuid::Uuid,
+    _user_id: uuid::Uuid,
     start_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
     energy_generated_kwh: rust_decimal::Decimal,
-    energy_consumed_kwh: rust_decimal::Decimal,
-    reading_count: u64,
+    _energy_consumed_kwh: rust_decimal::Decimal,
+    _reading_count: u64,
     signature: String,
 }
 

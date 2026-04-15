@@ -12,6 +12,7 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: String,
     pub solana_rpc_url: String,
+    pub chain_bridge_url: String,
     pub solana_ws_url: String,
     pub energy_token_mint: String,
     pub max_connections: u32,
@@ -22,10 +23,12 @@ pub struct Config {
     pub iam_service_url: String,
     /// Enable Kafka-backed event sourcing (falls back to Redis Streams if false)
     pub kafka_enabled: bool,
-    /// Kafka bootstrap servers (e.g., "localhost:29092")
+    /// Kafka bootstrap servers (e.g., "localhost:9001")
     pub kafka_bootstrap_servers: String,
     /// Topic prefix for trading events (default: "trading")
     pub kafka_topic_prefix: String,
+    /// Service role (api or matcher)
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,11 +43,11 @@ pub struct SolanaProgramsConfig {
 impl Default for SolanaProgramsConfig {
     fn default() -> Self {
         Self {
-            registry_program_id: "FmvDiFUWPrwXsqo7z7XnVniKbZDcz32U5HSDVwPug89c".to_string(),
-            oracle_program_id: "JDUVXMkeGi4oxLp8njBaGScAFaVBBg7iGoiqcY1LxKop".to_string(),
-            energy_token_program_id: "n52aKuZwUeZAocpWqRZAJR4xFhQqAvaRE7Xepy2JBGk".to_string(),
-            trading_program_id: "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string(),
-            governance_program_id: "DamT9e1VqbA5nSyFZHExKwQu6qs4L5FW6dirWCK8YLd4".to_string(),
+            registry_program_id: "C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu".to_string(),
+            oracle_program_id: "9XqNt1FqeKyhh4jBaagBSDUpJSMJhEy5gi8E5xx2RaeY".to_string(),
+            energy_token_program_id: "FC28Av9roMDjx5PHH7GkSQQB6qo1vi4jsXR4ymiaV4CW".to_string(),
+            trading_program_id: "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string(),
+            governance_program_id: "Czz3aK3CmJfTVJJYDkuu3DcCGfWmuBruC4gbKTqDeq9x".to_string(),
         }
     }
 }
@@ -60,12 +63,15 @@ impl Config {
 
         Ok(Config {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
-            database_url: env::var("DATABASE_URL")
-                .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?,
+            database_url: env::var("TRADING_DATABASE_URL")
+                .or_else(|_| env::var("DATABASE_URL"))
+                .map_err(|_| anyhow::anyhow!("DATABASE_URL or TRADING_DATABASE_URL environment variable is required"))?,
             redis_url: env::var("REDIS_URL")
                 .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable is required"))?,
             solana_rpc_url: env::var("SOLANA_RPC_URL")
                 .map_err(|_| anyhow::anyhow!("SOLANA_RPC_URL environment variable is required"))?,
+            chain_bridge_url: env::var("CHAIN_BRIDGE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:5040".to_string()),
             solana_ws_url: env::var("SOLANA_WS_URL")
                 .map_err(|_| anyhow::anyhow!("SOLANA_WS_URL environment variable is required"))?,
             energy_token_mint: env::var("ENERGY_TOKEN_MINT").map_err(|_| {
@@ -78,27 +84,28 @@ impl Config {
             tokenization: TokenizationConfig::from_env()?,
             solana_programs: SolanaProgramsConfig {
                 registry_program_id: env::var("SOLANA_REGISTRY_PROGRAM_ID")
-                    .unwrap_or_else(|_| "FmvDiFUWPrwXsqo7z7XnVniKbZDcz32U5HSDVwPug89c".to_string()),
+                    .unwrap_or_else(|_| "C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu".to_string()),
                 oracle_program_id: env::var("SOLANA_ORACLE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "JDUVXMkeGi4oxLp8njBaGScAFaVBBg7iGoiqcY1LxKop".to_string()),
+                    .unwrap_or_else(|_| "9XqNt1FqeKyhh4jBaagBSDUpJSMJhEy5gi8E5xx2RaeY".to_string()),
                 energy_token_program_id: env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
-                    .unwrap_or_else(|_| "n52aKuZwUeZAocpWqRZAJR4xFhQqAvaRE7Xepy2JBGk".to_string()),
+                    .unwrap_or_else(|_| "FC28Av9roMDjx5PHH7GkSQQB6qo1vi4jsXR4ymiaV4CW".to_string()),
                 trading_program_id: env::var("SOLANA_TRADING_PROGRAM_ID")
-                    .unwrap_or_else(|_| "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na".to_string()),
+                    .unwrap_or_else(|_| "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string()),
                 governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "DamT9e1VqbA5nSyFZHExKwQu6qs4L5FW6dirWCK8YLd4".to_string()),
+                    .unwrap_or_else(|_| "Czz3aK3CmJfTVJJYDkuu3DcCGfWmuBruC4gbKTqDeq9x".to_string()),
             },
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_SERVICE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8090".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:5010".to_string()),
             kafka_enabled: env::var("KAFKA_EVENTS_ENABLED")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse()
                 .unwrap_or(false),
             kafka_bootstrap_servers: env::var("KAFKA_BOOTSTRAP_SERVERS")
-                .unwrap_or_else(|_| "localhost:29092".to_string()),
+                .unwrap_or_else(|_| "localhost:9001".to_string()),
             kafka_topic_prefix: env::var("KAFKA_TOPIC_PREFIX")
                 .unwrap_or_else(|_| "trading".to_string()),
+            role: env::var("TRADING_ROLE").unwrap_or_else(|_| "api".to_string()),
         })
     }
 }

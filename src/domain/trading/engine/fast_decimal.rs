@@ -168,8 +168,40 @@ mod tests {
         let a = FastPrice::from(dec!(1.5));
         let b = FastPrice::from(dec!(0.5));
 
-        assert_eq!(a.checked_add(b).unwrap().to_decimal(), dec!(2.0));
-        assert_eq!(a.checked_sub(b).unwrap().to_decimal(), dec!(1.0));
+        assert_eq!(a.checked_add(b).unwrap().to_decimal(), dec!(1.5).round_dp(9) + dec!(0.5).round_dp(9));
+        assert_eq!(a.checked_sub(b).unwrap().to_decimal(), dec!(1.0).round_dp(9));
+        
+        // Multiplication: 1.5 * 0.5 = 0.75
+        assert_eq!(a.checked_mul(b).unwrap().to_decimal(), dec!(0.75).round_dp(9));
+    }
+
+    #[test]
+    fn test_arithmetic_overflow() {
+        let max = FastPrice::from_raw(i64::MAX);
+        let bit = FastPrice::from_raw(1);
+        
+        assert!(max.checked_add(bit).is_none());
+        
+        let large = FastPrice::from(dec!(1000000000)); // 10^9
+        assert!(large.checked_mul(large).is_none()); // (10^9 * 10^9) / 10^9 = 10^9. Wait, 10^9 * 10^9 is 10^18. i64::MAX is ~9e18. 
+        // 10^9 in FastPrice is 10^18 raw. 
+        // (10^18 * 10^18) / 10^9 = 10^27. Definitely overflows i64 (and i128 intermediate is fine as 10^36 < 2^128 ~ 3.4e38).
+    }
+
+    #[test]
+    fn test_extreme_conversions() {
+        // Very small positive
+        let small = dec!(0.0000000001); // 10 decimal places, should be 0 in FastPrice (9 scale)
+        assert_eq!(FastPrice::from(small).to_decimal(), dec!(0));
+        
+        let smallest = dec!(0.000000001); // 9 decimal places
+        assert_eq!(FastPrice::from(smallest).to_decimal(), dec!(0.000000001));
+
+        // Clamping
+        let too_big = dec!(9223372036.854775807); // ~i64::MAX / 10^9
+        // i64::MAX is 9,223,372,036,854,775,807
+        // So 9,223,372,036.854775807 * 10^9 = i64::MAX.
+        assert_eq!(FastPrice::from(too_big).raw(), i64::MAX);
     }
 
     #[test]

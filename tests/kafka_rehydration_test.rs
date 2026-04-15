@@ -12,7 +12,7 @@ async fn test_rehydration_logic_simulation() {
     // Setup rehydrator - Note: we won't use the consumer for this unit-level check
     // but we need it to satisfy the constructor. We'll use a dummy bootstrap.
     let topics = vec!["orders_created".to_string(), "orders_updated".to_string()];
-    let consumer = KafkaConsumer::new("localhost:9092", topics, Some("test-group".to_string())).unwrap();
+    let consumer = KafkaConsumer::new("localhost:9001", topics, Some("test-group".to_string())).unwrap();
     let rehydrator = StateRehydrator::new(consumer);
     
     let mut orders: HashMap<Uuid, TradingOrderDb> = HashMap::new();

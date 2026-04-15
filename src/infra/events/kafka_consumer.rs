@@ -1,10 +1,8 @@
 use anyhow::Result;
 use crate::domain::events::Event;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer, StreamConsumer, CommitMode};
-use rdkafka::message::{Message, BorrowedMessage};
-use rdkafka::Offset;
-use rdkafka::topic_partition_list::TopicPartitionList;
+use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::message::Message;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use uuid::Uuid;

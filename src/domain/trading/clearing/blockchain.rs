@@ -6,7 +6,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use super::MarketClearingService;
-use crate::infra::blockchain::rpc::OffchainOrderPayload;
+use gridtokenx_blockchain_core::rpc::instructions::OffchainOrderPayload;
 use crate::infra::blockchain::WalletService;
 use crate::infra::db::schema::types::OrderSide;
 use solana_sdk::pubkey::Pubkey;
@@ -200,8 +200,7 @@ impl MarketClearingService {
             // Check balance
             if let Ok(bal) = self
                 .blockchain_service
-                .account_manager
-                .get_balance(&keypair.pubkey(), true)
+                .get_balance(&keypair.pubkey(), false)
                 .await
             {
                 info!("Payer Balance: {} lamports", bal);
@@ -300,7 +299,6 @@ impl MarketClearingService {
 
         let api_authority = self
             .blockchain_service
-            .account_manager
             .get_authority_keypair()
             .await?;
 

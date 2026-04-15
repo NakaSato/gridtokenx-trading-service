@@ -2,10 +2,9 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event_type", content = "payload")]
+#[serde(tag = "event_type", content = "data")]
 pub enum Event {
     OrderMatched(OrderMatchedPayload),
     SettlementRequested(crate::domain::trading::settlement::Settlement),
@@ -25,6 +24,35 @@ pub enum Event {
     OrderCreated(crate::domain::trading::models::TradingOrderDb),
     ErcIssued(ErcIssuedPayload),
     SettlementProcessed(SettlementProcessedPayload),
+    UserRegistered(UserRegisteredPayload),
+    UserOnboarded(UserOnboardedPayload),
+    UserWalletLinked(UserWalletLinkedPayload),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserOnboardedPayload {
+    pub user_id: Uuid,
+    pub wallet_address: String,
+    pub user_account_pda: String,
+    pub transaction_signature: String,
+    pub user_type: String,
+    pub shard_id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserWalletLinkedPayload {
+    pub user_id: Uuid,
+    pub wallet_address: String,
+    pub user_account_pda: String,
+    pub transaction_signature: String,
+    pub shard_id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRegisteredPayload {
+    pub user_id: Uuid,
+    pub username: String,
+    pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +61,6 @@ pub struct SettlementProcessedPayload {
     pub tx_signature: String,
     pub status: String,
     pub timestamp: DateTime<Utc>,
-    pub otel_trace_context: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +74,6 @@ pub struct ErcIssuedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderMatchedPayload {
-    pub otel_trace_context: Option<HashMap<String, String>>,
     pub match_id: Uuid,
     pub epoch_id: Uuid,
     pub buy_order_id: Uuid,

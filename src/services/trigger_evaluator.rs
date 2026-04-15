@@ -1,13 +1,11 @@
 use std::sync::Arc;
-use chrono::Utc;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use sqlx::{PgPool, Row};
-use tracing::{info, error, warn, debug};
+use tracing::{info, error, debug};
 use uuid::Uuid;
 
-use crate::domain::trading::models::{TriggerStatus, TriggerType, TradingOrderDb};
-use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
+use crate::domain::trading::models::{TriggerType, TradingOrderDb};
+use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType};
 use crate::domain::trading::engine::OrderMatchingEngine;
 
 pub struct TriggerEvaluator {
@@ -25,7 +23,7 @@ impl TriggerEvaluator {
         let pending_orders = sqlx::query_as::<_, TradingOrderDb>(
             r#"
             SELECT * FROM conditional_orders 
-            WHERE status = 'pending' 
+            WHERE trigger_status = 'pending' 
             AND (expires_at IS NULL OR expires_at > NOW())
             "#
         )
@@ -100,8 +98,8 @@ impl TriggerEvaluator {
 
         // 3. Handle expired conditional orders
         let expired_result = sqlx::query(
-            "UPDATE conditional_orders SET status = 'expired', updated_at = NOW() 
-             WHERE status = 'pending' AND expires_at <= NOW()"
+            "UPDATE conditional_orders SET trigger_status = 'expired', updated_at = NOW() 
+             WHERE trigger_status = 'pending' AND expires_at <= NOW()"
         )
         .execute(&self.db)
         .await?;
@@ -156,7 +154,7 @@ impl TriggerEvaluator {
 
         // 1. Update conditional order status
         sqlx::query(
-            "UPDATE conditional_orders SET status = 'triggered', triggered_at = NOW(), updated_at = NOW() WHERE id = $1"
+            "UPDATE conditional_orders SET trigger_status = 'triggered', triggered_at = NOW(), updated_at = NOW() WHERE id = $1"
         )
         .bind(cond_order.id)
         .execute(&mut *tx)
@@ -203,5 +201,110 @@ impl TriggerEvaluator {
 
         info!("Successfully promoted conditional order {} to trading order {}", cond_order.id, order_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[tokio::test]
+    async fn test_should_trigger_stop_loss() {
+        let mut order = TradingOrderDb {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            order_type: OrderType::Market,
+            side: OrderSide::Sell,
+            trigger_type: Some(TriggerType::StopLoss),
+            trigger_price: Some(dec!(100)),
+            energy_amount: dec!(10),
+            price_per_kwh: dec!(0),
+            limit_price: None,
+            status: OrderStatus::Active,
+            time_in_force: crate::infra::db::schema::types::TimeInForce::Gtc,
+            filled_amount: None,
+            expires_at: None,
+            created_at: None,
+            filled_at: None,
+            epoch_id: None,
+            zone_id: None,
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: None,
+            order_index: None,
+            session_token: None,
+            trigger_status: None,
+            trailing_offset: None,
+            triggered_at: None,
+            last_peak_price: None,
+            blockchain_status: None,
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+        };
+
+        // Sell StopLoss: triggers if market_price <= trigger_price
+        let evaluator = TriggerEvaluator { db: PgPool::connect_lazy("postgres://localhost/fake").unwrap(), matching_engine: Arc::new(OrderMatchingEngine::new(PgPool::connect_lazy("postgres://localhost/fake").unwrap())) };
+        
+        assert!(evaluator.should_trigger(&order, dec!(90)));
+        assert!(evaluator.should_trigger(&order, dec!(100)));
+        assert!(!evaluator.should_trigger(&order, dec!(110)));
+
+        // Buy StopLoss: triggers if market_price >= trigger_price
+        order.side = OrderSide::Buy;
+        assert!(evaluator.should_trigger(&order, dec!(110)));
+        assert!(evaluator.should_trigger(&order, dec!(100)));
+        assert!(!evaluator.should_trigger(&order, dec!(90)));
+    }
+
+    #[tokio::test]
+    async fn test_should_trigger_trailing_stop() {
+        let mut order = TradingOrderDb {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            order_type: OrderType::Market,
+            side: OrderSide::Sell,
+            trigger_type: Some(TriggerType::TrailingStop),
+            trailing_offset: Some(dec!(5)),
+            last_peak_price: Some(dec!(100)),
+            energy_amount: dec!(10),
+            price_per_kwh: dec!(0),
+            limit_price: None,
+            status: OrderStatus::Active,
+            time_in_force: crate::infra::db::schema::types::TimeInForce::Gtc,
+            trigger_price: None,
+            filled_amount: None,
+            expires_at: None,
+            created_at: None,
+            filled_at: None,
+            epoch_id: None,
+            zone_id: None,
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: None,
+            order_index: None,
+            session_token: None,
+            trigger_status: None,
+            triggered_at: None,
+            blockchain_status: None,
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+        };
+
+        let evaluator = TriggerEvaluator { db: PgPool::connect_lazy("postgres://localhost/fake").unwrap(), matching_engine: Arc::new(OrderMatchingEngine::new(PgPool::connect_lazy("postgres://localhost/fake").unwrap())) };
+
+        // Sell TrailingStop: triggers if market_price <= peak - offset (100 - 5 = 95)
+        assert!(evaluator.should_trigger(&order, dec!(90)));
+        assert!(evaluator.should_trigger(&order, dec!(95)));
+        assert!(!evaluator.should_trigger(&order, dec!(96)));
+        assert!(!evaluator.should_trigger(&order, dec!(100)));
+
+        // Buy TrailingStop: triggers if market_price >= trough + offset (100 + 5 = 105)
+        order.side = OrderSide::Buy;
+        assert!(evaluator.should_trigger(&order, dec!(110)));
+        assert!(evaluator.should_trigger(&order, dec!(105)));
+        assert!(!evaluator.should_trigger(&order, dec!(104)));
     }
 }

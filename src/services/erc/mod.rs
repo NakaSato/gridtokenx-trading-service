@@ -177,7 +177,7 @@ impl ErcService {
 
         let authority = self.blockchain_service.get_authority_keypair().await?;
         let user_wallet = solana_sdk::pubkey::Pubkey::from_str(&certificate.wallet_address)?;
-        let governance_program_id = self.blockchain_service.registry_program_id()?; // Simplified for refactor
+        let governance_program_id = self.blockchain_service.governance_program_id()?;
 
         // 1. Submit to Blockchain
         let signature = self

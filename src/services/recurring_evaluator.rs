@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use sqlx::{PgPool, Row};
-use tracing::{info, error, warn, debug};
+use tracing::{info, error, debug};
 use uuid::Uuid;
 
 use crate::domain::trading::models::{RecurringStatus, IntervalType};

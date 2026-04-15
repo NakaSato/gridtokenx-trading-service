@@ -339,7 +339,7 @@ impl WalletInitializationService {
 
         match self
             .blockchain_service
-            .register_user_on_chain(&keypair, user_type, 0, 0, 0, None, None)
+            .register_user_on_chain(&keypair, user_type, 0, 0, 0, 0)
             .await
         {
             Ok(sig) => {

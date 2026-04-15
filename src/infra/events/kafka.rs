@@ -13,6 +13,7 @@ pub struct KafkaTopics {
     pub orders_updated: String,
     pub settlements: String,
     pub triggers: String,
+    pub participants: String,
 }
 
 impl KafkaTopics {
@@ -23,6 +24,7 @@ impl KafkaTopics {
             orders_updated: format!("{}.orders.updated", prefix),
             settlements: format!("{}.settlements", prefix),
             triggers: format!("{}.triggers", prefix),
+            participants: format!("{}.participants", prefix),
         }
     }
 }
@@ -159,7 +161,7 @@ impl KafkaEventBus {
                 payload.settlement_id.to_string(),
             ),
             Event::PeakPriceUpdate { id, .. } => (
-                &self.topics.triggers,
+                &self.topics.orders_updated,
                 id.to_string(),
             ),
             Event::TriggerExecution { id, .. } => (
@@ -168,6 +170,18 @@ impl KafkaEventBus {
             ),
             Event::ErcIssued(payload) => (
                 &self.topics.settlements,
+                payload.user_id.to_string(),
+            ),
+            Event::UserRegistered(payload) => (
+                &self.topics.orders_created, // Or dedicated identity topic
+                payload.user_id.to_string(),
+            ),
+            Event::UserOnboarded(payload) => (
+                &self.topics.participants,
+                payload.user_id.to_string(),
+            ),
+            Event::UserWalletLinked(payload) => (
+                &self.topics.participants,
                 payload.user_id.to_string(),
             ),
         }

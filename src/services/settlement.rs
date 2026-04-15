@@ -1,9 +1,8 @@
 use anyhow::Result;
 use chrono::Utc;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, info};
-use opentelemetry::propagation::TextMapPropagator;
+use tracing::{error, info, warn};
+
 use uuid::Uuid;
 
 use crate::domain::events::{Event, SettlementProcessedPayload};
@@ -153,7 +152,6 @@ impl SettlementService {
                 tx_signature: tx_result.signature.clone(),
                 status: "Completed".to_string(),
                 timestamp: Utc::now(),
-                otel_trace_context: settlement.trace_context.clone(),
             }))
             .await
         {
@@ -202,7 +200,7 @@ impl SettlementService {
         &self,
         ids: Vec<Uuid>,
     ) -> Result<Vec<SettlementTransaction>> {
-        let start_time = std::time::Instant::now();
+        let _start_time = std::time::Instant::now();
         info!("🚀 Processing batch of {} settlements", ids.len());
 
         // 1. Mark processing in DB (Batch)
@@ -250,8 +248,6 @@ impl SettlementService {
         let contexts_clone = contexts.clone();
         let signature = tx_results[0].signature.clone();
         
-        let duration_s = start_time.elapsed().as_secs_f64();
-        crate::metrics::record_settlement_latency_high_fidelity(duration_s, ids.len() as u64);
 
         tokio::spawn(async move {
             if let Err(e) = service_clone.finalize_settlement_batch(contexts_clone, signature).await {
@@ -285,22 +281,9 @@ impl SettlementService {
                 let from_wallet = ctx.seller_wallet.to_string();
                 let to_wallet = ctx.buyer_wallet.to_string();
                 let manager_clone = self.manager.clone();
-                let trace_context = settlement.trace_context.clone();
-
                 transfer_tasks.push(tokio::spawn(async move {
-                    use opentelemetry::trace::FutureExt;
-                    
-                    let parent_cx = if let Some(tc) = trace_context {
-                        opentelemetry::global::get_text_map_propagator(|propagator| {
-                            propagator.extract(&tc)
-                        })
-                    } else {
-                        opentelemetry::Context::current()
-                    };
-
                     let cert_result = erc_clone
                         .find_settlement_certificates(settlement.seller_id, settlement.energy_amount)
-                        .with_context(parent_cx.clone())
                         .await;
                     
                     if let Ok(mut certs) = cert_result {
@@ -314,7 +297,6 @@ impl SettlementService {
                                     settlement.buyer_id,
                                     &signature_clone,
                                 )
-                                .with_context(parent_cx.clone())
                                 .await
                             {
                                 Ok(_) => {
@@ -324,7 +306,6 @@ impl SettlementService {
                                             &cert.certificate_id,
                                             &signature_clone,
                                         )
-                                        .with_context(parent_cx)
                                         .await;
                                 }
                                 Err(e) => {
@@ -355,7 +336,6 @@ impl SettlementService {
                 tx_signature: signature.clone(),
                 status: "Completed".to_string(),
                 timestamp: Utc::now(),
-                otel_trace_context: settlement.trace_context.clone(),
             })).await;
         }
 
@@ -401,21 +381,50 @@ impl SettlementService {
         info!("🚀 Executing generation mint for meter {}: {} kWh", meter_id, amount_kwh);
 
         // 1. Resolve Meter ownership (Must be in Registry)
+        info!("🔍 Resolving ownership for meter_id: {}", meter_id);
         let record = sqlx::query(
             r#"
-            SELECT m.user_id, w.address as wallet_address 
+            SELECT 
+                m.user_id, 
+                w.wallet_address,
+                w.blockchain_registered,
+                w.user_account_pda
             FROM meters m
             JOIN user_wallets w ON m.user_id = w.user_id
-            WHERE m.id = $1 AND w.is_primary = true
+            WHERE m.id = $1
+            ORDER BY 
+                w.is_primary DESC, 
+                w.blockchain_registered DESC, 
+                w.created_at ASC
+            LIMIT 1
             "#,
         )
         .bind(meter_id)
         .fetch_optional(&self.manager.db_pool())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Meter or primary wallet not found in registry for {}", meter_id))?;
+        .await
+        .map_err(|e| {
+            error!("❌ Database error during meter lookup for {}: {}", meter_id, e);
+            anyhow::anyhow!("Database error: {}", e)
+        })?;
+
+        let record = record.ok_or_else(|| {
+            warn!("⚠️ Meter {} not found or has no linked wallets in Trading DB", meter_id);
+            anyhow::anyhow!("Meter or verified wallet not found in registry for {}", meter_id)
+        })?;
 
         use sqlx::Row;
         let wallet_address: String = record.get("wallet_address");
+        let user_id: uuid::Uuid = record.get("user_id");
+        let is_registered: bool = record.get::<Option<bool>, _>("blockchain_registered").unwrap_or(false);
+        let pda: Option<String> = record.get("user_account_pda");
+        
+        if !is_registered {
+            warn!("⚠️ Wallet {} for user {} is not yet registered on-chain. Settlement might fail.", wallet_address, user_id);
+        }
+
+        info!("🚀 Executing generation mint for meter {}: {} kWh (User: {}, Wallet: {}, Registered: {}, PDA: {:?})", 
+            meter_id, amount_kwh, user_id, wallet_address, is_registered, pda);
+
         let user_wallet_pubkey = crate::infra::blockchain::BlockchainService::parse_pubkey(&wallet_address)
             .map_err(|e| anyhow::anyhow!("Invalid wallet pubkey: {}", e))?;
 

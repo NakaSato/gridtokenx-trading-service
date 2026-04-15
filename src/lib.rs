@@ -1,7 +1,4 @@
-use serde::{Deserialize, Serialize};
-
 extern crate self as buffa_types;
-pub extern crate tracing_opentelemetry;
 
 pub mod google {
     pub mod protobuf {

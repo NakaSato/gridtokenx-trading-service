@@ -1,9 +1,7 @@
-use std::sync::Arc;
-use chrono::{DateTime, Utc, Duration, Timelike};
+use chrono::{DateTime, Utc, Timelike};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use tracing::{info, error, debug};
-use crate::infra::db::schema::types::OrderSide;
+use tracing::{error, debug};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CandleResolution {

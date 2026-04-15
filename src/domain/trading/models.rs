@@ -67,6 +67,7 @@ pub struct TradingOrderDb {
     pub trailing_offset: Option<Decimal>,
     pub triggered_at: Option<DateTime<Utc>>,
     pub last_peak_price: Option<Decimal>,
+    pub limit_price: Option<Decimal>,
     // Blockchain sync fields
     pub blockchain_status: Option<String>,
     pub blockchain_tx_hash: Option<String>,
@@ -102,6 +103,96 @@ impl From<TradingOrderDb> for TradingOrder {
             retry_count: db.retry_count,
             time_in_force: db.time_in_force,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use crate::infra::db::schema::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
+
+    #[test]
+    fn test_trading_order_db_to_domain_conversion() {
+        let db_order = TradingOrderDb {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            order_type: OrderType::Limit,
+            side: OrderSide::Buy,
+            energy_amount: dec!(100.5),
+            price_per_kwh: dec!(0.15),
+            filled_amount: Some(dec!(50.25)),
+            status: OrderStatus::PartiallyFilled,
+            expires_at: None,
+            created_at: Some(Utc::now()),
+            filled_at: None,
+            epoch_id: Some(Uuid::new_v4()),
+            zone_id: Some(1),
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: Some("test_pda".to_string()),
+            order_index: Some(123),
+            session_token: None,
+            trigger_price: None,
+            trigger_type: None,
+            trigger_status: None,
+            trailing_offset: None,
+            triggered_at: None,
+            last_peak_price: None,
+            limit_price: Some(dec!(0.15)),
+            blockchain_status: Some("confirmed".to_string()),
+            blockchain_tx_hash: Some("0xabc".to_string()),
+            blockchain_error: None,
+            retry_count: 0,
+            time_in_force: TimeInForce::Gtc,
+        };
+
+        let domain_order: TradingOrder = db_order.into();
+
+        assert_eq!(domain_order.energy_amount, dec!(100.5));
+        assert_eq!(domain_order.filled_amount, dec!(50.25));
+        assert_eq!(domain_order.order_pda, Some("test_pda".to_string()));
+        assert_eq!(domain_order.order_index, Some(123));
+        assert_eq!(domain_order.blockchain_status, Some("confirmed".to_string()));
+    }
+
+    #[test]
+    fn test_conversion_handles_none_filled_amount() {
+        let db_order = TradingOrderDb {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            order_type: OrderType::Market,
+            side: OrderSide::Sell,
+            energy_amount: dec!(10),
+            price_per_kwh: dec!(1),
+            filled_amount: None,
+            status: OrderStatus::Active,
+            expires_at: None,
+            created_at: None,
+            filled_at: None,
+            epoch_id: None,
+            zone_id: None,
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: None,
+            order_index: None,
+            session_token: None,
+            trigger_price: None,
+            trigger_type: None,
+            trigger_status: None,
+            trailing_offset: None,
+            triggered_at: None,
+            last_peak_price: None,
+            limit_price: None,
+            blockchain_status: None,
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+            time_in_force: TimeInForce::Gtc,
+        };
+
+        let domain_order: TradingOrder = db_order.into();
+        assert_eq!(domain_order.filled_amount, Decimal::ZERO);
     }
 }
 

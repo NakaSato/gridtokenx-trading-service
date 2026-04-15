@@ -4,7 +4,7 @@ use crate::services::erc::IssueErcRequest as DomainIssueErcRequest;
 use crate::startup::AppState;
 use crate::trading_proto::*;
 use crate::metrics;
-use chrono::{DateTime, Utc, FixedOffset};
+use chrono::{DateTime, Utc};
 use connectrpc::{Context, ConnectError};
 use buffa::view::OwnedView;
 use rust_decimal::prelude::FromPrimitive;
@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
+use gridtokenx_blockchain_core::auth::ServiceRole;
 
 #[derive(Debug, sqlx::FromRow)]
 struct TradeDataRecord {
@@ -45,6 +46,10 @@ impl TradingServiceImpl {
         Self { state }
     }
 
+    fn extract_role(&self, ctx: &Context) -> ServiceRole {
+        ServiceRole::from_headers(&ctx.headers)
+    }
+
     fn calculate_next_execution(
         interval_type: IntervalType,
         interval_value: i32,
@@ -65,6 +70,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<SubmitOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("submit_order");
         let start = Instant::now();
         
@@ -136,6 +145,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<CancelOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("cancel_order");
         let start = Instant::now();
         
@@ -172,6 +185,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<UpdateOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("update_order");
         
         let order_id = Uuid::parse_str(request.order_id)
@@ -219,6 +236,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<GetOrderRequestView<'static>>,
     ) -> Result<(OrderResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let order_id = Uuid::parse_str(request.order_id)
             .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
 
@@ -263,6 +284,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<ListOrdersRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let user_id = Uuid::parse_str(request.user_id)
             .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
 
@@ -317,6 +342,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<GetOrderBookRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let mut query = String::from(
             r#"
             SELECT 
@@ -374,6 +403,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<ListTradesRequestView<'static>>,
     ) -> Result<(ListTradesResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let user_id = Uuid::parse_str(request.user_id)
             .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
         let limit = request.limit.unwrap_or(50);
@@ -450,6 +483,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<NotifyOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::TradingMatcher, ServiceRole::ApiGateway, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let order_id = Uuid::parse_str(request.order_id)
             .map_err(|_| ConnectError::invalid_argument("Invalid order_id"))?;
 
@@ -490,6 +527,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<IssueERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::OracleBridge, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("issue_erc");
         let start = Instant::now();
         
@@ -552,6 +593,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<TransferERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::SettlementService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("transfer_erc");
         let start = Instant::now();
         
@@ -625,6 +670,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<RetireERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::SettlementService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("retire_erc");
         let start = Instant::now();
         
@@ -676,6 +725,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<GetERCBalanceRequestView<'static>>,
     ) -> Result<(ERCBalanceResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let user_id = Uuid::parse_str(request.user_id)
             .map_err(|_| ConnectError::invalid_argument("Invalid user_id"))?;
 
@@ -702,6 +755,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<CalculateP2PCostRequestView<'static>>,
     ) -> Result<(P2PTransactionCost, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("calculate_p2p_cost");
 
         let buyer_zone = request.buyer_zone_id;
@@ -749,6 +806,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         _request: OwnedView<::buffa_types::google::protobuf::EmptyView<'static>>,
     ) -> Result<(P2PMarketPrices, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::ReportingService, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("get_market_prices");
         
         let p2p = &self.state.p2p_config;
@@ -792,6 +853,10 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<RelayOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
+        let role = self.extract_role(&ctx);
+        role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+            .map_err(|(_, msg)| ConnectError::permission_denied(msg))?;
+
         let _timer = metrics::GrpcMetricsTimer::new("relay_order");
         let start = Instant::now();
 
@@ -1604,6 +1669,66 @@ impl TradingService for TradingServiceImpl {
     // Oracle Bridge Settlement (Generation Mint)
     // =============================================================================
 
+    async fn execute_settlement(
+        &self,
+        ctx: Context,
+        request: OwnedView<ExecuteSettlementRequestView<'static>>,
+    ) -> Result<(SettlementResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("execute_settlement");
+        let settlement_id = Uuid::parse_str(request.settlement_id)
+            .map_err(|_| ConnectError::invalid_argument("Invalid settlement_id"))?;
+
+        info!("🚀 Remote settlement execution requested for {}", settlement_id);
+
+        let tx_result = self.state.settlement_service.process_settlement(settlement_id).await
+            .map_err(|e| {
+                error!("Settlement execution failed for {}: {}", settlement_id, e);
+                ConnectError::internal(format!("Settlement execution failed: {}", e))
+            })?;
+
+        Ok((SettlementResponse {
+            success: true,
+            message: "Settlement executed successfully".to_string(),
+            signature: tx_result.signature,
+            slot: tx_result.slot,
+            ..Default::default()
+        }, ctx))
+    }
+
+    async fn batch_execute_settlements(
+        &self,
+        ctx: Context,
+        request: OwnedView<BatchExecuteSettlementsRequestView<'static>>,
+    ) -> Result<(BatchSettlementResponse, Context), ConnectError> {
+        let _timer = metrics::GrpcMetricsTimer::new("batch_execute_settlements");
+        let mut ids = Vec::new();
+        for s in request.settlements.iter() {
+            let id = Uuid::parse_str(s.settlement_id)
+                .map_err(|_| ConnectError::invalid_argument("Invalid settlement_id in batch"))?;
+            ids.push(id);
+        }
+
+        info!("🚀 Remote batch settlement execution requested for {} items", ids.len());
+
+        let tx_results = self.state.settlement_service.process_settlements_batched(ids.clone()).await
+            .map_err(|e| {
+                error!("Batch settlement failed: {}", e);
+                ConnectError::internal(format!("Batch settlement failed: {}", e))
+            })?;
+
+        let first_result = tx_results.first()
+            .ok_or_else(|| ConnectError::internal("No transaction results returned"))?;
+
+        Ok((BatchSettlementResponse {
+            success: true,
+            message: format!("Batch of {} settlements processed", ids.len()),
+            signature: first_result.signature.clone(),
+            slot: first_result.slot,
+            settlement_ids: ids.into_iter().map(|id| id.to_string()).collect(),
+            ..Default::default()
+        }, ctx))
+    }
+
     async fn settle_generation_mint(
         &self,
         ctx: Context,
@@ -1687,6 +1812,7 @@ impl TradingService for TradingServiceImpl {
             resource_count: cluster.resource_count,
             dispatch_mode: cluster.dispatch_mode,
             last_update: cluster.last_update.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            ..Default::default()
         }, ctx))
     }
 
@@ -1698,14 +1824,14 @@ impl TradingService for TradingServiceImpl {
         let zone_id = request.zone_id;
         
         // Using raw query for listing as we don't have a specific repo method for it yet
-        let clusters = sqlx::query_as!(
-            crate::domain::vpp::models::VppCluster,
+        // Using query_as instead of query_as! to avoid type inference issues without live DB connection
+        let clusters = sqlx::query_as::<_, crate::domain::vpp::models::VppCluster>(
             r#"SELECT id, cluster_id, zone_id, total_capacity_kwh, current_stored_kwh, 
                soc_percentage, target_soc_percentage, flex_up_kw, flex_down_kw, 
                health_score, resource_count, dispatch_mode, last_update, created_at
                FROM vpp_clusters WHERE ($1::INT IS NULL OR zone_id = $1)"#,
-            zone_id
         )
+        .bind(zone_id)
         .fetch_all(&self.state.db)
         .await
         .map_err(|e| ConnectError::internal(format!("Failed to list VPP clusters: {}", e)))?;
@@ -1723,9 +1849,10 @@ impl TradingService for TradingServiceImpl {
             resource_count: c.resource_count,
             dispatch_mode: c.dispatch_mode,
             last_update: c.last_update.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            ..Default::default()
         }).collect();
 
-        Ok((ListVppClustersResponse { clusters: clusters_proto }, ctx))
+        Ok((ListVppClustersResponse { clusters: clusters_proto, ..Default::default() }, ctx))
     }
 
     async fn dispatch_vpp(
@@ -1733,12 +1860,12 @@ impl TradingService for TradingServiceImpl {
         ctx: Context,
         request: OwnedView<DispatchVppRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        sqlx::query!(
+        sqlx::query(
             "UPDATE vpp_clusters SET dispatch_mode = $2, target_soc_percentage = $3, last_update = NOW() WHERE cluster_id = $1",
-            request.cluster_id,
-            request.dispatch_mode,
-            request.target_soc
         )
+        .bind(&request.cluster_id)
+        .bind(&request.dispatch_mode)
+        .bind(request.target_soc as f64)
         .execute(&self.state.db)
         .await
         .map_err(|e| ConnectError::internal(format!("Failed to dispatch VPP: {}", e)))?;

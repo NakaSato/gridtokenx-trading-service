@@ -6,8 +6,8 @@ use tokio::signal;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize OpenTelemetry tracing (sets up global subscriber)
-    let telemetry_guard = telemetry::init_telemetry("gridtokenx-trading");
+    // Initialize standard JSON logging
+    telemetry::init_telemetry("gridtokenx-trading");
 
     info!("🚀 Starting GridTokenX Trading Service...");
 
@@ -52,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
         error!("❌ Trading service startup failed: {:#}", e);
     }
 
-    info!("👋 Shutdown complete. Cleaning up telemetry...");
-    telemetry::shutdown_telemetry(&telemetry_guard);
+    info!("👋 Shutdown complete.");
     result
 }

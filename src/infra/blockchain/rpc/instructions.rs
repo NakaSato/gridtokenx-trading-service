@@ -10,11 +10,11 @@ use std::str::FromStr;
 const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
 /// Program IDs (localnet) — keep in sync with `gridtokenx-anchor/Anchor.toml`
-pub const REGISTRY_PROGRAM_ID: &str = "FmvDiFUWPrwXsqo7z7XnVniKbZDcz32U5HSDVwPug89c";
-pub const ORACLE_PROGRAM_ID: &str = "JDUVXMkeGi4oxLp8njBaGScAFaVBBg7iGoiqcY1LxKop";
-pub const GOVERNANCE_PROGRAM_ID: &str = "DamT9e1VqbA5nSyFZHExKwQu6qs4L5FW6dirWCK8YLd4";
-pub const ENERGY_TOKEN_PROGRAM_ID: &str = "n52aKuZwUeZAocpWqRZAJR4xFhQqAvaRE7Xepy2JBGk";
-pub const TRADING_PROGRAM_ID: &str = "69dGpKu9a8EZiZ7orgfTH6CoGj9DeQHHkHBF2exSr8na";
+pub const REGISTRY_PROGRAM_ID: &str = "7JsfJPuJvhkY376RAzQExbdFbZMgdGc2cWLic25SE1tq";
+pub const ORACLE_PROGRAM_ID: &str = "9XqNt1FqeKyhh4jBaagBSDUpJSMJhEy5gi8E5xx2RaeY";
+pub const GOVERNANCE_PROGRAM_ID: &str = "Czz3aK3CmJfTVJJYDkuu3DcCGfWmuBruC4gbKTqDeq9x";
+pub const ENERGY_TOKEN_PROGRAM_ID: &str = "FC28Av9roMDjx5PHH7GkSQQB6qo1vi4jsXR4ymiaV4CW";
+pub const TRADING_PROGRAM_ID: &str = "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr";
 pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
@@ -195,27 +195,41 @@ impl InstructionBuilder {
         })
     }
 
-    /// Build instruction for minting tokens
+    /// Build instruction for minting GRX tokens to a wallet (Anchor: mint_to_wallet)
     pub fn build_mint_instruction(&self, recipient: &str, amount: u64) -> Result<Instruction> {
-        // Parse pubkeys
         let program_id = Pubkey::from_str(ENERGY_TOKEN_PROGRAM_ID)?;
+        // recipient is the wallet owner, we need the ATA or use the helper in the contract
+        // In the updated contract, mint_to_wallet handles ATA derivation or use-if-exists
         let recipient_pubkey = Pubkey::from_str(recipient)?;
         let mint_pubkey = self.get_token_mint_pubkey()?;
+        let token_info = self.get_token_info_pda()?; // Helper to get PDA
+        
+        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let associated_token_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+        let system_program = Pubkey::from_str("11111111111111111111111111111111").unwrap();
 
-        // Build accounts array
+        // We need the destination ATA. For simplicity here, we assume it's provided or derived
+        // In Anchor 1.0.0, we use the account list defined in energy_token.json
+        let (destination_ata, _) = Pubkey::find_program_address(
+            &[recipient_pubkey.as_ref(), token_program.as_ref(), mint_pubkey.as_ref()],
+            &associated_token_program
+        );
+
         let accounts = vec![
-            AccountMeta::new(recipient_pubkey, false),
             AccountMeta::new(mint_pubkey, false),
-            AccountMeta::new_readonly(self.payer, true),
-            AccountMeta::new_readonly(
-                Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?,
-                false,
-            ),
+            AccountMeta::new_readonly(token_info, false),
+            AccountMeta::new(destination_ata, false),
+            AccountMeta::new_readonly(recipient_pubkey, false),
+            AccountMeta::new_readonly(self.payer, true), // authority
+            AccountMeta::new(self.payer, true), // payer
+            AccountMeta::new_readonly(token_program, false),
+            AccountMeta::new_readonly(associated_token_program, false),
+            AccountMeta::new_readonly(system_program, false),
         ];
 
-        // Build instruction data
         let mut data = Vec::new();
-        data.extend_from_slice(&[1, 0, 0, 0]); // Mint discriminator
+        // mint_to_wallet discriminator: [17, 40, 71, 107, 142, 232, 163, 100]
+        data.extend_from_slice(&[17, 40, 71, 107, 142, 232, 163, 100]);
         data.extend_from_slice(&amount.to_le_bytes());
 
         Ok(Instruction {
@@ -225,35 +239,31 @@ impl InstructionBuilder {
         })
     }
 
-    /// Build instruction for transferring tokens
+    /// Build instruction for transferring tokens (Anchor: transfer_tokens)
     pub fn build_transfer_instruction(
         &self,
-        from: &str,
-        to: &str,
+        from_ata: &str,
+        to_ata: &str,
         amount: u64,
         token_mint: &str,
     ) -> Result<Instruction> {
-        // Parse pubkeys
         let program_id = Pubkey::from_str(ENERGY_TOKEN_PROGRAM_ID)?;
-        let from_pubkey = Pubkey::from_str(from)?;
-        let to_pubkey = Pubkey::from_str(to)?;
+        let from_pubkey = Pubkey::from_str(from_ata)?;
+        let to_pubkey = Pubkey::from_str(to_ata)?;
         let mint_pubkey = Pubkey::from_str(token_mint)?;
+        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
 
-        // Build accounts array
         let accounts = vec![
             AccountMeta::new(from_pubkey, false),
             AccountMeta::new(to_pubkey, false),
-            AccountMeta::new(mint_pubkey, false),
-            AccountMeta::new_readonly(self.payer, true),
-            AccountMeta::new_readonly(
-                Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")?,
-                false,
-            ),
+            AccountMeta::new_readonly(mint_pubkey, false),
+            AccountMeta::new_readonly(self.payer, true), // from_authority
+            AccountMeta::new_readonly(token_program, false),
         ];
 
-        // Build instruction data
         let mut data = Vec::new();
-        data.extend_from_slice(&[2, 0, 0, 0]); // Transfer discriminator
+        // transfer_tokens discriminator: [54, 180, 238, 175, 74, 85, 126, 188]
+        data.extend_from_slice(&[54, 180, 238, 175, 74, 85, 126, 188]);
         data.extend_from_slice(&amount.to_le_bytes());
 
         Ok(Instruction {
@@ -263,92 +273,9 @@ impl InstructionBuilder {
         })
     }
 
-    /// Build instruction for casting a governance vote
-    pub fn build_vote_instruction(&self, proposal_id: u64, vote: bool) -> Result<Instruction> {
-        // Parse pubkeys
-        let program_id = Pubkey::from_str(GOVERNANCE_PROGRAM_ID)?;
-        let proposal_account = self.get_proposal_account_pubkey(proposal_id)?;
-
-        // Build accounts array
-        let accounts = vec![
-            AccountMeta::new(proposal_account, false),
-            AccountMeta::new_readonly(self.payer, true),
-            AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_ID)?, false),
-        ];
-
-        // Build instruction data
-        let mut data = Vec::new();
-        data.extend_from_slice(&[1, 0, 0, 0]); // Vote discriminator
-        data.extend_from_slice(&proposal_id.to_le_bytes());
-        data.push(if vote { 1 } else { 0 });
-
-        Ok(Instruction {
-            program_id,
-            accounts,
-            data,
-        })
-    }
-
-    /// Build instruction for updating oracle price
-    pub fn build_update_price_instruction(
-        &self,
-        price_feed_id: &str,
-        price: u64,
-        confidence: u64,
-    ) -> Result<Instruction> {
-        // Parse pubkeys
-        let program_id = Pubkey::from_str(ORACLE_PROGRAM_ID)?;
-        let price_feed_account = self.get_price_feed_account_pubkey(price_feed_id)?;
-
-        // Build accounts array
-        let accounts = vec![
-            AccountMeta::new(price_feed_account, false),
-            AccountMeta::new_readonly(self.payer, true),
-            AccountMeta::new_readonly(clock::id(), false),
-            AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_ID)?, false),
-        ];
-
-        // Build instruction data
-        let mut data = Vec::new();
-        data.extend_from_slice(&[1, 0, 0, 0]); // UpdatePrice discriminator
-        data.extend_from_slice(&price.to_le_bytes());
-        data.extend_from_slice(&confidence.to_le_bytes());
-
-        Ok(Instruction {
-            program_id,
-            accounts,
-            data,
-        })
-    }
-
-    /// Build instruction for updating registry
-    pub fn build_update_registry_instruction(
-        &self,
-        participant_id: &str,
-        update_data: &serde_json::Value,
-    ) -> Result<Instruction> {
-        // Parse pubkeys
-        let program_id = Pubkey::from_str(REGISTRY_PROGRAM_ID)?;
-        let participant_account = self.get_participant_account_pubkey(participant_id)?;
-
-        // Build accounts array
-        let accounts = vec![
-            AccountMeta::new(participant_account, false),
-            AccountMeta::new_readonly(self.payer, true),
-            AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_ID)?, false),
-        ];
-
-        // Build instruction data
-        let mut data = Vec::new();
-        data.extend_from_slice(&[1, 0, 0, 0]); // UpdateParticipant discriminator
-        data.extend_from_slice(update_data.to_string().as_bytes());
-
-        Ok(Instruction {
-            program_id,
-            accounts,
-            data,
-        })
-    }
+    // Legacy/Unused instructions removed during Anchor 1.0.0 synchronization
+    // build_vote_instruction, build_update_price_instruction, build_update_registry_instruction
+    // are no longer compatible with the 1.0.0 smart contracts and were found to be dead code.
 
     /// Build instruction for initializing the registry
     pub fn build_initialize_registry_instruction(&self) -> Result<Instruction> {
@@ -795,17 +722,22 @@ impl InstructionBuilder {
             (*registry, *registry, *registry)
         };
 
+        // Find registry shard PDA: seeds = [b"registry_shard", [shard_id]]
+        let shard_id = 0; // Default shard for now
+        let (shard_pda, _) = Pubkey::find_program_address(&[b"registry_shard", &[shard_id]], &program_id);
+
         // Build accounts array matching RegisterUser struct
         let accounts = vec![
             AccountMeta::new(user_account_pda, false), // user_account (init, mut)
+            AccountMeta::new(shard_pda, false),        // registry_shard (mut)
             AccountMeta::new(*registry, false),        // registry (mut)
-            AccountMeta::new(*user_authority, true),   // authority (signer, mut)
+            AccountMeta::new(*user_authority, false),  // authority (NOT a signer in 1.0.0 Registry)
+            AccountMeta::new(payer, true),             // payer (signer, mut)
             AccountMeta::new_readonly(energy_program, false), // energy_token_program
             AccountMeta::new(token_mint, false),       // mint (mut)
-            AccountMeta::new(token_info_pda, false),   // token_info (mut)
             AccountMeta::new(user_token_account, false), // user_token_account (mut)
+            AccountMeta::new_readonly(token_info_pda, false), // token_info
             AccountMeta::new_readonly(token_program, false), // token_program
-            AccountMeta::new_readonly(associated_token_program, false), // associated_token_program
             AccountMeta::new_readonly(system_program, false), // system_program
         ];
 
@@ -820,6 +752,7 @@ impl InstructionBuilder {
         data.extend_from_slice(&lat_e7.to_le_bytes());
         data.extend_from_slice(&long_e7.to_le_bytes());
         data.extend_from_slice(&h3_index.to_le_bytes());
+        data.push(0); // shard_id (u8)
 
         Ok(Instruction {
             program_id,
@@ -849,9 +782,14 @@ impl InstructionBuilder {
             &program_id,
         );
 
+        // Find registry shard PDA
+        let shard_id = 0; // Default shard
+        let (shard_pda, _) = Pubkey::find_program_address(&[b"registry_shard", &[shard_id]], &program_id);
+
         let accounts = vec![
             AccountMeta::new(meter_account_pda, false),
             AccountMeta::new(user_account_pda, false),
+            AccountMeta::new(shard_pda, false),
             AccountMeta::new(*registry, false),
             AccountMeta::new(*owner, true),
             AccountMeta::new_readonly(system_program, false),
@@ -1184,6 +1122,13 @@ impl InstructionBuilder {
             accounts,
             data,
         })
+    }
+
+    /// Get token_info PDA
+    fn get_token_info_pda(&self) -> Result<Pubkey> {
+        let program_id = Pubkey::from_str(ENERGY_TOKEN_PROGRAM_ID)?;
+        let (token_info_pda, _) = Pubkey::find_program_address(&[b"token_info"], &program_id);
+        Ok(token_info_pda)
     }
 
     /// Get poa_config PDA
