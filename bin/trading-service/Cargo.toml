@@ -1,0 +1,42 @@
+[package]
+name = "trading-service"
+version.workspace = true
+edition.workspace = true
+description = "GridTokenX Trading Service binary"
+
+[[bin]]
+name = "trading-service"
+path = "src/main.rs"
+
+[dependencies]
+trading-core.workspace = true
+trading-protocol.workspace = true
+trading-engine.workspace = true
+trading-persistence.workspace = true
+trading-infra.workspace = true
+trading-logic.workspace = true
+trading-api.workspace = true
+sqlx.workspace = true
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+
+# Web framework
+axum.workspace = true
+tower-http.workspace = true
+connectrpc.workspace = true
+rustls.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Utilities
+dotenvy.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,48 @@
+[package]
+name = "trading-api"
+version.workspace = true
+edition.workspace = true
+description = "HTTP/gRPC API handlers for GridTokenX trading service"
+
+[dependencies]
+trading-core.workspace = true
+trading-protocol.workspace = true
+trading-logic.workspace = true
+trading-persistence.workspace = true
+trading-infra.workspace = true
+trading-engine.workspace = true
+
+# Web framework
+axum.workspace = true
+tower-http.workspace = true
+connectrpc.workspace = true
+buffa.workspace = true
+http-body.workspace = true
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Types
+chrono.workspace = true
+uuid.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Blockchain (for ServiceRole auth)
+gridtokenx-blockchain-core.workspace = true
+solana-sdk.workspace = true
+
+# Observability
+tracing.workspace = true
+metrics.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# API docs
+utoipa.workspace = true
+
+[lints]
+workspace = true

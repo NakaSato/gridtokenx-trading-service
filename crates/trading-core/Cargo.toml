@@ -1,0 +1,45 @@
+[package]
+name = "trading-core"
+version.workspace = true
+edition.workspace = true
+description = "Domain primitives, error types, and trait definitions for GridTokenX trading"
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Types
+chrono.workspace = true
+uuid.workspace = true
+rust_decimal.workspace = true
+ulid.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Enum utilities
+strum.workspace = true
+strum_macros.workspace = true
+
+# Validation / API docs
+utoipa.workspace = true
+validator.workspace = true
+
+# Database (for sqlx::Type derives on enums, FromRow on persistence boundary types)
+sqlx.workspace = true
+
+# Config
+dotenvy.workspace = true
+tracing.workspace = true
+
+# Async (for trait definitions)
+async-trait.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+once_cell.workspace = true
+
+[lints]
+workspace = true
