@@ -1,0 +1,26 @@
+[package]
+name = "trading-engine"
+version.workspace = true
+edition.workspace = true
+description = "Pure synchronous CDA matching engine for GridTokenX — zero async, zero I/O"
+
+[dependencies]
+trading-core.workspace = true
+
+rust_decimal.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+smallvec.workspace = true
+tracing.workspace = true
+rust_decimal_macros.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "matching_benchmark"
+harness = false
+
+[lints]
+workspace = true

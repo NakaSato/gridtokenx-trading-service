@@ -1,0 +1,54 @@
+[package]
+name = "trading-logic"
+version.workspace = true
+edition.workspace = true
+description = "Domain services and use-case orchestration for GridTokenX trading"
+
+[dependencies]
+trading-core.workspace = true
+trading-engine.workspace = true
+trading-persistence.workspace = true
+trading-infra.workspace = true
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Types
+chrono.workspace = true
+uuid.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+ulid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Blockchain (for settlement provider types)
+solana-sdk.workspace = true
+gridtokenx-blockchain-core.workspace = true
+
+# Data structures
+dashmap.workspace = true
+
+# Observability
+tracing.workspace = true
+metrics.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+rand.workspace = true
+
+# Kafka (for VPP aggregator consumer)
+rdkafka.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+tokio-test.workspace = true
+
+[lints]
+workspace = true

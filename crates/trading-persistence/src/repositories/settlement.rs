@@ -1,0 +1,187 @@
+//! Settlement repository implementation.
+
+use async_trait::async_trait;
+use sqlx::{PgPool, FromRow};
+use uuid::Uuid;
+use rust_decimal::Decimal;
+
+use trading_core::models::{Settlement, SettlementStatus};
+use trading_core::traits::{SettlementRepository, TraitResult};
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Clone, FromRow)]
+pub struct SettlementDb {
+    pub id: Uuid,
+    pub trade_id: Uuid,
+    pub epoch_id: Uuid,
+    pub buyer_id: Uuid,
+    pub seller_id: Uuid,
+    pub buy_order_id: Uuid,
+    pub sell_order_id: Uuid,
+    pub energy_amount: Decimal,
+    pub price_per_kwh: Decimal,
+    pub total_amount: Decimal,
+    pub fee_amount: Decimal,
+    pub wheeling_charge: Option<Decimal>,
+    pub loss_factor: Option<Decimal>,
+    pub loss_cost: Option<Decimal>,
+    pub effective_energy: Option<Decimal>,
+    pub buyer_zone_id: Option<i32>,
+    pub seller_zone_id: Option<i32>,
+    pub net_amount: Decimal,
+    pub status: String,
+    pub transaction_hash: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub processed_at: Option<DateTime<Utc>>,
+    pub buyer_session_token: Option<String>,
+    pub seller_session_token: Option<String>,
+    pub erc_certificate_id: Option<String>,
+    pub erc_transfer_tx: Option<String>,
+    pub retry_count: i32,
+    pub error_message: Option<String>,
+}
+
+impl From<SettlementDb> for Settlement {
+    fn from(db: SettlementDb) -> Self {
+        let status = match db.status.as_str() {
+            "processing" => SettlementStatus::Processing,
+            "completed" | "confirmed" => SettlementStatus::Completed,
+            "failed" => SettlementStatus::Failed,
+            "permanently_failed" => SettlementStatus::PermanentlyFailed,
+            _ => SettlementStatus::Pending,
+        };
+
+        Self {
+            id: db.id,
+            trade_id: db.trade_id,
+            epoch_id: db.epoch_id,
+            buyer_id: db.buyer_id,
+            seller_id: db.seller_id,
+            buy_order_id: db.buy_order_id,
+            sell_order_id: db.sell_order_id,
+            energy_amount: db.energy_amount,
+            price: db.price_per_kwh,
+            total_amount: db.total_amount,
+            fee_amount: db.fee_amount,
+            wheeling_charge: db.wheeling_charge,
+            loss_factor: db.loss_factor,
+            loss_cost: db.loss_cost,
+            effective_energy: db.effective_energy,
+            buyer_zone_id: db.buyer_zone_id,
+            seller_zone_id: db.seller_zone_id,
+            net_amount: db.net_amount,
+            status,
+            blockchain_tx: db.transaction_hash,
+            created_at: db.created_at,
+            confirmed_at: db.processed_at,
+            buyer_session_token: db.buyer_session_token,
+            seller_session_token: db.seller_session_token,
+            erc_certificate_id: db.erc_certificate_id,
+            erc_transfer_tx: db.erc_transfer_tx,
+            retry_count: db.retry_count,
+            error_message: db.error_message,
+        }
+    }
+}
+
+pub struct PostgresSettlementRepository {
+    pool: PgPool,
+}
+
+impl PostgresSettlementRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl SettlementRepository for PostgresSettlementRepository {
+    async fn insert_settlement(&self, s: &Settlement) -> TraitResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO settlements (
+                id, trade_id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
+                energy_amount, price_per_kwh, total_amount, fee_amount,
+                wheeling_charge, loss_factor, loss_cost, effective_energy,
+                buyer_zone_id, seller_zone_id, net_amount, status,
+                buyer_session_token, seller_session_token, transaction_hash,
+                created_at, processed_at, erc_certificate_id, erc_transfer_tx
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+            "#,
+        )
+        .bind(s.id)
+        .bind(s.trade_id)
+        .bind(s.epoch_id)
+        .bind(s.buyer_id)
+        .bind(s.seller_id)
+        .bind(s.buy_order_id)
+        .bind(s.sell_order_id)
+        .bind(s.energy_amount)
+        .bind(s.price)
+        .bind(s.total_amount)
+        .bind(s.fee_amount)
+        .bind(s.wheeling_charge)
+        .bind(s.loss_factor)
+        .bind(s.loss_cost)
+        .bind(s.effective_energy)
+        .bind(s.buyer_zone_id)
+        .bind(s.seller_zone_id)
+        .bind(s.net_amount)
+        .bind(s.status.to_string())
+        .bind(&s.buyer_session_token)
+        .bind(&s.seller_session_token)
+        .bind(&s.blockchain_tx)
+        .bind(s.created_at)
+        .bind(s.confirmed_at)
+        .bind(&s.erc_certificate_id)
+        .bind(&s.erc_transfer_tx)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {
+        let s = sqlx::query_as::<_, SettlementDb>(
+            "SELECT * FROM settlements WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(s.map(Into::into))
+    }
+
+    async fn get_pending_settlements(
+        &self,
+        limit: i64,
+    ) -> TraitResult<Vec<Settlement>> {
+        let settlements = sqlx::query_as::<_, SettlementDb>(
+            "SELECT * FROM settlements WHERE status = 'pending' LIMIT $1"
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(settlements.into_iter().map(Into::into).collect())
+    }
+
+    async fn update_settlement_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        tx_hash: Option<&str>,
+        error: Option<&str>,
+    ) -> TraitResult<()> {
+        sqlx::query(
+            "UPDATE settlements SET status = $1, blockchain_tx_hash = $2, error_message = $3, updated_at = NOW() WHERE id = $4"
+        )
+        .bind(status)
+        .bind(tx_hash)
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}

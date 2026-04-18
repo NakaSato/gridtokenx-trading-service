@@ -1,0 +1,26 @@
+[package]
+name = "trading-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Protobuf / ConnectRPC wire types for GridTokenX trading service"
+
+[dependencies]
+trading-core.workspace = true
+
+serde.workspace = true
+buffa.workspace = true
+connectrpc.workspace = true
+futures.workspace = true
+http-body.workspace = true
+
+[build-dependencies]
+buffa-build.workspace = true
+connectrpc-build.workspace = true
+
+[lints.rust]
+# Generated ConnectRPC/buffa code uses unsafe trait impls (DefaultInstance, DefaultViewInstance)
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"

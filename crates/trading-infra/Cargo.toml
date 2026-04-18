@@ -1,0 +1,68 @@
+[package]
+name = "trading-infra"
+version.workspace = true
+edition.workspace = true
+description = "External integration adapters (blockchain, Kafka, Redis, audit) for GridTokenX trading"
+
+[dependencies]
+trading-core.workspace = true
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Types
+chrono.workspace = true
+uuid.workspace = true
+rust_decimal.workspace = true
+
+# Caching / PubSub
+redis.workspace = true
+rdkafka.workspace = true
+
+# Blockchain
+gridtokenx-blockchain-core.workspace = true
+solana-client.workspace = true
+solana-sdk.workspace = true
+solana-program.workspace = true
+spl-token.workspace = true
+spl-associated-token-account.workspace = true
+spl-token-2022.workspace = true
+solana-transaction-status.workspace = true
+
+# Crypto
+hmac.workspace = true
+sha2.workspace = true
+pbkdf2.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+bs58.workspace = true
+
+# Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Database (for audit logger PgPool)
+sqlx.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+regex.workspace = true
+dotenvy.workspace = true
+rand = "0.8"
+ipnetwork = "0.20"
+utoipa = { version = "4", features = ["chrono", "uuid", "decimal"] }
+
+[lints]
+workspace = true
