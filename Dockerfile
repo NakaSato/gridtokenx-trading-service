@@ -1,7 +1,7 @@
 # =============================================================================
 # GridTokenX Trading Service - Alpine Linux Production Image
 # =============================================================================
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.89-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -18,21 +18,17 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy standalone workspace file for Docker build
-COPY Cargo.docker.toml Cargo.toml
-COPY Cargo.lock ./
+# Copy the whole project to maintain structure for sqlx migrations
+COPY gridtokenx-trading-service/ gridtokenx-trading-service/
+COPY gridtokenx-blockchain-core/ gridtokenx-blockchain-core/
 
-# Copy all workspace members
-COPY gridtokenx-api gridtokenx-api
-COPY gridtokenx-iam-service gridtokenx-iam-service
-COPY gridtokenx-trading-service gridtokenx-trading-service
-COPY gridtokenx-oracle-bridge gridtokenx-oracle-bridge
+WORKDIR /app/gridtokenx-trading-service
 
 # Build in release mode
-RUN cargo build --release --bin gridtokenx-trading-service
+RUN cargo build --release --bin trading-service
 
 # Strip binary to reduce size
-RUN strip /app/target/release/gridtokenx-trading-service
+RUN strip target/release/trading-service
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime (Minimal Debian)
@@ -53,7 +49,14 @@ RUN groupadd -g 1000 appgroup && \
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /app/target/release/gridtokenx-trading-service /app/trading-service
+COPY --from=builder /app/gridtokenx-trading-service/target/release/trading-service /app/trading-service
+COPY --from=builder /app/gridtokenx-trading-service/migrations /app/migrations
+
+# Ensure appuser owns the directory
+RUN chown -R appuser:appgroup /app
+
+# Use non-root user
+USER appuser
 
 # Expose gRPC port (5020) and HTTP metrics port (4020)
 EXPOSE 5020 4020
