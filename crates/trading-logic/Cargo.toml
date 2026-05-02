@@ -38,6 +38,7 @@ metrics.workspace = true
 
 # Error handling
 anyhow.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 
 # Utilities

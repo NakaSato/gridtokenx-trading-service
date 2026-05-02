@@ -31,6 +31,10 @@ pub struct Config {
     pub kafka_topic_prefix: String,
     /// Service role (api or matcher)
     pub role: String,
+    /// Platform user ID for automated settlements (surplus buying)
+    pub platform_user_id: uuid::Uuid,
+    /// Feed-in tariff price per kWh for oracle settlements
+    pub oracle_feed_in_tariff: rust_decimal::Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,12 @@ impl Config {
             kafka_topic_prefix: env::var("KAFKA_TOPIC_PREFIX")
                 .unwrap_or_else(|_| "trading".to_string()),
             role: env::var("TRADING_ROLE").unwrap_or_else(|_| "api".to_string()),
+            platform_user_id: env::var("PLATFORM_USER_ID")
+                .unwrap_or_else(|_| "9d27181d-ab85-4a30-86f9-a9cf4701eb5b".to_string())
+                .parse()?,
+            oracle_feed_in_tariff: env::var("ORACLE_FEED_IN_TARIFF")
+                .unwrap_or_else(|_| "0.10".to_string())
+                .parse()?,
         })
     }
 }

@@ -119,7 +119,7 @@ impl MatcherService {
             // Create settlement record (placeholders for now)
             let _ = self.settlement_repo.insert_settlement(&trading_core::models::Settlement {
                 id: Uuid::new_v4(),
-                trade_id: Uuid::new_v4(),
+                trade_id: Some(Uuid::new_v4()),
                 epoch_id: m.epoch_id,
                 buyer_id: m.buyer_id,
                 seller_id: m.seller_id,

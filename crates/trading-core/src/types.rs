@@ -208,3 +208,73 @@ pub enum UserRole {
     Consumer,
     Corporate,
 }
+
+// ── Futures Enums ────────────────────────────────────────────────────────────
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+    ToSchema, Display, EnumString,
+)]
+#[sqlx(type_name = "futures_order_side", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum FuturesOrderSide {
+    Long,
+    Short,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+    ToSchema, Display, EnumString,
+)]
+#[sqlx(type_name = "futures_order_type", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum FuturesOrderType {
+    Market,
+    Limit,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+    ToSchema, Display, EnumString,
+)]
+#[sqlx(type_name = "futures_order_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FuturesOrderStatus {
+    Pending,
+    Open,
+    Filled,
+    Cancelled,
+    Liquidated,
+}
+
+// ── Carbon Enums ─────────────────────────────────────────────────────────────
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+    ToSchema, Display, EnumString,
+)]
+#[sqlx(type_name = "carbon_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum CarbonStatus {
+    Active,
+    Retired,
+    Transferred,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+    ToSchema, Display, EnumString,
+)]
+#[sqlx(type_name = "carbon_transaction_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum CarbonTransactionStatus {
+    Pending,
+    Completed,
+    Failed,
+    Cancelled,
+}

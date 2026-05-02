@@ -13,6 +13,7 @@ use gridtokenx_blockchain_core::rpc::{BlockchainUtils, instructions::OffchainOrd
 #[derive(Clone)]
 pub struct BlockchainService {
     pub core: Arc<gridtokenx_blockchain_core::BlockchainService>,
+    pub db: Option<sqlx::PgPool>,
 }
 
 impl std::fmt::Debug for BlockchainService {
@@ -27,6 +28,7 @@ impl BlockchainService {
         chain_bridge_url: String,
         cluster: String,
         program_ids: trading_core::config::SolanaProgramsConfig,
+        db: Option<sqlx::PgPool>,
         _metrics_registry: Option<Arc<dyn gridtokenx_blockchain_core::rpc::metrics::BlockchainMetrics>>, // Kept for compatibility
     ) -> Result<Self> {
         info!("Initializing gRPC Blockchain Service via: {}", chain_bridge_url);
@@ -50,6 +52,7 @@ impl BlockchainService {
         
         Ok(Self {
             core: Arc::new(core),
+            db,
         })
     }
 
@@ -609,5 +612,22 @@ impl BlockchainService {
         )?; // Placeholder instruction
         
         self.build_and_send_transaction(vec![instruction], &[authority]).await
+    }
+
+    /// Internal: Resolve primary wallet for a user
+    pub async fn get_user_primary_wallet(&self, user_id: &uuid::Uuid) -> Result<Option<Pubkey>> {
+        let db = self.db.as_ref().ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
+        
+        let wallet_address: Option<String> = sqlx::query_scalar(
+            "SELECT wallet_address FROM user_wallets WHERE user_id = $1 AND is_primary = true"
+        )
+        .bind(user_id)
+        .fetch_optional(db)
+        .await?;
+
+        match wallet_address {
+            Some(addr) => Ok(Some(Self::parse_pubkey(&addr)?)),
+            None => Ok(None),
+        }
     }
 }

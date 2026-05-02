@@ -8,3 +8,4 @@ pub mod rest;
 pub mod middleware;
 pub mod state;
 pub mod startup;
+pub mod auth;

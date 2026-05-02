@@ -1,6 +1,5 @@
 mod builder;
 
-use std::sync::Arc;
 use tracing::{info, error};
 use sqlx::postgres::PgPoolOptions;
 use builder::ServiceBuilder;
@@ -17,32 +16,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("Starting GridTokenX Trading Service (Modular Monolith)");
 
-    // 2. Load environment
-    dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
-    let kafka_brokers = std::env::var("KAFKA_BROKERS").expect("KAFKA_BROKERS must be set");
-    let chain_bridge_url = std::env::var("CHAIN_BRIDGE_URL").expect("CHAIN_BRIDGE_URL must be set");
-    let solana_rpc_url = std::env::var("SOLANA_RPC_URL").expect("SOLANA_RPC_URL must be set");
-    let encryption_secret = std::env::var("ENCRYPTION_SECRET").expect("ENCRYPTION_SECRET must be set");
+    // 2. Load Config
+    let config = std::sync::Arc::new(trading_core::config::Config::from_env()?);
     
     let port: u16 = std::env::var("HTTP_PORT").unwrap_or_else(|_| "8093".to_string()).parse()?;
     let grpc_port: u16 = std::env::var("GRPC_PORT").unwrap_or_else(|_| "8092".to_string()).parse()?;
 
     // 3. Initialize DB
     let pool = PgPoolOptions::new()
-        .max_connections(20)
-        .connect(&database_url)
+        .max_connections(config.max_connections)
+        .connect(&config.database_url)
         .await?;
 
     // 4. Build system
     let (infra, services) = ServiceBuilder::build(
         pool,
-        &redis_url,
-        &kafka_brokers,
-        &chain_bridge_url,
-        &solana_rpc_url,
-        &encryption_secret,
+        config.clone(),
     ).await?;
 
     info!("System assembled successfully");
@@ -69,10 +58,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settlement_worker.run().await;
     });
 
+    let oracle_consumer = services.oracle_consumer.clone();
+    tokio::spawn(async move {
+        if let Err(e) = oracle_consumer.run().await {
+            error!("Oracle consumer failed: {}", e);
+        }
+    });
+
     // 7. Start API Server
     let state = AppState {
         order_repo: infra.order_repo,
         settlement_repo: infra.settlement_repo,
+        futures_repo: infra.futures_repo,
+        carbon_repo: infra.carbon_repo,
+        analytics_repo: infra.analytics_repo,
         events: infra.events,
         blockchain: infra.blockchain,
         audit: infra.audit,

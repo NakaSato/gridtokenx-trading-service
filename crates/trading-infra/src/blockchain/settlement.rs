@@ -360,6 +360,7 @@ impl BlockchainSettlementProvider {
             token_info_pda,
             user_ata,
             *user_wallet,
+            platform_authority.pubkey(),
             amount_atomic
         ).map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
 

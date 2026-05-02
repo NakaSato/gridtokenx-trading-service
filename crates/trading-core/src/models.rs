@@ -345,7 +345,7 @@ impl std::fmt::Display for SettlementStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settlement {
     pub id: Uuid,
-    pub trade_id: Uuid,
+    pub trade_id: Option<Uuid>,
     pub epoch_id: Uuid,
     pub buyer_id: Uuid,
     pub seller_id: Uuid,
@@ -452,4 +452,123 @@ pub struct VppMetricsUpdate {
     pub cluster_id: String,
     pub delta_energy_kwh: f64,
     pub current_power_kw: f64,
+}
+
+// ── DAO / Governance Models ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ZoneConfig {
+    pub zone_id: i32,
+    #[schema(value_type = String)]
+    pub incentive_multiplier: Decimal,
+    #[schema(value_type = String)]
+    pub wheeling_charge: Decimal,
+    pub maintenance_mode: bool,
+    pub last_updated: DateTime<Utc>,
+}
+
+// ── Modernized Platform Models ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FuturesProduct {
+    pub id: Uuid,
+    pub symbol: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+    #[schema(value_type = String)]
+    pub contract_size: Decimal,
+    pub expiration_date: DateTime<Utc>,
+    #[schema(value_type = String)]
+    pub current_price: Decimal,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FuturesOrder {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub product_id: Uuid,
+    pub side: crate::types::FuturesOrderSide,
+    pub order_type: crate::types::FuturesOrderType,
+    #[schema(value_type = String)]
+    pub quantity: Decimal,
+    #[schema(value_type = String)]
+    pub price: Decimal,
+    pub leverage: i32,
+    pub status: crate::types::FuturesOrderStatus,
+    #[schema(value_type = String)]
+    pub filled_quantity: Decimal,
+    #[schema(value_type = String)]
+    pub average_fill_price: Option<Decimal>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FuturesPosition {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub product_id: Uuid,
+    pub side: crate::types::FuturesOrderSide,
+    #[schema(value_type = String)]
+    pub quantity: Decimal,
+    #[schema(value_type = String)]
+    pub entry_price: Decimal,
+    #[schema(value_type = String)]
+    pub current_price: Decimal,
+    pub leverage: i32,
+    #[schema(value_type = String)]
+    pub margin_used: Decimal,
+    #[schema(value_type = String)]
+    pub unrealized_pnl: Decimal,
+    #[schema(value_type = String)]
+    pub liquidation_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CarbonCredit {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    pub source: String,
+    pub status: crate::types::CarbonStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CarbonTransaction {
+    pub id: Uuid,
+    pub from_user_id: Option<Uuid>,
+    pub to_user_id: Uuid,
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    #[schema(value_type = String)]
+    pub price_per_credit: Option<Decimal>,
+    pub status: crate::types::CarbonTransactionStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserAnalytics {
+    #[schema(value_type = String)]
+    pub total_traded_kwh: Decimal,
+    #[schema(value_type = String)]
+    pub total_spent_grid: Decimal,
+    #[schema(value_type = String)]
+    pub total_earned_grid: Decimal,
+    #[schema(value_type = String)]
+    pub carbon_offset_tons: Decimal,
+    pub reliability_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TransactionData {
+    pub id: Uuid,
+    pub transaction_type: String,
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    pub asset: String,
+    pub status: String,
+    pub timestamp: DateTime<Utc>,
+    pub reference_id: Option<Uuid>,
 }

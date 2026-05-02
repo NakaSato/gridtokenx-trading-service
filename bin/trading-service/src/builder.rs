@@ -1,18 +1,24 @@
 use std::sync::Arc;
 use sqlx::PgPool;
 use trading_core::traits::*;
-use trading_persistence::repositories::{PostgresOrderRepository, PostgresSettlementRepository};
+use trading_persistence::repositories::{
+    PostgresOrderRepository, PostgresSettlementRepository, PostgresFuturesRepository, 
+    PostgresCarbonRepository, PostgresAnalyticsRepository
+};
 use trading_infra::blockchain::BlockchainService;
 use trading_infra::cache::CacheService;
 use trading_infra::audit::AuditLogger;
-use trading_infra::events::KafkaEventBus;
-use trading_logic::{SettlementService, MatcherService, StaticTopology};
+use uuid::Uuid;
+use trading_logic::{SettlementService, MatcherService, GridAwareTopology};
 
 /// Container for all infrastructure components
 pub struct Infrastructure {
     pub db: PgPool,
     pub order_repo: Arc<dyn OrderRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,
+    pub futures_repo: Arc<dyn FuturesRepository>,
+    pub carbon_repo: Arc<dyn CarbonRepository>,
+    pub analytics_repo: Arc<dyn AnalyticsRepository>,
     pub blockchain: Arc<dyn BlockchainGateway>,
     pub cache: Arc<dyn CacheStore>,
     pub audit: Arc<dyn AuditLog>,
@@ -23,6 +29,7 @@ pub struct Infrastructure {
 pub struct AppServices {
     pub settlement: Arc<SettlementService>,
     pub matcher: Arc<MatcherService>,
+    pub oracle_consumer: Arc<trading_logic::workers::OracleConsumer>,
 }
 
 /// Builder to assemble the system
@@ -31,20 +38,25 @@ pub struct ServiceBuilder;
 impl ServiceBuilder {
     pub async fn build(
         db_pool: PgPool,
-        redis_url: &str,
-        kafka_brokers: &str,
-        chain_bridge_url: &str,
-        solana_rpc_url: &str,
-        _encryption_secret: &str,
+        config: Arc<trading_core::config::Config>,
     ) -> Result<(Infrastructure, AppServices), Box<dyn std::error::Error>> {
         // 1. Infrastructure
+        let redis_url = &config.redis_url;
+        let kafka_brokers = &config.kafka_bootstrap_servers;
+        let chain_bridge_url = &config.chain_bridge_url;
+        let encryption_secret = &config.encryption_secret;
+
         let order_repo = Arc::new(PostgresOrderRepository::new(db_pool.clone()));
         let settlement_repo = Arc::new(PostgresSettlementRepository::new(db_pool.clone()));
+        let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
+        let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
+        let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
         
         let blockchain: Arc<dyn BlockchainGateway> = Arc::new(BlockchainService::new(
             chain_bridge_url.to_string(),
             "devnet".to_string(),
             trading_core::config::SolanaProgramsConfig::default(),
+            Some(db_pool.clone()),
             None,
         ).await?);
 
@@ -59,12 +71,24 @@ impl ServiceBuilder {
         });
         
         let audit: Arc<dyn AuditLog> = Arc::new(audit_logger);
-        let events: Arc<dyn EventPublisher> = Arc::new(KafkaEventBus::new(kafka_brokers, Some("trading")).await?);
+        
+        // Use the unified EventBus (supports Redis Streams for Telemetry)
+        let event_bus = Arc::new(trading_infra::events::EventBus::new(
+            redis_url,
+            false, // kafka_enabled: disable for now to focus on Redis telemetry
+            Some(kafka_brokers),
+            Some("trading"),
+        ).await?);
+        
+        let events: Arc<dyn EventPublisher> = event_bus.clone();
 
         let infra = Infrastructure {
             db: db_pool,
             order_repo: order_repo.clone(),
             settlement_repo: settlement_repo.clone(),
+            futures_repo,
+            carbon_repo,
+            analytics_repo,
             blockchain: blockchain.clone(),
             cache,
             audit: audit.clone(),
@@ -76,18 +100,29 @@ impl ServiceBuilder {
             settlement_repo.clone(),
             blockchain.clone(),
             audit.clone(),
+            config.platform_user_id,
+            config.oracle_feed_in_tariff,
         ));
 
         let matcher_service = Arc::new(MatcherService::new(
             order_repo.clone(),
             settlement_repo.clone(),
             events.clone(),
-            Arc::new(StaticTopology),
+            Arc::new(GridAwareTopology::new()),
+        ));
+
+        // Initialize Oracle Consumer
+        let oracle_consumer = Arc::new(trading_logic::workers::OracleConsumer::new(
+            events.clone(),
+            settlement_service.clone(),
+            "trading_oracle_group".to_string(),
+            format!("trading_oracle_{}", Uuid::new_v4()),
         ));
 
         let services = AppServices {
             settlement: settlement_service,
             matcher: matcher_service,
+            oracle_consumer,
         };
 
         Ok((infra, services))

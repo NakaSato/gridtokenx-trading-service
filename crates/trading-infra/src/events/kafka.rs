@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::time::Duration;
+use std::sync::Arc;
 use tracing::{error, info};
 
 use trading_core::events::Event;
@@ -17,6 +18,7 @@ pub struct KafkaTopics {
     pub settlements: String,
     pub triggers: String,
     pub participants: String,
+    pub telemetry: String,
 }
 
 impl KafkaTopics {
@@ -28,6 +30,7 @@ impl KafkaTopics {
             settlements: format!("{}.settlements", prefix),
             triggers: format!("{}.triggers", prefix),
             participants: format!("{}.participants", prefix),
+            telemetry: format!("{}.telemetry", prefix),
         }
     }
 }
@@ -187,6 +190,10 @@ impl KafkaEventBus {
                 &self.topics.participants,
                 payload.user_id.to_string(),
             ),
+            Event::OracleReading(payload) => (
+                &self.topics.telemetry,
+                payload.meter_id.clone(),
+            ),
         }
     }
 }
@@ -208,6 +215,41 @@ impl EventPublisher for KafkaEventBus {
             .await
             .map(|_| ())
             .map_err(|(e, _)| trading_core::error::ApiError::Internal(e.to_string()))
+    }
+
+    async fn create_consumer_group(&self, _group_name: &str) -> TraitResult<()> {
+        // Kafka consumer groups are created automatically on first consume
+        Ok(())
+    }
+
+    async fn consume_events(
+        &self,
+        group_name: &str,
+        _consumer_name: &str,
+        handler: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>> + Send + Sync>,
+    ) -> TraitResult<()> {
+        let consumer_topics = vec![
+            self.topics.orders_created.clone(),
+            self.topics.orders_matched.clone(),
+            self.topics.orders_updated.clone(),
+            self.topics.settlements.clone(),
+            self.topics.triggers.clone(),
+            self.topics.participants.clone(),
+            self.topics.telemetry.clone(),
+        ];
+
+        let consumer = crate::events::kafka_consumer::KafkaConsumer::new(
+            &self.bootstrap_servers,
+            consumer_topics,
+            Some(group_name.to_string()),
+        ).map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
+
+        consumer.stream(move |event| {
+            let h = handler.clone();
+            async move {
+                h(event).await.map_err(|e| anyhow::anyhow!(e.to_string()))
+            }
+        }).await.map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 }
 

@@ -1,11 +1,17 @@
 use std::sync::Arc;
-use trading_core::traits::{OrderRepository, SettlementRepository, EventPublisher, BlockchainGateway, AuditLog};
+use trading_core::traits::{
+    OrderRepository, SettlementRepository, EventPublisher, BlockchainGateway, 
+    AuditLog, FuturesRepository, CarbonRepository, AnalyticsRepository
+};
 use trading_logic::{MatcherService, SettlementService};
 
 #[derive(Clone)]
 pub struct AppState {
     pub order_repo: Arc<dyn OrderRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,
+    pub futures_repo: Arc<dyn FuturesRepository>,
+    pub carbon_repo: Arc<dyn CarbonRepository>,
+    pub analytics_repo: Arc<dyn AnalyticsRepository>,
     pub events: Arc<dyn EventPublisher>,
     pub blockchain: Arc<dyn BlockchainGateway>,
     pub audit: Arc<dyn AuditLog>,

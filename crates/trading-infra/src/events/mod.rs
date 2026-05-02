@@ -2,6 +2,7 @@ pub mod kafka;
 pub mod kafka_consumer;
 
 use trading_core::events::Event;
+use std::sync::Arc;
 use anyhow::Result;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client, RedisResult};
@@ -121,6 +122,46 @@ impl EventBus {
 
                 consumer.stream(handler).await
             }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl trading_core::traits::EventPublisher for EventBus {
+    async fn publish(&self, event: Event) -> trading_core::traits::TraitResult<()> {
+        self.publish(&event).await.map(|_| ()).map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+    }
+
+    async fn publish_to_topic(&self, _topic: &str, event: Event) -> trading_core::traits::TraitResult<()> {
+        match self {
+            Self::Redis(bus) => bus.publish(&event).await.map(|_| ()).map_err(|e| trading_core::error::ApiError::Internal(e.to_string())),
+            Self::Kafka(bus) => trading_core::traits::EventPublisher::publish_to_topic(bus, _topic, event).await,
+        }
+    }
+
+    async fn create_consumer_group(&self, group_name: &str) -> trading_core::traits::TraitResult<()> {
+        self.create_consumer_group(group_name).await.map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+    }
+
+    async fn consume_events(
+        &self,
+        group_name: &str,
+        consumer_name: &str,
+        handler: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = trading_core::traits::TraitResult<()>> + Send>> + Send + Sync>,
+    ) -> trading_core::traits::TraitResult<()> {
+        match self {
+            Self::Redis(bus) => bus.consume_events::<_, std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>>(
+                group_name, 
+                consumer_name, 
+                move |event| {
+                    let h = handler.clone();
+                    let fut = async move {
+                        h(event).await.map_err(|e: trading_core::error::ApiError| anyhow::anyhow!(e.to_string()))
+                    };
+                    Box::pin(fut)
+                }
+            ).await.map_err(|e: anyhow::Error| trading_core::error::ApiError::Internal(e.to_string())),
+            Self::Kafka(bus) => trading_core::traits::EventPublisher::consume_events(bus, group_name, consumer_name, handler).await,
         }
     }
 }

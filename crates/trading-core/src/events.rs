@@ -34,6 +34,7 @@ pub enum Event {
     UserRegistered(UserRegisteredPayload),
     UserOnboarded(UserOnboardedPayload),
     UserWalletLinked(UserWalletLinkedPayload),
+    OracleReading(OracleReadingPayload),
 }
 
 /// Lightweight payload for OrderCreated events.
@@ -118,4 +119,18 @@ pub struct SettlementRequestedPayload {
     pub buyer_id: Uuid,
     pub seller_id: Uuid,
     pub timestamp: DateTime<Utc>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleReadingPayload {
+    pub reading_id: Uuid,
+    pub meter_id: String,
+    pub serial_number: String,
+    pub user_id: Option<Uuid>,
+    pub wallet_address: Option<String>,
+    pub zone_id: Option<i32>,
+    pub timestamp: DateTime<Utc>,
+    pub kwh: Decimal,
+    pub energy_generated: Option<Decimal>,
+    pub energy_consumed: Option<Decimal>,
+    pub meter_signature: Option<String>,
 }

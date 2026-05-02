@@ -95,6 +95,7 @@ strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"
 smallvec = { version = "1.13", features = ["union"] }
 utoipa = { version = "5.0", features = ["decimal", "chrono", "uuid"] }
+parking_lot = "0.12"
 
 # ── Caching / PubSub ────────────────────────────────────────────────────────
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }

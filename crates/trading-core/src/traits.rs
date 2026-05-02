@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -130,6 +131,39 @@ pub trait RecurringOrderRepository: Send + Sync {
     ) -> TraitResult<()>;
 }
 
+/// Futures persistence operations.
+#[async_trait]
+pub trait FuturesRepository: Send + Sync {
+    async fn get_products(&self) -> TraitResult<Vec<crate::models::FuturesProduct>>;
+    async fn get_product(&self, id: Uuid) -> TraitResult<Option<crate::models::FuturesProduct>>;
+    async fn insert_order(&self, order: &crate::models::FuturesOrder) -> TraitResult<()>;
+    async fn get_orders_by_user(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::FuturesOrder>>;
+    async fn get_positions_by_user(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::FuturesPosition>>;
+    async fn close_position(&self, position_id: Uuid) -> TraitResult<()>;
+}
+
+/// Carbon credits persistence operations.
+#[async_trait]
+pub trait CarbonRepository: Send + Sync {
+    async fn get_balance(&self, user_id: Uuid) -> TraitResult<Decimal>;
+    async fn get_history(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::CarbonCredit>>;
+    async fn get_transactions(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::CarbonTransaction>>;
+    async fn insert_transaction(&self, tx: &crate::models::CarbonTransaction) -> TraitResult<()>;
+}
+
+/// Analytics and user data operations.
+#[async_trait]
+pub trait AnalyticsRepository: Send + Sync {
+    async fn get_user_stats(&self, user_id: Uuid) -> TraitResult<crate::models::UserAnalytics>;
+    async fn get_user_transactions(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::TransactionData>>;
+}
+
+/// Wallet and balance operations.
+#[async_trait]
+pub trait BalanceRepository: Send + Sync {
+    async fn get_wallet_balance(&self, address: &str) -> TraitResult<Decimal>;
+}
+
 // ── Infrastructure Traits ────────────────────────────────────────────────────
 
 /// Event publishing (Kafka / Redis Streams).
@@ -140,6 +174,20 @@ pub trait EventPublisher: Send + Sync {
 
     /// Publish a domain event to a specific topic.
     async fn publish_to_topic(&self, topic: &str, event: Event) -> TraitResult<()>;
+
+    /// Subscribe to events and process them with a handler.
+    async fn create_consumer_group(&self, group_name: &str) -> TraitResult<()>;
+    
+    /// Consume events from a stream/topic.
+    async fn consume_events(
+        &self,
+        group_name: &str,
+        consumer_name: &str,
+        handler: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>> + Send + Sync>,
+    ) -> TraitResult<()>;
+    
+    // Note: for real consumption, we usually start a long-running loop.
+    // The trait might be better as an 'EventBus' trait.
 }
 
 /// Blockchain gateway for Solana operations.
@@ -154,11 +202,22 @@ pub trait BlockchainGateway: Send + Sync {
     /// Get on-chain token balance for a user.
     async fn get_token_balance(&self, wallet_address: &str) -> TraitResult<u64>;
 
+    /// Get on-chain zone configuration (multiplier, etc).
+    async fn get_zone_config(&self, zone_id: i32) -> TraitResult<crate::models::ZoneConfig>;
+
     /// Execute a settlement on-chain.
     async fn execute_settlement(
         &self,
         settlement: &crate::models::Settlement,
     ) -> TraitResult<crate::models::SettlementTransaction>;
+
+    /// Issue an ERC certificate on-chain.
+    async fn issue_erc(
+        &self,
+        user_id: Uuid,
+        meter_id: &str,
+        energy_amount: Decimal,
+    ) -> TraitResult<String>;
 }
 
 /// Cache store (Redis).

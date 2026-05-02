@@ -13,7 +13,7 @@ pub mod trigger_evaluator;
 pub mod vpp;
 pub mod workers;
 
-pub use energy::StaticTopology;
+pub use energy::GridAwareTopology;
 pub use matcher_service::MatcherService;
 pub use settlement::SettlementService;
 pub use workers::{MatcherWorker, SettlementWorker};
