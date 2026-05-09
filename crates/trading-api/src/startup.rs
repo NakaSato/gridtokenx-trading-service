@@ -37,6 +37,8 @@ pub async fn run(state: AppState, port: u16, grpc_port: u16, token: Cancellation
         .route("/api/v1/users/me/carbon/history", axum::routing::get(crate::rest::get_carbon_history))
         .route("/api/v1/users/me/carbon/transactions", axum::routing::get(crate::rest::get_carbon_transactions))
         .route("/api/v1/users/me/carbon/transfer", axum::routing::post(crate::rest::transfer_carbon_credits))
+        // Settlement (Oracle Bridge)
+        .route("/api/v1/settlement/generation-mint", axum::routing::post(crate::rest::settle_generation_mint))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 

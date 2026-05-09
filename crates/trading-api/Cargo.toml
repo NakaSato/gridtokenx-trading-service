@@ -38,6 +38,9 @@ solana-sdk.workspace = true
 # Observability
 tracing.workspace = true
 metrics.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+bs58.workspace = true
 
 # Error handling
 anyhow.workspace = true

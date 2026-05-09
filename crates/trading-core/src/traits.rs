@@ -218,6 +218,14 @@ pub trait BlockchainGateway: Send + Sync {
         meter_id: &str,
         energy_amount: Decimal,
     ) -> TraitResult<String>;
+    
+    /// Execute on-chain generation mint.
+    async fn execute_generation_mint(
+        &self,
+        user_wallet: &str,
+        energy_amount: Decimal,
+        timestamp: i64,
+    ) -> TraitResult<String>;
 }
 
 /// Cache store (Redis).

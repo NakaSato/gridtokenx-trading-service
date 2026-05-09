@@ -1,4 +1,5 @@
 use axum::{Json, extract::{State, Path, Query}, response::IntoResponse};
+use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::state::AppState;
@@ -500,4 +501,75 @@ pub async fn transfer_carbon_credits(
         "transaction_id": Uuid::new_v4().to_string(),
         "status": "pending",
     })))
+}
+
+// =============================================================================
+// Settlement Handlers (Oracle Bridge)
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct GenerationMintRequest {
+    pub user_id: Uuid,
+    pub meter_serial: String,
+    pub energy_generated_kwh: Decimal,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenerationMintResponse {
+    pub success: bool,
+    pub signature: String,
+    pub amount_minted: String,
+}
+
+pub async fn settle_generation_mint(
+    State(state): State<AppState>,
+    Json(req): Json<GenerationMintRequest>,
+) -> Result<Json<GenerationMintResponse>, (axum::http::StatusCode, String)> {
+    info!("Processing generation mint settlement for user: {}", req.user_id);
+
+    // 1. Verify Signature (Oracle Bridge Public Key)
+    let public_key_str = &state.settlement.oracle_bridge_public_key;
+    let public_key_bytes = bs58::decode(public_key_str).into_vec()
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid public key config: {}", e)))?;
+    
+    use ed25519_dalek::{Verifier, Signature as EdSignature, VerifyingKey};
+    
+    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes.try_into().map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Invalid public key length".to_string()))?)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create verifying key: {}", e)))?;
+
+    let signature_bytes = bs58::decode(&req.signature).into_vec()
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid signature format: {}", e)))?;
+    
+    let signature = EdSignature::from_bytes(&signature_bytes.try_into().map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid signature length".to_string()))?);
+
+    // Construct payload for verification (must match Oracle Bridge)
+    let message = format!(
+        "{}:{}:{}:{}:{}",
+        req.user_id,
+        req.meter_serial,
+        req.energy_generated_kwh,
+        req.start_time,
+        req.end_time
+    );
+
+    if let Err(e) = verifying_key.verify(message.as_bytes(), &signature) {
+        error!("Signature verification failed for oracle settlement: {}", e);
+        return Err((axum::http::StatusCode::UNAUTHORIZED, "Invalid oracle signature".to_string()));
+    }
+
+    // 2. Execute Minting Logic
+    let result = state.settlement.execute_generation_mint(
+        req.user_id,
+        req.energy_generated_kwh,
+        req.end_time,
+    ).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Settlement failed: {}", e)))?;
+
+    Ok(Json(GenerationMintResponse {
+        success: true,
+        signature: result,
+        amount_minted: req.energy_generated_kwh.to_string(),
+    }))
 }

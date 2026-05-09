@@ -33,25 +33,34 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
     }
 
     async fn get_user_transactions(&self, user_id: Uuid) -> TraitResult<Vec<TransactionData>> {
-        // Query the transactions table
-        let txs = sqlx::query!(
+        #[derive(sqlx::FromRow)]
+        struct TxRow {
+            id: Uuid,
+            tx_type: String,
+            total_amount: Decimal,
+            asset: String,
+            status: String,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        let txs = sqlx::query_as::<_, TxRow>(
             r#"
-            SELECT id, 'trading' as "tx_type!", total_amount, 'GRID' as "asset!", status::text as "status!", created_at as "created_at!"
+            SELECT id, 'trading' as tx_type, total_amount, 'GRID' as asset, status::text as status, created_at
             FROM settlements
             WHERE buyer_id = $1 OR seller_id = $1
             ORDER BY created_at DESC
             LIMIT 50
             "#,
-            user_id
         )
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(txs.into_iter().map(|t| TransactionData {
             id: t.id,
-            transaction_type: t.tx_type.to_string(),
+            transaction_type: t.tx_type,
             amount: t.total_amount,
-            asset: t.asset.to_string(),
+            asset: t.asset,
             status: t.status,
             timestamp: t.created_at,
             reference_id: None,

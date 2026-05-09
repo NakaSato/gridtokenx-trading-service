@@ -102,6 +102,7 @@ impl ServiceBuilder {
             audit.clone(),
             config.platform_user_id,
             config.oracle_feed_in_tariff,
+            config.oracle_bridge_public_key.clone(),
         ));
 
         let matcher_service = Arc::new(MatcherService::new(

@@ -35,11 +35,11 @@ impl BlockchainGateway for BlockchainService {
         Ok(true)
     }
 
-    async fn get_user_wallet(&self, _user_id: Uuid) -> TraitResult<Option<String>> {
-        // This usually requires a DB lookup which infra shouldn't do directly.
-        // In a modular monolith, this might be better handled by a service that
-        // composes persistence and blockchain.
-        Ok(None)
+    async fn get_user_wallet(&self, user_id: Uuid) -> TraitResult<Option<String>> {
+        let pubkey = self.get_user_primary_wallet(&user_id).await
+            .map_err(|e| trading_core::error::ApiError::Internal(format!("Failed to resolve user wallet: {}", e)))?;
+        
+        Ok(pubkey.map(|p| p.to_string()))
     }
 
     async fn get_token_balance(&self, wallet_address: &str) -> TraitResult<u64> {
@@ -122,5 +122,23 @@ impl BlockchainGateway for BlockchainService {
 
         info!("ERC issued successfully: {} (Signature: {})", cert_id, signature);
         Ok(signature.to_string())
+    }
+
+    async fn execute_generation_mint(
+        &self,
+        user_wallet: &str,
+        energy_amount: Decimal,
+        timestamp: i64,
+    ) -> TraitResult<String> {
+        use std::str::FromStr;
+        let wallet_pubkey = Pubkey::from_str(user_wallet)
+            .map_err(|e| trading_core::error::ApiError::Validation(format!("Invalid wallet address: {}", e)))?;
+
+        let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
+        provider.execute_generation_mint(
+            &wallet_pubkey,
+            energy_amount,
+            timestamp,
+        ).await
     }
 }

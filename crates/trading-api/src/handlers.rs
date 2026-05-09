@@ -222,9 +222,49 @@ impl TradingService for TradingGrpcService {
     async fn get_token_balance(&self, _ctx: Context, _req: OwnedView<GetTokenBalanceRequestView<'static>>) -> Result<(TokenBalanceResponse, Context), ConnectError> {
         Ok((TokenBalanceResponse::default(), _ctx))
     }
-    async fn settle_generation_mint(&self, _ctx: Context, _req: OwnedView<SettleGenerationMintRequestView<'static>>) -> Result<(SettleGenerationMintResponse, Context), ConnectError> {
-        Ok((SettleGenerationMintResponse::default(), _ctx))
+    async fn settle_generation_mint(&self, _ctx: Context, request: OwnedView<SettleGenerationMintRequestView<'static>>) -> Result<(SettleGenerationMintResponse, Context), ConnectError> {
+        info!("💠 SettleGenerationMint: meter={}, user={}", request.meter_serial, request.user_id);
+
+        // 1. Verify Oracle Signature
+        // (Reusable logic across REST and gRPC)
+        let is_verified = verify_oracle_signature(
+            &request.meter_serial,
+            &request.user_id,
+            &request.start_time,
+            &request.end_time,
+            request.energy_generated_kwh,
+            request.energy_consumed_kwh,
+            &request.signature,
+            &self.state.settlement.oracle_bridge_public_key
+        ).map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e))?;
+
+        if !is_verified {
+            return Err(ConnectError::new(ErrorCode::Unauthenticated, "Invalid Oracle signature"));
+        }
+
+        let user_id = Uuid::parse_str(request.user_id)
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid user_id: {}", e)))?;
+
+        let amount = Decimal::from_f64_retain(request.energy_generated_kwh)
+            .ok_or_else(|| ConnectError::new(ErrorCode::InvalidArgument, "Invalid energy_amount"))?;
+
+        // 2. Execute via SettlementService
+        let tx_sig = self.state.settlement.execute_generation_mint(
+            user_id,
+            amount,
+            chrono::Utc::now().timestamp()
+        ).await.map_err(|e| {
+            error!("Settlement failed: {}", e);
+            ConnectError::new(ErrorCode::Internal, "Blockchain execution failed")
+        })?;
+
+        let mut res = SettleGenerationMintResponse::default();
+        res.tx_signature = tx_sig;
+        res.status = "success".to_string();
+
+        Ok((res, _ctx))
     }
+
     async fn create_conditional_order(&self, _ctx: Context, _req: OwnedView<CreateConditionalOrderRequestView<'static>>) -> Result<(TradingResponse, Context), ConnectError> {
         Ok((TradingResponse::default(), _ctx))
     }
@@ -264,4 +304,37 @@ impl TradingService for TradingGrpcService {
     async fn dispatch_vpp(&self, _ctx: Context, _req: OwnedView<DispatchVppRequestView<'static>>) -> Result<(TradingResponse, Context), ConnectError> {
         Ok((TradingResponse::default(), _ctx))
     }
+}
+
+/// Helper to verify Ed25519 signature (Shared logic)
+fn verify_oracle_signature(
+    meter_serial: &str,
+    user_id: &str,
+    start_time: &str,
+    end_time: &str,
+    energy_generated: f64,
+    energy_consumed: f64,
+    signature_hex: &str,
+    public_key_bs58: &str
+) -> Result<bool, String> {
+    use ed25519_dalek::{Verifier, Signature, VerifyingKey};
+    use std::convert::TryFrom;
+
+    let message = format!("{}:{}:{}:{}:{}:{}", 
+        meter_serial, user_id, start_time, end_time, energy_generated, energy_consumed
+    );
+
+    let pubkey_bytes = bs58::decode(public_key_bs58).into_vec()
+        .map_err(|e| format!("Invalid public key: {}", e))?;
+    
+    let verifying_key = VerifyingKey::try_from(pubkey_bytes.as_slice())
+        .map_err(|e| format!("Invalid public key bytes: {}", e))?;
+
+    let sig_bytes = hex::decode(signature_hex)
+        .map_err(|e| format!("Invalid signature hex: {}", e))?;
+    
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|e| format!("Invalid signature bytes: {}", e))?;
+
+    Ok(verifying_key.verify(message.as_bytes(), &signature).is_ok())
 }
