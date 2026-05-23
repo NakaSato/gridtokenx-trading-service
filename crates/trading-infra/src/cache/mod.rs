@@ -291,7 +291,7 @@ impl CacheStore for CacheService {
     async fn get(&self, key: &str) -> TraitResult<Option<String>> {
         let mut conn = self.connection_manager.clone();
         let result: RedisResult<Option<String>> = conn.get(key).await;
-        
+
         match result {
             Ok(val) => Ok(val),
             Err(e) => {
@@ -304,7 +304,7 @@ impl CacheStore for CacheService {
     async fn set(&self, key: &str, value: &str, ttl_secs: u64) -> TraitResult<()> {
         let mut conn = self.connection_manager.clone();
         let result: RedisResult<()> = conn.set_ex(key, value, ttl_secs).await;
-        
+
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -317,7 +317,7 @@ impl CacheStore for CacheService {
     async fn delete(&self, key: &str) -> TraitResult<()> {
         let mut conn = self.connection_manager.clone();
         let result: RedisResult<i32> = conn.del(key).await;
-        
+
         match result {
             Ok(_) => Ok(()),
             Err(e) => {

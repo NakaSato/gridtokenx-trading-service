@@ -9,8 +9,17 @@ use utoipa::ToSchema;
 // ── Order Enums ──────────────────────────────────────────────────────────────
 
 #[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type,
-    PartialEq, Eq, ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    PartialEq,
+    Eq,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "order_type", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -30,8 +39,17 @@ impl OrderType {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "order_side", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -51,8 +69,17 @@ impl OrderSide {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "order_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -86,8 +113,17 @@ impl OrderStatus {
 // ── Time-in-Force ────────────────────────────────────────────────────────────
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "time_in_force", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -111,8 +147,17 @@ impl Default for TimeInForce {
 
 /// Type of conditional order trigger
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "trigger_type", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -128,8 +173,17 @@ pub enum TriggerType {
 
 /// Status of a conditional order trigger
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "trigger_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -149,8 +203,17 @@ pub enum TriggerStatus {
 
 /// Interval type for recurring orders
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "interval_type", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -164,8 +227,17 @@ pub enum IntervalType {
 
 /// Status of a recurring order
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "recurring_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -180,8 +252,17 @@ pub enum RecurringStatus {
 // ── Epoch Enums ──────────────────────────────────────────────────────────────
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "epoch_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -195,10 +276,7 @@ pub enum EpochStatus {
 
 // ── User Role ────────────────────────────────────────────────────────────────
 
-#[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, ToSchema,
-    Display, EnumString,
-)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, sqlx::Type, ToSchema, Display, EnumString)]
 #[sqlx(type_name = "user_role", rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum UserRole {
@@ -212,8 +290,17 @@ pub enum UserRole {
 // ── Futures Enums ────────────────────────────────────────────────────────────
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "futures_order_side", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -224,8 +311,17 @@ pub enum FuturesOrderSide {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "futures_order_type", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -236,8 +332,17 @@ pub enum FuturesOrderType {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "futures_order_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -253,8 +358,17 @@ pub enum FuturesOrderStatus {
 // ── Carbon Enums ─────────────────────────────────────────────────────────────
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "carbon_status", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -266,8 +380,17 @@ pub enum CarbonStatus {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
-    ToSchema, Display, EnumString,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
 )]
 #[sqlx(type_name = "carbon_transaction_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]

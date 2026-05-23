@@ -27,7 +27,7 @@ impl VppRepository for PostgresVppRepository {
         .bind(cluster_id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(cluster)
     }
 
@@ -42,11 +42,16 @@ impl VppRepository for PostgresVppRepository {
         .bind(meter_id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(member)
     }
 
-    async fn update_cluster_metrics(&self, cluster_id: &str, stored_kwh: f64, soc: f64) -> TraitResult<()> {
+    async fn update_cluster_metrics(
+        &self,
+        cluster_id: &str,
+        stored_kwh: f64,
+        soc: f64,
+    ) -> TraitResult<()> {
         sqlx::query(
             r#"UPDATE vpp_clusters 
                SET current_stored_kwh = $2,
@@ -59,7 +64,7 @@ impl VppRepository for PostgresVppRepository {
         .bind(soc)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
 }

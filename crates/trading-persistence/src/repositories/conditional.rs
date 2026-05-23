@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{PgPool, FromRow};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use trading_core::models::ConditionalOrder;
@@ -61,7 +61,7 @@ impl PostgresConditionalOrderRepository {
 impl ConditionalOrderRepository for PostgresConditionalOrderRepository {
     async fn get_pending_conditional_orders(&self) -> TraitResult<Vec<ConditionalOrder>> {
         let orders = sqlx::query_as::<_, ConditionalOrderDb>(
-            "SELECT * FROM trading_orders WHERE trigger_status = 'pending'"
+            "SELECT * FROM trading_orders WHERE trigger_status = 'pending'",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -86,13 +86,9 @@ impl ConditionalOrderRepository for PostgresConditionalOrderRepository {
         Ok(())
     }
 
-    async fn update_peak_price(
-        &self,
-        id: Uuid,
-        peak_price: Decimal,
-    ) -> TraitResult<()> {
+    async fn update_peak_price(&self, id: Uuid, peak_price: Decimal) -> TraitResult<()> {
         sqlx::query(
-            "UPDATE trading_orders SET last_peak_price = $1, updated_at = NOW() WHERE id = $2"
+            "UPDATE trading_orders SET last_peak_price = $1, updated_at = NOW() WHERE id = $2",
         )
         .bind(peak_price)
         .bind(id)

@@ -39,20 +39,20 @@ check_response "$HEALTH_RESPONSE" 200 "Health Check"
 echo -e "\n${YELLOW}2. Testing Market Stats...${NC}"
 curl -s -X GET \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/markets/stats" | jq .
+    "${GATEWAY_URL}/api/v1/stats" | jq .
 STATS_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/markets/stats")
+    "${GATEWAY_URL}/api/v1/stats")
 check_response "$STATS_RESPONSE" 200 "Market Stats"
 
 # 3. Order Book
 echo -e "\n${YELLOW}3. Testing Order Book for Zone ${ZONE_ID}...${NC}"
 curl -s -X GET \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/markets/zones/${ZONE_ID}/order-book" | jq .
+    "${GATEWAY_URL}/api/v1/zones/${ZONE_ID}/book" | jq .
 BOOK_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/markets/zones/${ZONE_ID}/order-book")
+    "${GATEWAY_URL}/api/v1/zones/${ZONE_ID}/book")
 check_response "$BOOK_RESPONSE" 200 "Order Book"
 
 # 4. Create Quote
@@ -101,8 +101,8 @@ check_response "$SUBMIT_RESPONSE" 200 "Submit Order"
 echo -e "\n${YELLOW}6. Testing List My Orders...${NC}"
 curl -s -X GET \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/users/me/orders?limit=5" | jq .
+    "${GATEWAY_URL}/api/v1/orders?limit=5" | jq .
 LIST_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "X-API-KEY: ${API_KEY}" \
-    "${GATEWAY_URL}/api/v1/users/me/orders?limit=5")
+    "${GATEWAY_URL}/api/v1/orders?limit=5")
 check_response "$LIST_RESPONSE" 200 "List Orders"

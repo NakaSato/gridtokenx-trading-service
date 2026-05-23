@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use trading_core::traits::{
-    OrderRepository, SettlementRepository, EventPublisher, BlockchainGateway, 
-    AuditLog, FuturesRepository, CarbonRepository, AnalyticsRepository
+    AnalyticsRepository, AuditLog, BlockchainGateway, CarbonRepository, EventPublisher,
+    FuturesRepository, OrderRepository, SettlementRepository,
 };
 use trading_logic::{MatcherService, SettlementService};
 

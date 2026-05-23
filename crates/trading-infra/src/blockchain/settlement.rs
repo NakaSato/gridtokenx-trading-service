@@ -5,9 +5,9 @@ use solana_sdk::signature::{Keypair, Signer};
 use std::sync::Arc;
 use tracing::info;
 
+use crate::blockchain::BlockchainService;
 use trading_core::error::ApiError;
 use trading_core::models::{Settlement, SettlementTransaction};
-use crate::blockchain::BlockchainService;
 
 #[derive(Debug)]
 pub struct BlockchainSettlementProvider {
@@ -41,9 +41,13 @@ impl BlockchainSettlementProvider {
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
         // Mints: Energy Token is derived, Currency from env
-        let energy_mint = self.blockchain.instruction_builder().get_mint_pda()
-             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
-        let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
+        let energy_mint = self
+            .blockchain
+            .instruction_builder()
+            .get_mint_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
+        let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
+        info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // ATAs
@@ -61,15 +65,21 @@ impl BlockchainSettlementProvider {
             .calculate_ata_address(buyer_pubkey, &energy_mint)?;
 
         // Collectors
-        let fee_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }
-        )?;
-        let wheeling_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }
-        )?;
-        let loss_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }
-        )?;
+        let fee_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG FEE_COL: '{}'", s);
+            s
+        })?;
+        let wheeling_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG WHEEL_COL: '{}'", s);
+            s
+        })?;
+        let loss_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG LOSS_COL: '{}'", s);
+            s
+        })?;
 
         let fee_collector_ata = self
             .blockchain
@@ -208,21 +218,31 @@ impl BlockchainSettlementProvider {
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
         // Mints: Energy Token is derived, Currency from env
-        let energy_mint = self.blockchain.instruction_builder().get_mint_pda()
-             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
-        let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(); info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
+        let energy_mint = self
+            .blockchain
+            .instruction_builder()
+            .get_mint_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
+        let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
+        info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // Collectors
-        let fee_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG FEE_COL: '{}'", s); s }
-        )?;
-        let wheeling_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG WHEEL_COL: '{}'", s); s }
-        )?;
-        let loss_collector = BlockchainService::parse_pubkey(
-            &{ let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(); info!("DEBUG LOSS_COL: '{}'", s); s }
-        )?;
+        let fee_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG FEE_COL: '{}'", s);
+            s
+        })?;
+        let wheeling_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG WHEEL_COL: '{}'", s);
+            s
+        })?;
+        let loss_collector = BlockchainService::parse_pubkey(&{
+            let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default();
+            info!("DEBUG LOSS_COL: '{}'", s);
+            s
+        })?;
 
         let fee_collector_ata = self
             .blockchain
@@ -237,8 +257,7 @@ impl BlockchainSettlementProvider {
         let mut instructions = Vec::new();
         let mut settlement_ids = Vec::new();
 
-        for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs
-        {
+        for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs {
             // ATAs
             let buyer_currency_ata = self
                 .blockchain
@@ -303,7 +322,9 @@ impl BlockchainSettlementProvider {
 
         // Add priority fee if provided
         if priority_fee > 0 {
-            self.blockchain.add_priority_fee_to_instructions(&mut instructions, "settlement").await?;
+            self.blockchain
+                .add_priority_fee_to_instructions(&mut instructions, "settlement")
+                .await?;
         }
 
         let signature = self
@@ -342,36 +363,52 @@ impl BlockchainSettlementProvider {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
 
-        let mint_pda = self.blockchain.instruction_builder().get_mint_pda()
+        let mint_pda = self
+            .blockchain
+            .instruction_builder()
+            .get_mint_pda()
             .map_err(|e| ApiError::Internal(format!("Failed to derive mint PDA: {}", e)))?;
-        let token_info_pda = self.blockchain.instruction_builder().get_token_info_pda()
+        let token_info_pda = self
+            .blockchain
+            .instruction_builder()
+            .get_token_info_pda()
             .map_err(|e| ApiError::Internal(format!("Failed to derive token info PDA: {}", e)))?;
 
         // Calculate atomic units for energy (9 decimal places for GRX)
-        let amount_atomic = ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000i64)).trunc())
-            .unwrap_or(0);
+        let amount_atomic =
+            ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000i64)).trunc())
+                .unwrap_or(0);
 
         // Calculate User ATA
-        let user_ata = self.blockchain.calculate_ata_address(user_wallet, &mint_pda)?;
+        let user_ata = self
+            .blockchain
+            .calculate_ata_address(user_wallet, &mint_pda)?;
 
         // 1. Build Instruction (Using Energy Token Program)
-        let instruction = self.blockchain.instruction_builder().build_mint_to_wallet_instruction(
-            mint_pda,
-            token_info_pda,
-            user_ata,
-            *user_wallet,
-            platform_authority.pubkey(),
-            amount_atomic
-        ).map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
+        let instruction = self
+            .blockchain
+            .instruction_builder()
+            .build_mint_to_wallet_instruction(
+                mint_pda,
+                token_info_pda,
+                user_ata,
+                *user_wallet,
+                platform_authority.pubkey(),
+                amount_atomic,
+            )
+            .map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
 
         // 2. Execute Transaction
         let mut instructions = vec![instruction];
-        self.blockchain.add_priority_fee_to_instructions(&mut instructions, "token_minting").await?;
-        
-        let signature = self.blockchain.build_and_send_transaction(
-            instructions,
-            &[&platform_authority],
-        ).await.map_err(|e| ApiError::Internal(format!("Blockchain mint failed: {}", e)))?;
+        self.blockchain
+            .add_priority_fee_to_instructions(&mut instructions, "token_minting")
+            .await?;
+
+        let signature = self
+            .blockchain
+            .build_and_send_transaction(instructions, &[&platform_authority])
+            .await
+            .map_err(|e| ApiError::Internal(format!("Blockchain mint failed: {}", e)))?;
 
         Ok(signature.to_string())
     }

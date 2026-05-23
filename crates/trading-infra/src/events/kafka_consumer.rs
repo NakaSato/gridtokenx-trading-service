@@ -1,10 +1,10 @@
 use anyhow::Result;
-use trading_core::events::Event;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use std::time::Duration;
 use tracing::{error, info, warn};
+use trading_core::events::Event;
 use uuid::Uuid;
 
 /// High-performance Kafka consumer for state rehydration and event streaming.
@@ -15,10 +15,17 @@ pub struct KafkaConsumer {
 
 impl KafkaConsumer {
     /// Create a new Kafka consumer. If group_id is None, an ephemeral one is generated (for rehydration).
-    pub fn new(bootstrap_servers: &str, topics: Vec<String>, group_id: Option<String>) -> Result<Self> {
+    pub fn new(
+        bootstrap_servers: &str,
+        topics: Vec<String>,
+        group_id: Option<String>,
+    ) -> Result<Self> {
         let group_id = group_id.unwrap_or_else(|| format!("rehydrator-{}", Uuid::new_v4()));
-        
-        info!("Initializing Kafka Consumer (brokers: {}, group: {})", bootstrap_servers, group_id);
+
+        info!(
+            "Initializing Kafka Consumer (brokers: {}, group: {})",
+            bootstrap_servers, group_id
+        );
 
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", bootstrap_servers)
@@ -36,9 +43,9 @@ impl KafkaConsumer {
     pub async fn subscribe_from_beginning(&self) -> Result<()> {
         let topic_names: Vec<&str> = self.topics.iter().map(|s| s.as_str()).collect();
         self.consumer.subscribe(&topic_names)?;
-        
+
         info!("Subscribed to topics: {:?}", topic_names);
-        
+
         // rdkafka handles "earliest" via auto.offset.reset if no commit exists,
         // which is guaranteed by our ephemeral group ID.
         Ok(())
@@ -46,22 +53,29 @@ impl KafkaConsumer {
 
     /// Read events until the high-water mark (current tip) is reached for all assigned partitions.
     /// This is used for "catch-up" rehydration.
-    pub async fn rehydrate<F>(&self, mut handler: F) -> Result<usize> 
-    where 
-    F: FnMut(Event) -> Result<()>,
+    pub async fn rehydrate<F>(&self, mut handler: F) -> Result<usize>
+    where
+        F: FnMut(Event) -> Result<()>,
     {
         let mut count = 0;
-        
+
         // Fetch metadata to log progress information
         if let Ok(metadata) = self.consumer.fetch_metadata(None, Duration::from_secs(5)) {
             for topic in metadata.topics() {
                 if self.topics.contains(&topic.name().to_string()) {
-                    info!("Topic: {} has {} partitions", topic.name(), topic.partitions().len());
+                    info!(
+                        "Topic: {} has {} partitions",
+                        topic.name(),
+                        topic.partitions().len()
+                    );
                 }
             }
         }
 
-        info!("Starting Kafka rehydration loop (topics: {:?})...", self.topics);
+        info!(
+            "Starting Kafka rehydration loop (topics: {:?})...",
+            self.topics
+        );
 
         // We poll until we get a reasonable sequence of "no more messages" or a timeout
         loop {
@@ -77,7 +91,11 @@ impl KafkaConsumer {
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to deserialize rehydration event: {} (offset: {})", e, msg.offset());
+                                warn!(
+                                    "Failed to deserialize rehydration event: {} (offset: {})",
+                                    e,
+                                    msg.offset()
+                                );
                             }
                         }
                     }
@@ -91,7 +109,9 @@ impl KafkaConsumer {
                     if count == 0 {
                         info!("Rehydration: Topics appear to be empty or tip already reached.");
                     } else {
-                        info!("Rehydration catch-up reached tip of stream (no new messages for 2s)");
+                        info!(
+                            "Rehydration catch-up reached tip of stream (no new messages for 2s)"
+                        );
                     }
                     break;
                 }
@@ -110,8 +130,11 @@ impl KafkaConsumer {
     {
         let topic_names: Vec<&str> = self.topics.iter().map(|s| s.as_str()).collect();
         self.consumer.subscribe(&topic_names)?;
-        
-        info!("Started Kafka streaming consumer on topics: {:?}", topic_names);
+
+        info!(
+            "Started Kafka streaming consumer on topics: {:?}",
+            topic_names
+        );
 
         loop {
             match self.consumer.recv().await {
@@ -141,7 +164,11 @@ impl KafkaConsumer {
     pub fn get_stats(&self) -> Result<()> {
         let metadata = self.consumer.fetch_metadata(None, Duration::from_secs(5))?;
         for topic in metadata.topics() {
-            info!("Topic: {} (partitions: {})", topic.name(), topic.partitions().len());
+            info!(
+                "Topic: {} (partitions: {})",
+                topic.name(),
+                topic.partitions().len()
+            );
         }
         Ok(())
     }

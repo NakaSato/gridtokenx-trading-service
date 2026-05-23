@@ -1,11 +1,11 @@
 //! Futures repository implementation.
 
 use async_trait::async_trait;
-use sqlx::{PgPool, FromRow};
-use uuid::Uuid;
 use rust_decimal::Decimal;
+use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
 
-use trading_core::models::{FuturesProduct, FuturesOrder, FuturesPosition};
+use trading_core::models::{FuturesOrder, FuturesPosition, FuturesProduct};
 use trading_core::traits::{FuturesRepository, TraitResult};
 
 #[derive(Debug, Clone, FromRow)]
@@ -49,7 +49,7 @@ impl PostgresFuturesRepository {
 impl FuturesRepository for PostgresFuturesRepository {
     async fn get_products(&self) -> TraitResult<Vec<FuturesProduct>> {
         let products = sqlx::query_as::<_, FuturesProductDb>(
-            "SELECT * FROM futures_products WHERE is_active = true"
+            "SELECT * FROM futures_products WHERE is_active = true",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -58,12 +58,11 @@ impl FuturesRepository for PostgresFuturesRepository {
     }
 
     async fn get_product(&self, id: Uuid) -> TraitResult<Option<FuturesProduct>> {
-        let product = sqlx::query_as::<_, FuturesProductDb>(
-            "SELECT * FROM futures_products WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let product =
+            sqlx::query_as::<_, FuturesProductDb>("SELECT * FROM futures_products WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(product.map(Into::into))
     }

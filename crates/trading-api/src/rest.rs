@@ -1,13 +1,17 @@
-use axum::{Json, extract::{State, Path, Query}, response::IntoResponse};
-use tracing::{info, error};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use crate::state::AppState;
-use trading_core::models::TradingOrder;
-use trading_core::types::{OrderSide, OrderType, OrderStatus, TimeInForce};
-use rust_decimal::Decimal;
+use axum::{
+    extract::{Path, Query, State},
+    response::IntoResponse,
+    Json,
+};
 use chrono::Utc;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use tracing::{error, info};
+use trading_core::models::TradingOrder;
+use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitOrderRequest {
@@ -98,8 +102,8 @@ pub struct GridMetrics {
     pub is_grid_compliant: bool,
 }
 
-use gridtokenx_blockchain_core::auth::ServiceRole;
 use crate::auth::UserContext;
+use gridtokenx_blockchain_core::auth::ServiceRole;
 
 pub async fn submit_order(
     role: ServiceRole,
@@ -110,15 +114,28 @@ pub async fn submit_order(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
 
-    let amount = Decimal::from_str(&req.energy_amount_kwh)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid energy_amount_kwh: {}", e)))?;
-    let price = Decimal::from_str(&req.price_per_kwh)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid price_per_kwh: {}", e)))?;
+    let amount = Decimal::from_str(&req.energy_amount_kwh).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid energy_amount_kwh: {}", e),
+        )
+    })?;
+    let price = Decimal::from_str(&req.price_per_kwh).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid price_per_kwh: {}", e),
+        )
+    })?;
 
     let side = match req.side.to_lowercase().as_str() {
         "buy" => OrderSide::Buy,
         "sell" => OrderSide::Sell,
-        _ => return Err((axum::http::StatusCode::BAD_REQUEST, "Invalid side".to_string())),
+        _ => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "Invalid side".to_string(),
+            ))
+        }
     };
 
     let order_type = match req.order_type.to_lowercase().as_str() {
@@ -153,8 +170,12 @@ pub async fn submit_order(
         time_in_force: TimeInForce::Gtc,
     };
 
-    state.order_repo.insert_order(&order).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    state.order_repo.insert_order(&order).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
     Ok(Json(SubmitOrderResponse {
         id: order.id,
@@ -195,20 +216,31 @@ pub async fn list_orders(
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
-    
-    let orders = state.order_repo.get_orders_by_user(user.user_id, limit as i64, offset as i64).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-    
-    let data = orders.into_iter().map(|o| OrderData {
-        id: o.id,
-        zone_id: o.zone_id.unwrap_or(0),
-        side: o.side.to_string().to_lowercase(),
-        status: o.status.to_string().to_lowercase(),
-        energy_amount_kwh: o.energy_amount.to_string(),
-        price_per_kwh: o.price_per_kwh.to_string(),
-        filled_amount_kwh: o.filled_amount.to_string(),
-        created_at: o.created_at.unwrap_or_else(Utc::now),
-    }).collect::<Vec<_>>();
+
+    let orders = state
+        .order_repo
+        .get_orders_by_user(user.user_id, limit as i64, offset as i64)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    let data = orders
+        .into_iter()
+        .map(|o| OrderData {
+            id: o.id,
+            zone_id: o.zone_id.unwrap_or(0),
+            side: o.side.to_string().to_lowercase(),
+            status: o.status.to_string().to_lowercase(),
+            energy_amount_kwh: o.energy_amount.to_string(),
+            price_per_kwh: o.price_per_kwh.to_string(),
+            filled_amount_kwh: o.filled_amount.to_string(),
+            created_at: o.created_at.unwrap_or_else(Utc::now),
+        })
+        .collect::<Vec<_>>();
 
     let total = data.len();
     Ok(Json(ListOrdersResponse {
@@ -219,6 +251,32 @@ pub async fn list_orders(
             offset,
         },
     }))
+}
+
+pub async fn cancel_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    state
+        .order_repo
+        .cancel_order(id, user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "cancelled",
+        "order_id": id,
+    })))
 }
 
 pub async fn create_quote(
@@ -282,10 +340,14 @@ pub async fn get_futures_products(
 ) -> Result<Json<Vec<trading_core::models::FuturesProduct>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let products = state.futures_repo.get_products().await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-    
+
+    let products = state.futures_repo.get_products().await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
     Ok(Json(products))
 }
 
@@ -318,10 +380,18 @@ pub async fn get_futures_positions(
 ) -> Result<Json<Vec<trading_core::models::FuturesPosition>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let positions = state.futures_repo.get_positions_by_user(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let positions = state
+        .futures_repo
+        .get_positions_by_user(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(positions))
 }
 
@@ -332,10 +402,18 @@ pub async fn get_futures_orders(
 ) -> Result<Json<Vec<trading_core::models::FuturesOrder>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let orders = state.futures_repo.get_orders_by_user(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let orders = state
+        .futures_repo
+        .get_orders_by_user(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(orders))
 }
 
@@ -347,10 +425,14 @@ pub async fn close_futures_position(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    state.futures_repo.close_position(id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    state.futures_repo.close_position(id).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
     Ok(Json(serde_json::json!({
         "status": "closed",
         "position_id": id,
@@ -388,10 +470,18 @@ pub async fn get_wallet_balance(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let balance_raw = state.blockchain.get_token_balance(&address).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Blockchain error: {}", e)))?;
-    
+
+    let balance_raw = state
+        .blockchain
+        .get_token_balance(&address)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Blockchain error: {}", e),
+            )
+        })?;
+
     let decimals = 9;
     let balance_decimal = Decimal::new(balance_raw as i64, decimals);
 
@@ -412,10 +502,18 @@ pub async fn get_user_analytics_stats(
 ) -> Result<Json<trading_core::models::UserAnalytics>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let stats = state.analytics_repo.get_user_stats(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let stats = state
+        .analytics_repo
+        .get_user_stats(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(stats))
 }
 
@@ -424,7 +522,7 @@ pub async fn get_user_analytics_history(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
+
     Ok(Json(serde_json::json!({
         "history": []
     })))
@@ -437,10 +535,18 @@ pub async fn get_user_transactions(
 ) -> Result<Json<Vec<trading_core::models::TransactionData>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let txs = state.analytics_repo.get_user_transactions(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let txs = state
+        .analytics_repo
+        .get_user_transactions(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(txs))
 }
 
@@ -455,10 +561,18 @@ pub async fn get_carbon_balance(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let balance = state.carbon_repo.get_balance(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let balance = state
+        .carbon_repo
+        .get_balance(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(serde_json::json!({
         "total_credits": balance.to_string(),
         "available_credits": balance.to_string(),
@@ -474,10 +588,18 @@ pub async fn get_carbon_history(
 ) -> Result<Json<Vec<trading_core::models::CarbonCredit>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
-    let history = state.carbon_repo.get_history(user.user_id).await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-        
+
+    let history = state
+        .carbon_repo
+        .get_history(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
     Ok(Json(history))
 }
 
@@ -486,7 +608,7 @@ pub async fn get_carbon_transactions(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
+
     Ok(Json(serde_json::json!([])))
 }
 
@@ -496,7 +618,7 @@ pub async fn transfer_carbon_credits(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    
+
     Ok(Json(serde_json::json!({
         "transaction_id": Uuid::new_v4().to_string(),
         "status": "pending",
@@ -528,44 +650,74 @@ pub async fn settle_generation_mint(
     State(state): State<AppState>,
     Json(req): Json<GenerationMintRequest>,
 ) -> Result<Json<GenerationMintResponse>, (axum::http::StatusCode, String)> {
-    info!("Processing generation mint settlement for user: {}", req.user_id);
+    info!(
+        "Processing generation mint settlement for user: {}",
+        req.user_id
+    );
 
     // 1. Verify Signature (Oracle Bridge Public Key)
     let public_key_str = &state.settlement.oracle_bridge_public_key;
-    let public_key_bytes = bs58::decode(public_key_str).into_vec()
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid public key config: {}", e)))?;
-    
-    use ed25519_dalek::{Verifier, Signature as EdSignature, VerifyingKey};
-    
-    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes.try_into().map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Invalid public key length".to_string()))?)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create verifying key: {}", e)))?;
+    let public_key_bytes = bs58::decode(public_key_str).into_vec().map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Invalid public key config: {}", e),
+        )
+    })?;
 
-    let signature_bytes = bs58::decode(&req.signature).into_vec()
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid signature format: {}", e)))?;
-    
-    let signature = EdSignature::from_bytes(&signature_bytes.try_into().map_err(|_| (axum::http::StatusCode::BAD_REQUEST, "Invalid signature length".to_string()))?);
+    use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
+
+    let verifying_key = VerifyingKey::from_bytes(&public_key_bytes.try_into().map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Invalid public key length".to_string(),
+        )
+    })?)
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create verifying key: {}", e),
+        )
+    })?;
+
+    let signature_bytes = bs58::decode(&req.signature).into_vec().map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid signature format: {}", e),
+        )
+    })?;
+
+    let signature = EdSignature::from_bytes(&signature_bytes.try_into().map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Invalid signature length".to_string(),
+        )
+    })?);
 
     // Construct payload for verification (must match Oracle Bridge)
     let message = format!(
         "{}:{}:{}:{}:{}",
-        req.user_id,
-        req.meter_serial,
-        req.energy_generated_kwh,
-        req.start_time,
-        req.end_time
+        req.user_id, req.meter_serial, req.energy_generated_kwh, req.start_time, req.end_time
     );
 
     if let Err(e) = verifying_key.verify(message.as_bytes(), &signature) {
         error!("Signature verification failed for oracle settlement: {}", e);
-        return Err((axum::http::StatusCode::UNAUTHORIZED, "Invalid oracle signature".to_string()));
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid oracle signature".to_string(),
+        ));
     }
 
     // 2. Execute Minting Logic
-    let result = state.settlement.execute_generation_mint(
-        req.user_id,
-        req.energy_generated_kwh,
-        req.end_time,
-    ).await.map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Settlement failed: {}", e)))?;
+    let result = state
+        .settlement
+        .execute_generation_mint(req.user_id, req.energy_generated_kwh, req.end_time)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Settlement failed: {}", e),
+            )
+        })?;
 
     Ok(Json(GenerationMintResponse {
         success: true,

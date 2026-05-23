@@ -1,11 +1,11 @@
 //! Analytics repository implementation.
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
-use rust_decimal::Decimal;
 
-use trading_core::models::{UserAnalytics, TransactionData};
+use trading_core::models::{TransactionData, UserAnalytics};
 use trading_core::traits::{AnalyticsRepository, TraitResult};
 
 pub struct PostgresAnalyticsRepository {
@@ -56,14 +56,17 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(txs.into_iter().map(|t| TransactionData {
-            id: t.id,
-            transaction_type: t.tx_type,
-            amount: t.total_amount,
-            asset: t.asset,
-            status: t.status,
-            timestamp: t.created_at,
-            reference_id: None,
-        }).collect())
+        Ok(txs
+            .into_iter()
+            .map(|t| TransactionData {
+                id: t.id,
+                transaction_type: t.tx_type,
+                amount: t.total_amount,
+                asset: t.asset,
+                status: t.status,
+                timestamp: t.created_at,
+                reference_id: None,
+            })
+            .collect())
     }
 }

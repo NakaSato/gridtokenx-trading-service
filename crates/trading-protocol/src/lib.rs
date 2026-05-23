@@ -15,11 +15,22 @@ pub mod google {
         #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
         pub struct Empty {}
         impl ::buffa::Message for Empty {
-           fn compute_size(&self) -> u32 { 0 }
-           fn write_to(&self, _: &mut impl ::buffa::bytes::BufMut) {}
-           fn merge_field(&mut self, _: ::buffa::encoding::Tag, _: &mut impl ::buffa::bytes::Buf, _: u32) -> Result<(), ::buffa::DecodeError> { Ok(()) }
-           fn cached_size(&self) -> u32 { 0 }
-           fn clear(&mut self) {}
+            fn compute_size(&self) -> u32 {
+                0
+            }
+            fn write_to(&self, _: &mut impl ::buffa::bytes::BufMut) {}
+            fn merge_field(
+                &mut self,
+                _: ::buffa::encoding::Tag,
+                _: &mut impl ::buffa::bytes::Buf,
+                _: u32,
+            ) -> Result<(), ::buffa::DecodeError> {
+                Ok(())
+            }
+            fn cached_size(&self) -> u32 {
+                0
+            }
+            fn clear(&mut self) {}
         }
         /// SAFETY: Empty is stateless — the default instance is valid for 'static.
         unsafe impl ::buffa::DefaultInstance for Empty {
@@ -33,9 +44,15 @@ pub mod google {
         pub struct EmptyView<'a>(::std::marker::PhantomData<&'a ()>);
         impl<'a> ::buffa::MessageView<'a> for EmptyView<'a> {
             type Owned = Empty;
-            fn decode_view(_: &'a [u8]) -> Result<Self, ::buffa::DecodeError> { Ok(EmptyView(::std::marker::PhantomData)) }
-            fn decode_view_with_limit(_: &'a [u8], _: u32) -> Result<Self, ::buffa::DecodeError> { Ok(EmptyView(::std::marker::PhantomData)) }
-            fn to_owned_message(&self) -> Empty { Empty {} }
+            fn decode_view(_: &'a [u8]) -> Result<Self, ::buffa::DecodeError> {
+                Ok(EmptyView(::std::marker::PhantomData))
+            }
+            fn decode_view_with_limit(_: &'a [u8], _: u32) -> Result<Self, ::buffa::DecodeError> {
+                Ok(EmptyView(::std::marker::PhantomData))
+            }
+            fn to_owned_message(&self) -> Empty {
+                Empty {}
+            }
         }
         /// SAFETY: EmptyView is stateless — the default instance is valid for 'static.
         unsafe impl ::buffa::DefaultViewInstance for EmptyView<'static> {

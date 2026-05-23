@@ -1,7 +1,7 @@
 # =============================================================================
 # GridTokenX Trading Service - Alpine Linux Production Image
 # =============================================================================
-FROM rust:1.89-bookworm AS builder
+FROM rust:latest AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

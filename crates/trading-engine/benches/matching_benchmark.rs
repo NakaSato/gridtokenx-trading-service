@@ -1,17 +1,23 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rust_decimal_macros::dec;
 use rust_decimal::Decimal;
-use uuid::Uuid;
+use rust_decimal_macros::dec;
 use trading_core::fast_price::FastPrice;
 use trading_core::types::TimeInForce;
 use trading_engine::engine::{MatchingEngine, TopologySnapshot};
 use trading_engine::types::{FastOrder, OrderMetadata};
+use uuid::Uuid;
 
 struct BenchmarkTopology;
 impl TopologySnapshot for BenchmarkTopology {
-    fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool { true }
-    fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice { FastPrice::from(dec!(0.01)) }
-    fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice { FastPrice::from(dec!(1.02)) }
+    fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+        true
+    }
+    fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+        FastPrice::from(dec!(0.01))
+    }
+    fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+        FastPrice::from(dec!(1.02))
+    }
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
@@ -30,7 +36,11 @@ fn criterion_benchmark(c: &mut Criterion) {
             time_in_force: TimeInForce::Gtc,
             metadata_index: i,
         });
-        buy_meta.push(OrderMetadata { epoch_id: None, order_pda: None, session_token: None });
+        buy_meta.push(OrderMetadata {
+            epoch_id: None,
+            order_pda: None,
+            session_token: None,
+        });
     }
 
     let mut sells = Vec::new();
@@ -48,7 +58,11 @@ fn criterion_benchmark(c: &mut Criterion) {
             time_in_force: TimeInForce::Gtc,
             metadata_index: i,
         });
-        sell_meta.push(OrderMetadata { epoch_id: None, order_pda: None, session_token: None });
+        sell_meta.push(OrderMetadata {
+            epoch_id: None,
+            order_pda: None,
+            session_token: None,
+        });
     }
 
     let topo = BenchmarkTopology;

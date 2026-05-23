@@ -1,13 +1,13 @@
 //! Settlement repository implementation.
 
 use async_trait::async_trait;
-use sqlx::{PgPool, FromRow};
-use uuid::Uuid;
 use rust_decimal::Decimal;
+use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
 
+use chrono::{DateTime, Utc};
 use trading_core::models::{Settlement, SettlementStatus};
 use trading_core::traits::{SettlementRepository, TraitResult};
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct SettlementDb {
@@ -140,22 +140,17 @@ impl SettlementRepository for PostgresSettlementRepository {
     }
 
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {
-        let s = sqlx::query_as::<_, SettlementDb>(
-            "SELECT * FROM settlements WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let s = sqlx::query_as::<_, SettlementDb>("SELECT * FROM settlements WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(s.map(Into::into))
     }
 
-    async fn get_pending_settlements(
-        &self,
-        limit: i64,
-    ) -> TraitResult<Vec<Settlement>> {
+    async fn get_pending_settlements(&self, limit: i64) -> TraitResult<Vec<Settlement>> {
         let settlements = sqlx::query_as::<_, SettlementDb>(
-            "SELECT * FROM settlements WHERE status = 'pending' LIMIT $1"
+            "SELECT * FROM settlements WHERE status = 'pending' LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)

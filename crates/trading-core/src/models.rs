@@ -12,8 +12,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::types::{
-    EpochStatus, IntervalType, OrderSide, OrderStatus, OrderType,
-    RecurringStatus, TimeInForce, TriggerStatus, TriggerType,
+    EpochStatus, IntervalType, OrderSide, OrderStatus, OrderType, RecurringStatus, TimeInForce,
+    TriggerStatus, TriggerType,
 };
 
 // ── Core Order Models ────────────────────────────────────────────────────────

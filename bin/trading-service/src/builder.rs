@@ -1,15 +1,15 @@
-use std::sync::Arc;
 use sqlx::PgPool;
+use std::sync::Arc;
 use trading_core::traits::*;
-use trading_persistence::repositories::{
-    PostgresOrderRepository, PostgresSettlementRepository, PostgresFuturesRepository, 
-    PostgresCarbonRepository, PostgresAnalyticsRepository
-};
+use trading_infra::audit::AuditLogger;
 use trading_infra::blockchain::BlockchainService;
 use trading_infra::cache::CacheService;
-use trading_infra::audit::AuditLogger;
+use trading_logic::{GridAwareTopology, MatcherService, SettlementService};
+use trading_persistence::repositories::{
+    PostgresAnalyticsRepository, PostgresCarbonRepository, PostgresFuturesRepository,
+    PostgresOrderRepository, PostgresSettlementRepository,
+};
 use uuid::Uuid;
-use trading_logic::{SettlementService, MatcherService, GridAwareTopology};
 
 /// Container for all infrastructure components
 pub struct Infrastructure {
@@ -51,35 +51,42 @@ impl ServiceBuilder {
         let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
         let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
-        
-        let blockchain: Arc<dyn BlockchainGateway> = Arc::new(BlockchainService::new(
-            chain_bridge_url.to_string(),
-            "devnet".to_string(),
-            trading_core::config::SolanaProgramsConfig::default(),
-            Some(db_pool.clone()),
-            None,
-        ).await?);
+
+        let blockchain: Arc<dyn BlockchainGateway> = Arc::new(
+            BlockchainService::new(
+                chain_bridge_url.to_string(),
+                "devnet".to_string(),
+                trading_core::config::SolanaProgramsConfig::default(),
+                Some(db_pool.clone()),
+                None,
+            )
+            .await?,
+        );
 
         let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
-        
+
         // Initialize Audit System
         let (audit_tx, audit_rx) = tokio::sync::mpsc::channel(1000);
         let audit_logger = AuditLogger::new(db_pool.clone(), audit_tx);
-        let audit_worker = trading_infra::audit::worker::AuditWorker::new(audit_logger.clone(), audit_rx);
+        let audit_worker =
+            trading_infra::audit::worker::AuditWorker::new(audit_logger.clone(), audit_rx);
         tokio::spawn(async move {
             audit_worker.run().await;
         });
-        
+
         let audit: Arc<dyn AuditLog> = Arc::new(audit_logger);
-        
+
         // Use the unified EventBus (supports Redis Streams for Telemetry)
-        let event_bus = Arc::new(trading_infra::events::EventBus::new(
-            redis_url,
-            false, // kafka_enabled: disable for now to focus on Redis telemetry
-            Some(kafka_brokers),
-            Some("trading"),
-        ).await?);
-        
+        let event_bus = Arc::new(
+            trading_infra::events::EventBus::new(
+                redis_url,
+                false, // kafka_enabled: disable for now to focus on Redis telemetry
+                Some(kafka_brokers),
+                Some("trading"),
+            )
+            .await?,
+        );
+
         let events: Arc<dyn EventPublisher> = event_bus.clone();
 
         let infra = Infrastructure {

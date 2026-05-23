@@ -3,12 +3,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{PgPool, FromRow};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use trading_core::models::RecurringOrder;
 use trading_core::traits::{RecurringOrderRepository, TraitResult};
-use trading_core::types::{OrderSide, IntervalType, RecurringStatus};
+use trading_core::types::{IntervalType, OrderSide, RecurringStatus};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct RecurringOrderDb {
@@ -72,7 +72,7 @@ impl RecurringOrderRepository for PostgresRecurringOrderRepository {
         now: DateTime<Utc>,
     ) -> TraitResult<Vec<RecurringOrder>> {
         let orders = sqlx::query_as::<_, RecurringOrderDb>(
-            "SELECT * FROM recurring_orders WHERE status = 'active' AND next_execution_at <= $1"
+            "SELECT * FROM recurring_orders WHERE status = 'active' AND next_execution_at <= $1",
         )
         .bind(now)
         .fetch_all(&self.pool)

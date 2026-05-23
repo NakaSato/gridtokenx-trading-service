@@ -5,9 +5,9 @@
 //! - Checked division to prevent division-by-zero or NaN in matching
 //! - Safe casting between primitive types with context-enriched errors
 
-use anyhow::{Context, Result, anyhow};
-use rust_decimal::Decimal;
+use anyhow::{anyhow, Context, Result};
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 /// Converts a Decimal value to a u64 in atomic units (e.g., 9 decimals for SOL).
 ///
@@ -27,7 +27,9 @@ pub fn to_u64_atomic(val: Decimal, decimals: u32, label: &str) -> Result<u64> {
     if atomic_val.fract() != Decimal::ZERO {
         return Err(anyhow!(
             "Precision loss for {}: {} with {} decimals would lose fractional digits",
-            label, val, decimals
+            label,
+            val,
+            decimals
         ));
     }
 
@@ -40,7 +42,12 @@ pub fn to_u64_atomic(val: Decimal, decimals: u32, label: &str) -> Result<u64> {
 /// Safely divides two Decimal values, returning an error instead of panic/NaN for zero denominators.
 pub fn safe_div(numerator: Decimal, denominator: Decimal, label: &str) -> Result<Decimal> {
     if denominator.is_zero() {
-        return Err(anyhow!("Division by zero for {}: {} / {}", label, numerator, denominator));
+        return Err(anyhow!(
+            "Division by zero for {}: {} / {}",
+            label,
+            numerator,
+            denominator
+        ));
     }
     Ok(numerator / denominator)
 }

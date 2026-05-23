@@ -1,11 +1,12 @@
+use chrono::Utc;
+use rust_decimal::Decimal;
 use std::sync::Arc;
-use uuid::Uuid;
-use tracing::{info, error};
-use trading_core::traits::{OrderRepository, SettlementRepository, EventPublisher, TraitResult};
+use tracing::{error, info};
+use trading_core::fast_price::FastPrice;
+use trading_core::traits::{EventPublisher, OrderRepository, SettlementRepository, TraitResult};
 use trading_engine::engine::{MatchingEngine, TopologySnapshot};
 use trading_engine::types::FastOrder;
-use trading_core::fast_price::FastPrice;
-use chrono::Utc;
+use uuid::Uuid;
 
 /// Async orchestrator for the matching engine
 pub struct MatcherService {
@@ -42,51 +43,67 @@ impl MatcherService {
 
         // 2. Convert to FastOrder and Metadata
         let mut buy_metadata = Vec::with_capacity(buy_orders.len());
-        let mut fast_buys: Vec<FastOrder> = buy_orders.iter().enumerate().map(|(i, o)| {
-            buy_metadata.push(trading_engine::types::OrderMetadata {
-                epoch_id: o.epoch_id,
-                order_pda: o.order_pda.clone(),
-                session_token: o.session_token.clone(),
-            });
-            FastOrder {
-                id: o.id,
-                user_id: o.user_id,
-                price: FastPrice::from(o.price_per_kwh),
-                energy_amount: o.energy_amount,
-                filled_amount: o.filled_amount,
-                created_at_ns: o.created_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0),
-                expires_at_ns: o.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
-                zone_id: o.zone_id,
-                time_in_force: o.time_in_force,
-                metadata_index: i,
-            }
-        }).collect();
+        let mut fast_buys: Vec<FastOrder> = buy_orders
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                buy_metadata.push(trading_engine::types::OrderMetadata {
+                    epoch_id: o.epoch_id,
+                    order_pda: o.order_pda.as_ref().map(|s| Arc::from(s.as_str())),
+                    session_token: o.session_token.as_ref().map(|s| Arc::from(s.as_str())),
+                });
+                FastOrder {
+                    id: o.id,
+                    user_id: o.user_id,
+                    price: FastPrice::from(o.price_per_kwh),
+                    energy_amount: o.energy_amount,
+                    filled_amount: o.filled_amount,
+                    created_at_ns: o
+                        .created_at
+                        .map(|t| t.timestamp_nanos_opt().unwrap_or(0))
+                        .unwrap_or(0),
+                    expires_at_ns: o.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
+                    zone_id: o.zone_id,
+                    time_in_force: o.time_in_force,
+                    metadata_index: i,
+                }
+            })
+            .collect();
 
         let mut sell_metadata = Vec::with_capacity(sell_orders.len());
-        let mut fast_sells: Vec<FastOrder> = sell_orders.iter().enumerate().map(|(i, o)| {
-            sell_metadata.push(trading_engine::types::OrderMetadata {
-                epoch_id: o.epoch_id,
-                order_pda: o.order_pda.clone(),
-                session_token: o.session_token.clone(),
-            });
-            FastOrder {
-                id: o.id,
-                user_id: o.user_id,
-                price: FastPrice::from(o.price_per_kwh),
-                energy_amount: o.energy_amount,
-                filled_amount: o.filled_amount,
-                created_at_ns: o.created_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0),
-                expires_at_ns: o.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
-                zone_id: o.zone_id,
-                time_in_force: o.time_in_force,
-                metadata_index: i,
-            }
-        }).collect();
+        let mut fast_sells: Vec<FastOrder> = sell_orders
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                sell_metadata.push(trading_engine::types::OrderMetadata {
+                    epoch_id: o.epoch_id,
+                    order_pda: o.order_pda.as_ref().map(|s| Arc::from(s.as_str())),
+                    session_token: o.session_token.as_ref().map(|s| Arc::from(s.as_str())),
+                });
+                FastOrder {
+                    id: o.id,
+                    user_id: o.user_id,
+                    price: FastPrice::from(o.price_per_kwh),
+                    energy_amount: o.energy_amount,
+                    filled_amount: o.filled_amount,
+                    created_at_ns: o
+                        .created_at
+                        .map(|t| t.timestamp_nanos_opt().unwrap_or(0))
+                        .unwrap_or(0),
+                    expires_at_ns: o.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
+                    zone_id: o.zone_id,
+                    time_in_force: o.time_in_force,
+                    metadata_index: i,
+                }
+            })
+            .collect();
 
         // Sort for matching engine expectations (FIFO for buys, Price-Time for sells)
         fast_buys.sort_unstable_by(|a, b| a.created_at_ns.cmp(&b.created_at_ns));
         fast_sells.sort_unstable_by(|a, b| {
-            a.price.cmp(&b.price).then_with(|| a.created_at_ns.cmp(&b.created_at_ns))
+            a.price
+                .cmp(&b.price)
+                .then_with(|| a.created_at_ns.cmp(&b.created_at_ns))
         });
 
         // 3. Execute pure matching logic
@@ -105,51 +122,76 @@ impl MatcherService {
             return Ok(0);
         }
 
-        info!("Matching cycle completed: {} matches, total volume: {}", matches.len(), stats.total_volume);
+        info!(
+            "Matching cycle completed: {} matches, total volume: {}",
+            matches.len(),
+            stats.total_volume
+        );
 
-        // 4. Persist fills and create settlements
+        // 4. Batch Persist fills and settlements
+        use std::collections::HashMap;
         use trading_core::types::OrderStatus;
 
-        for m in &matches {
-            // Update orders - we don't know the status here so we use PartiallyFilled as default
-            // In a real system, the matching engine would return if the order was fully filled.
-            self.order_repo.update_filled_amount(m.buy_order_id, m.match_amount, OrderStatus::PartiallyFilled).await?;
-            self.order_repo.update_filled_amount(m.sell_order_id, m.match_amount, OrderStatus::PartiallyFilled).await?;
+        let mut order_deltas: HashMap<Uuid, (Decimal, OrderStatus)> = HashMap::new();
 
-            // Create settlement record (placeholders for now)
-            let _ = self.settlement_repo.insert_settlement(&trading_core::models::Settlement {
-                id: Uuid::new_v4(),
-                trade_id: Some(Uuid::new_v4()),
-                epoch_id: m.epoch_id,
-                buyer_id: m.buyer_id,
-                seller_id: m.seller_id,
-                buy_order_id: m.buy_order_id,
-                sell_order_id: m.sell_order_id,
-                energy_amount: m.match_amount,
-                price: m.match_price,
-                total_amount: m.total_energy_cost,
-                fee_amount: rust_decimal_macros::dec!(0),
-                net_amount: m.total_energy_cost,
-                status: trading_core::models::SettlementStatus::Pending,
-                blockchain_tx: None,
-                created_at: Utc::now(),
-                confirmed_at: None,
-                wheeling_charge: Some(m.wheeling_charge),
-                loss_factor: Some(m.loss_factor),
-                loss_cost: Some(m.loss_cost),
-                effective_energy: Some(m.match_amount),
-                buyer_zone_id: m.buyer_zone_id,
-                seller_zone_id: m.seller_zone_id,
-                buyer_session_token: m.buyer_session_token.clone(),
-                seller_session_token: m.seller_session_token.clone(),
-                erc_certificate_id: None,
-                erc_transfer_tx: None,
-                retry_count: 0,
-                error_message: None,
-            }).await;
-            
-            // 5. Publish events
-            // self.events.publish_event(...).await?;
+        for m in &matches {
+            // Aggregate fill amounts for buyer
+            let (buy_amt, _) = order_deltas
+                .entry(m.buy_order_id)
+                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled));
+            *buy_amt += m.match_amount;
+
+            // Aggregate fill amounts for seller
+            let (sell_amt, _) = order_deltas
+                .entry(m.sell_order_id)
+                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled));
+            *sell_amt += m.match_amount;
+
+            // Reconstruct metadata for settlement
+            let buy_meta = &buy_metadata[m.buy_metadata_index];
+            let sell_meta = &sell_metadata[m.sell_metadata_index];
+
+            // Create settlement record
+            let _ = self
+                .settlement_repo
+                .insert_settlement(&trading_core::models::Settlement {
+                    id: Uuid::new_v4(),
+                    trade_id: Some(Uuid::new_v4()),
+                    epoch_id: m.epoch_id,
+                    buyer_id: m.buyer_id,
+                    seller_id: m.seller_id,
+                    buy_order_id: m.buy_order_id,
+                    sell_order_id: m.sell_order_id,
+                    energy_amount: m.match_amount,
+                    price: m.match_price,
+                    total_amount: m.total_energy_cost,
+                    fee_amount: rust_decimal_macros::dec!(0),
+                    net_amount: m.total_energy_cost,
+                    status: trading_core::models::SettlementStatus::Pending,
+                    blockchain_tx: None,
+                    created_at: Utc::now(),
+                    confirmed_at: None,
+                    wheeling_charge: Some(m.wheeling_charge),
+                    loss_factor: Some(m.loss_factor),
+                    loss_cost: Some(m.loss_cost),
+                    effective_energy: Some(m.match_amount),
+                    buyer_zone_id: m.buyer_zone_id,
+                    seller_zone_id: m.seller_zone_id,
+                    buyer_session_token: buy_meta.session_token.as_ref().map(|s| s.to_string()),
+                    seller_session_token: sell_meta.session_token.as_ref().map(|s| s.to_string()),
+                    erc_certificate_id: None,
+                    erc_transfer_tx: None,
+                    retry_count: 0,
+                    error_message: None,
+                })
+                .await;
+        }
+
+        // Apply aggregated order updates (Batching logic for OrderRepository)
+        for (order_id, (amount, status)) in order_deltas {
+            self.order_repo
+                .update_filled_amount(order_id, amount, status)
+                .await?;
         }
 
         Ok(matches.len())

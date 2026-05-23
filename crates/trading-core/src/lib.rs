@@ -12,11 +12,11 @@
 //! - **`numeric`** — Safe numeric conversion utilities
 //! - **`traits`** — Repository and service trait definitions for dependency injection
 
-pub mod types;
-pub mod models;
-pub mod error;
 pub mod config;
-pub mod fast_price;
+pub mod error;
 pub mod events;
+pub mod fast_price;
+pub mod models;
 pub mod numeric;
 pub mod traits;
+pub mod types;

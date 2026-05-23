@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::sync::Arc;
 use tracing::info;
-use trading_core::traits::{EventPublisher, SettlementRepository};
 use trading_core::events::Event;
-use anyhow::Result;
+use trading_core::traits::{EventPublisher, SettlementRepository};
 
 use crate::settlement::SettlementService;
 
@@ -36,8 +36,15 @@ impl OracleConsumer {
         );
 
         // Ensure consumer group exists
-        if let Err(e) = self.event_bus.create_consumer_group(&self.consumer_group).await {
-            info!("Note: Consumer group creation might have failed or already exists: {}", e);
+        if let Err(e) = self
+            .event_bus
+            .create_consumer_group(&self.consumer_group)
+            .await
+        {
+            info!(
+                "Note: Consumer group creation might have failed or already exists: {}",
+                e
+            );
         }
 
         // Define the handler
@@ -46,22 +53,30 @@ impl OracleConsumer {
             let settlement_service = settlement_service.clone();
             Box::pin(async move {
                 if let Event::OracleReading(payload) = event {
-                    info!("🔍 Processing Oracle Reading for meter: {}", payload.meter_id);
-                    
+                    info!(
+                        "🔍 Processing Oracle Reading for meter: {}",
+                        payload.meter_id
+                    );
+
                     // Trigger settlement logic
                     if let Err(e) = settlement_service.process_reading(payload).await {
                         tracing::error!("Failed to process oracle reading: {}", e);
                     }
                 }
                 Ok(())
-            }) as std::pin::Pin<Box<dyn std::future::Future<Output = trading_core::traits::TraitResult<()>> + Send>>
+            })
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = trading_core::traits::TraitResult<()>>
+                            + Send,
+                    >,
+                >
         });
 
-        self.event_bus.consume_events(
-            &self.consumer_group,
-            &self.consumer_name,
-            handler
-        ).await.map_err(|e| anyhow::anyhow!("Consumption loop failed: {}", e))?;
+        self.event_bus
+            .consume_events(&self.consumer_group, &self.consumer_name, handler)
+            .await
+            .map_err(|e| anyhow::anyhow!("Consumption loop failed: {}", e))?;
 
         Ok(())
     }

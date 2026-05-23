@@ -175,12 +175,7 @@ mod tests {
         for price in prices {
             let fast = FastPrice::from(price);
             let back = fast.to_decimal();
-            assert_eq!(
-                price.round_dp(9),
-                back,
-                "Roundtrip failed for {}",
-                price
-            );
+            assert_eq!(price.round_dp(9), back, "Roundtrip failed for {}", price);
         }
     }
 
@@ -200,9 +195,18 @@ mod tests {
         let a = FastPrice::from(dec!(1.5));
         let b = FastPrice::from(dec!(0.5));
 
-        assert_eq!(a.checked_add(b).unwrap().to_decimal(), dec!(1.5).round_dp(9) + dec!(0.5).round_dp(9));
-        assert_eq!(a.checked_sub(b).unwrap().to_decimal(), dec!(1.0).round_dp(9));
-        assert_eq!(a.checked_mul(b).unwrap().to_decimal(), dec!(0.75).round_dp(9));
+        assert_eq!(
+            a.checked_add(b).unwrap().to_decimal(),
+            dec!(1.5).round_dp(9) + dec!(0.5).round_dp(9)
+        );
+        assert_eq!(
+            a.checked_sub(b).unwrap().to_decimal(),
+            dec!(1.0).round_dp(9)
+        );
+        assert_eq!(
+            a.checked_mul(b).unwrap().to_decimal(),
+            dec!(0.75).round_dp(9)
+        );
     }
 
     #[test]
@@ -215,19 +219,21 @@ mod tests {
 
     #[test]
     fn test_sort_performance_equivalence() {
-        let decimals = vec![
-            dec!(3.14), dec!(1.00), dec!(2.71), dec!(0.50), dec!(1.00),
-        ];
+        let decimals = vec![dec!(3.14), dec!(1.00), dec!(2.71), dec!(0.50), dec!(1.00)];
 
         let mut sorted_decimals = decimals.clone();
         sorted_decimals.sort();
 
-        let mut fast_prices: Vec<FastPrice> = decimals.iter().map(|d| FastPrice::from(*d)).collect();
+        let mut fast_prices: Vec<FastPrice> =
+            decimals.iter().map(|d| FastPrice::from(*d)).collect();
         fast_prices.sort();
         let sorted_via_fast: Vec<Decimal> = fast_prices.iter().map(|f| f.to_decimal()).collect();
 
         assert_eq!(
-            sorted_decimals.iter().map(|d| d.round_dp(9)).collect::<Vec<_>>(),
+            sorted_decimals
+                .iter()
+                .map(|d| d.round_dp(9))
+                .collect::<Vec<_>>(),
             sorted_via_fast
         );
     }

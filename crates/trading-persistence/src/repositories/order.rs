@@ -3,12 +3,14 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{PgPool, FromRow};
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use trading_core::models::{TradingOrder, OrderBookEntry};
+use trading_core::models::{OrderBookEntry, TradingOrder};
 use trading_core::traits::{OrderRepository, TraitResult};
-use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce, TriggerStatus, TriggerType};
+use trading_core::types::{
+    OrderSide, OrderStatus, OrderType, TimeInForce, TriggerStatus, TriggerType,
+};
 
 /// Database-specific order model with SQLx metadata.
 #[derive(Debug, Clone, FromRow)]
@@ -116,12 +118,11 @@ impl OrderRepository for PostgresOrderRepository {
     }
 
     async fn get_order(&self, id: Uuid) -> TraitResult<Option<TradingOrder>> {
-        let order = sqlx::query_as::<_, TradingOrderDb>(
-            "SELECT * FROM trading_orders WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let order =
+            sqlx::query_as::<_, TradingOrderDb>("SELECT * FROM trading_orders WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(order.map(Into::into))
     }
@@ -144,10 +145,7 @@ impl OrderRepository for PostgresOrderRepository {
         Ok(orders.into_iter().map(Into::into).collect())
     }
 
-    async fn get_active_orders_by_zone(
-        &self,
-        zone_id: i32,
-    ) -> TraitResult<Vec<OrderBookEntry>> {
+    async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
             r#"
             SELECT * FROM trading_orders 
@@ -159,27 +157,26 @@ impl OrderRepository for PostgresOrderRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(orders.into_iter().map(|o| OrderBookEntry {
-            order_id: o.id,
-            user_id: o.user_id,
-            side: o.side,
-            energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
-            original_amount: o.energy_amount,
-            price_per_kwh: o.price_per_kwh,
-            created_at: o.created_at.unwrap_or_else(Utc::now),
-            zone_id: o.zone_id,
-            session_token: o.session_token,
-            signature: None, // Logic for signatures will be handled in logic crate
-            payload_bytes: None,
-            time_in_force: o.time_in_force,
-        }).collect())
+        Ok(orders
+            .into_iter()
+            .map(|o| OrderBookEntry {
+                order_id: o.id,
+                user_id: o.user_id,
+                side: o.side,
+                energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
+                original_amount: o.energy_amount,
+                price_per_kwh: o.price_per_kwh,
+                created_at: o.created_at.unwrap_or_else(Utc::now),
+                zone_id: o.zone_id,
+                session_token: o.session_token,
+                signature: None, // Logic for signatures will be handled in logic crate
+                payload_bytes: None,
+                time_in_force: o.time_in_force,
+            })
+            .collect())
     }
 
-    async fn update_order_status(
-        &self,
-        id: Uuid,
-        status: OrderStatus,
-    ) -> TraitResult<()> {
+    async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()> {
         sqlx::query("UPDATE trading_orders SET status = $1, updated_at = NOW() WHERE id = $2")
             .bind(status)
             .bind(id)

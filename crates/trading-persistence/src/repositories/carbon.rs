@@ -1,9 +1,9 @@
 //! Carbon credits repository implementation.
 
 use async_trait::async_trait;
-use sqlx::{PgPool, FromRow};
-use uuid::Uuid;
 use rust_decimal::Decimal;
+use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
 
 use trading_core::models::{CarbonCredit, CarbonTransaction};
 use trading_core::traits::{CarbonRepository, TraitResult};
@@ -46,7 +46,7 @@ impl PostgresCarbonRepository {
 impl CarbonRepository for PostgresCarbonRepository {
     async fn get_balance(&self, user_id: Uuid) -> TraitResult<Decimal> {
         let row: (Option<Decimal>,) = sqlx::query_as(
-            "SELECT SUM(amount) FROM carbon_credits WHERE user_id = $1 AND status = 'active'"
+            "SELECT SUM(amount) FROM carbon_credits WHERE user_id = $1 AND status = 'active'",
         )
         .bind(user_id)
         .fetch_one(&self.pool)
@@ -57,7 +57,7 @@ impl CarbonRepository for PostgresCarbonRepository {
 
     async fn get_history(&self, user_id: Uuid) -> TraitResult<Vec<CarbonCredit>> {
         let history = sqlx::query_as::<_, CarbonCreditDb>(
-            "SELECT * FROM carbon_credits WHERE user_id = $1 ORDER BY created_at DESC"
+            "SELECT * FROM carbon_credits WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)

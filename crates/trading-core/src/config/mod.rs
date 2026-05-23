@@ -1,7 +1,7 @@
 //! Service configuration for the GridTokenX trading service.
 
 pub mod tokenization;
-pub use tokenization::{TokenizationConfig, ValidationError, ConfigError};
+pub use tokenization::{ConfigError, TokenizationConfig, ValidationError};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -64,15 +64,28 @@ impl Config {
         dotenvy::dotenv().ok();
 
         info!("CWD: {:?}", std::env::current_dir().unwrap_or_default());
-        info!("FEE_COLLECTOR_WALLET: {:?}", std::env::var("FEE_COLLECTOR_WALLET"));
-        info!("CURRENCY_TOKEN_MINT: {:?}", std::env::var("CURRENCY_TOKEN_MINT"));
-        info!("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN: {:?}", std::env::var("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN"));
+        info!(
+            "FEE_COLLECTOR_WALLET: {:?}",
+            std::env::var("FEE_COLLECTOR_WALLET")
+        );
+        info!(
+            "CURRENCY_TOKEN_MINT: {:?}",
+            std::env::var("CURRENCY_TOKEN_MINT")
+        );
+        info!(
+            "TOKENIZATION_ENABLE_REAL_BLOCKCHAIN: {:?}",
+            std::env::var("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN")
+        );
 
         Ok(Config {
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
             database_url: env::var("TRADING_DATABASE_URL")
                 .or_else(|_| env::var("DATABASE_URL"))
-                .map_err(|_| anyhow::anyhow!("DATABASE_URL or TRADING_DATABASE_URL environment variable is required"))?,
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "DATABASE_URL or TRADING_DATABASE_URL environment variable is required"
+                    )
+                })?,
             redis_url: env::var("REDIS_URL")
                 .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable is required"))?,
             solana_rpc_url: env::var("SOLANA_RPC_URL")

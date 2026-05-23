@@ -1,9 +1,9 @@
 //! Types for the matching engine.
 
 use rust_decimal::Decimal;
-use uuid::Uuid;
 use trading_core::fast_price::FastPrice;
 use trading_core::types::TimeInForce;
+use uuid::Uuid;
 
 /// Lightweight order representation for the matching engine.
 /// Optimized for cache locality and fast comparison.
@@ -23,12 +23,14 @@ pub struct FastOrder {
     pub metadata_index: usize, // Index into OrderMetadata sidecar
 }
 
+use std::sync::Arc;
+
 /// Metadata not required for the matching hot-path.
 #[derive(Debug, Clone)]
 pub struct OrderMetadata {
     pub epoch_id: Option<Uuid>,
-    pub order_pda: Option<String>,
-    pub session_token: Option<String>,
+    pub order_pda: Option<Arc<str>>,
+    pub session_token: Option<Arc<str>>,
 }
 
 impl FastOrder {
@@ -50,6 +52,8 @@ impl FastOrder {
 pub struct MatchResult {
     pub buy_order_id: Uuid,
     pub sell_order_id: Uuid,
+    pub buy_metadata_index: usize,
+    pub sell_metadata_index: usize,
     pub match_amount: Decimal,
     pub match_price: Decimal,
     pub total_energy_cost: Decimal,
@@ -61,10 +65,6 @@ pub struct MatchResult {
     pub buyer_id: Uuid,
     pub seller_id: Uuid,
     pub epoch_id: Uuid,
-    pub buyer_session_token: Option<String>,
-    pub seller_session_token: Option<String>,
-    pub buyer_order_pda: Option<String>,
-    pub seller_order_pda: Option<String>,
 }
 
 /// Statistics about a matching cycle.

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ipnetwork::IpNetwork;
-use uuid::Uuid;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 pub use trading_core::traits::AuditLog;
 
@@ -88,12 +88,13 @@ impl AuditLogger {
         for event in events {
             let event_type = event.event_type();
             let user_id = event.user_id();
-            let ip_address = event.ip_address()
-                .and_then(|s| s.parse::<IpNetwork>().ok());
-            
+            let ip_address = event.ip_address().and_then(|s| s.parse::<IpNetwork>().ok());
+
             let event_data = match serde_json::to_value(&event) {
                 Ok(data) => data,
-                Err(_) => serde_json::json!({ "error": "serialization_failed", "type": event_type }),
+                Err(_) => {
+                    serde_json::json!({ "error": "serialization_failed", "type": event_type })
+                }
             };
 
             activity_types.push(event_type.to_string());

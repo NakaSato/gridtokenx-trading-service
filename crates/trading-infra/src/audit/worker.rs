@@ -1,7 +1,7 @@
 use super::{AuditEvent, AuditLogger};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{error, info, debug};
+use tracing::{debug, error, info};
 
 /// Background worker that consumes audit events from a channel
 /// and writes them to the database in high-performance batches.
@@ -21,7 +21,7 @@ impl AuditWorker {
     /// Starts the background event processing loop
     pub async fn run(mut self) {
         info!("⏳ Starting Batch-Optimized AuditWorker background loop for Trading Service...");
-        
+
         let mut buffer = Vec::with_capacity(BATCH_SIZE);
         let sleep_timer = sleep(BATCH_TIMEOUT);
         tokio::pin!(sleep_timer);
@@ -33,7 +33,7 @@ impl AuditWorker {
                     match maybe_event {
                         Some(event) => {
                             buffer.push(event);
-                            
+
                             // Flush if batch size reached
                             if buffer.len() >= BATCH_SIZE {
                                 debug!("AuditWorker: Batch size reached ({}), flushing...", BATCH_SIZE);
@@ -56,7 +56,7 @@ impl AuditWorker {
                         }
                     }
                 }
-                
+
                 // Timeout reached, flush if buffer not empty
                 _ = &mut sleep_timer => {
                     if !buffer.is_empty() {
@@ -70,7 +70,7 @@ impl AuditWorker {
                 }
             }
         }
-        
+
         info!("🛑 AuditWorker shutting down (channel closed)");
     }
 }

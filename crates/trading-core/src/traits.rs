@@ -12,10 +12,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::events::Event;
-use crate::models::{
-    OrderBookEntry, Settlement, TradingOrder,
-    ConditionalOrder, RecurringOrder,
-};
+use crate::models::{ConditionalOrder, OrderBookEntry, RecurringOrder, Settlement, TradingOrder};
 use crate::types::OrderStatus;
 
 /// Result alias for trait methods.
@@ -41,17 +38,10 @@ pub trait OrderRepository: Send + Sync {
     ) -> TraitResult<Vec<TradingOrder>>;
 
     /// Get active orders for a specific zone.
-    async fn get_active_orders_by_zone(
-        &self,
-        zone_id: i32,
-    ) -> TraitResult<Vec<OrderBookEntry>>;
+    async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>>;
 
     /// Update order status.
-    async fn update_order_status(
-        &self,
-        id: Uuid,
-        status: OrderStatus,
-    ) -> TraitResult<()>;
+    async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()>;
 
     /// Update filled amount on an order.
     async fn update_filled_amount(
@@ -84,10 +74,7 @@ pub trait SettlementRepository: Send + Sync {
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>>;
 
     /// Get pending settlements for batch processing.
-    async fn get_pending_settlements(
-        &self,
-        limit: i64,
-    ) -> TraitResult<Vec<Settlement>>;
+    async fn get_pending_settlements(&self, limit: i64) -> TraitResult<Vec<Settlement>>;
 
     /// Update settlement status.
     async fn update_settlement_status(
@@ -109,11 +96,7 @@ pub trait ConditionalOrderRepository: Send + Sync {
         status: &str,
         triggered_at: Option<DateTime<Utc>>,
     ) -> TraitResult<()>;
-    async fn update_peak_price(
-        &self,
-        id: Uuid,
-        peak_price: Decimal,
-    ) -> TraitResult<()>;
+    async fn update_peak_price(&self, id: Uuid, peak_price: Decimal) -> TraitResult<()>;
 }
 
 /// Recurring order persistence.
@@ -137,8 +120,14 @@ pub trait FuturesRepository: Send + Sync {
     async fn get_products(&self) -> TraitResult<Vec<crate::models::FuturesProduct>>;
     async fn get_product(&self, id: Uuid) -> TraitResult<Option<crate::models::FuturesProduct>>;
     async fn insert_order(&self, order: &crate::models::FuturesOrder) -> TraitResult<()>;
-    async fn get_orders_by_user(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::FuturesOrder>>;
-    async fn get_positions_by_user(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::FuturesPosition>>;
+    async fn get_orders_by_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<crate::models::FuturesOrder>>;
+    async fn get_positions_by_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<crate::models::FuturesPosition>>;
     async fn close_position(&self, position_id: Uuid) -> TraitResult<()>;
 }
 
@@ -147,7 +136,10 @@ pub trait FuturesRepository: Send + Sync {
 pub trait CarbonRepository: Send + Sync {
     async fn get_balance(&self, user_id: Uuid) -> TraitResult<Decimal>;
     async fn get_history(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::CarbonCredit>>;
-    async fn get_transactions(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::CarbonTransaction>>;
+    async fn get_transactions(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<crate::models::CarbonTransaction>>;
     async fn insert_transaction(&self, tx: &crate::models::CarbonTransaction) -> TraitResult<()>;
 }
 
@@ -155,7 +147,10 @@ pub trait CarbonRepository: Send + Sync {
 #[async_trait]
 pub trait AnalyticsRepository: Send + Sync {
     async fn get_user_stats(&self, user_id: Uuid) -> TraitResult<crate::models::UserAnalytics>;
-    async fn get_user_transactions(&self, user_id: Uuid) -> TraitResult<Vec<crate::models::TransactionData>>;
+    async fn get_user_transactions(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<crate::models::TransactionData>>;
 }
 
 /// Wallet and balance operations.
@@ -177,15 +172,22 @@ pub trait EventPublisher: Send + Sync {
 
     /// Subscribe to events and process them with a handler.
     async fn create_consumer_group(&self, group_name: &str) -> TraitResult<()>;
-    
+
     /// Consume events from a stream/topic.
     async fn consume_events(
         &self,
         group_name: &str,
         consumer_name: &str,
-        handler: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>> + Send + Sync>,
+        handler: Arc<
+            dyn Fn(
+                    Event,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>>
+                + Send
+                + Sync,
+        >,
     ) -> TraitResult<()>;
-    
+
     // Note: for real consumption, we usually start a long-running loop.
     // The trait might be better as an 'EventBus' trait.
 }
@@ -218,7 +220,7 @@ pub trait BlockchainGateway: Send + Sync {
         meter_id: &str,
         energy_amount: Decimal,
     ) -> TraitResult<String>;
-    
+
     /// Execute on-chain generation mint.
     async fn execute_generation_mint(
         &self,
@@ -239,18 +241,24 @@ pub trait CacheStore: Send + Sync {
 /// Audit logging.
 #[async_trait]
 pub trait AuditLog: Send + Sync {
-    async fn log_action(
-        &self,
-        user_id: Uuid,
-        action: &str,
-        details: &str,
-    ) -> TraitResult<()>;
+    async fn log_action(&self, user_id: Uuid, action: &str, details: &str) -> TraitResult<()>;
 }
 
 /// Virtual Power Plant (VPP) persistence.
 #[async_trait]
 pub trait VppRepository: Send + Sync {
-    async fn get_cluster_by_id(&self, cluster_id: &str) -> TraitResult<Option<crate::models::VppCluster>>;
-    async fn get_member_association(&self, meter_id: &str) -> TraitResult<Option<crate::models::VppMember>>;
-    async fn update_cluster_metrics(&self, cluster_id: &str, stored_kwh: f64, soc: f64) -> TraitResult<()>;
+    async fn get_cluster_by_id(
+        &self,
+        cluster_id: &str,
+    ) -> TraitResult<Option<crate::models::VppCluster>>;
+    async fn get_member_association(
+        &self,
+        meter_id: &str,
+    ) -> TraitResult<Option<crate::models::VppMember>>;
+    async fn update_cluster_metrics(
+        &self,
+        cluster_id: &str,
+        stored_kwh: f64,
+        soc: f64,
+    ) -> TraitResult<()>;
 }

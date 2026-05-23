@@ -2,8 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info};
 
 use trading_core::events::Event;
@@ -89,8 +89,8 @@ impl KafkaEventBus {
 
         info!("✅ Kafka EventBus initialized with topics: {:?}", topics);
 
-        Ok(Self { 
-            producer, 
+        Ok(Self {
+            producer,
             topics,
             bootstrap_servers: bootstrap_servers.to_string(),
         })
@@ -102,15 +102,9 @@ impl KafkaEventBus {
         let (topic, key) = self.route_event(event);
         let payload = serde_json::to_vec(event)?;
 
-        let record = FutureRecord::to(topic)
-            .key(&key)
-            .payload(&payload);
+        let record = FutureRecord::to(topic).key(&key).payload(&payload);
 
-        match self
-            .producer
-            .send(record, Duration::from_secs(5))
-            .await
-        {
+        match self.producer.send(record, Duration::from_secs(5)).await {
             Ok((partition, offset)) => {
                 let id = format!("{}:{}:{}", topic, partition, offset);
                 info!(
@@ -162,38 +156,23 @@ impl KafkaEventBus {
                 &self.topics.settlements,
                 settlement.epoch_id.to_string(), // Partition by epoch
             ),
-            Event::SettlementProcessed(payload) => (
-                &self.topics.settlements,
-                payload.settlement_id.to_string(),
-            ),
-            Event::PeakPriceUpdate { id, .. } => (
-                &self.topics.orders_updated,
-                id.to_string(),
-            ),
-            Event::TriggerExecution { id, .. } => (
-                &self.topics.triggers,
-                id.to_string(),
-            ),
-            Event::ErcIssued(payload) => (
-                &self.topics.settlements,
-                payload.user_id.to_string(),
-            ),
+            Event::SettlementProcessed(payload) => {
+                (&self.topics.settlements, payload.settlement_id.to_string())
+            }
+            Event::PeakPriceUpdate { id, .. } => (&self.topics.orders_updated, id.to_string()),
+            Event::TriggerExecution { id, .. } => (&self.topics.triggers, id.to_string()),
+            Event::ErcIssued(payload) => (&self.topics.settlements, payload.user_id.to_string()),
             Event::UserRegistered(payload) => (
                 &self.topics.orders_created, // Or dedicated identity topic
                 payload.user_id.to_string(),
             ),
-            Event::UserOnboarded(payload) => (
-                &self.topics.participants,
-                payload.user_id.to_string(),
-            ),
-            Event::UserWalletLinked(payload) => (
-                &self.topics.participants,
-                payload.user_id.to_string(),
-            ),
-            Event::OracleReading(payload) => (
-                &self.topics.telemetry,
-                payload.meter_id.clone(),
-            ),
+            Event::UserOnboarded(payload) => {
+                (&self.topics.participants, payload.user_id.to_string())
+            }
+            Event::UserWalletLinked(payload) => {
+                (&self.topics.participants, payload.user_id.to_string())
+            }
+            Event::OracleReading(payload) => (&self.topics.telemetry, payload.meter_id.clone()),
         }
     }
 }
@@ -201,11 +180,15 @@ impl KafkaEventBus {
 #[async_trait]
 impl EventPublisher for KafkaEventBus {
     async fn publish(&self, event: Event) -> TraitResult<()> {
-        self.publish_internal(&event).await.map(|_| ()).map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+        self.publish_internal(&event)
+            .await
+            .map(|_| ())
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 
     async fn publish_to_topic(&self, topic: &str, event: Event) -> TraitResult<()> {
-        let payload = serde_json::to_vec(&event).map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
+        let payload = serde_json::to_vec(&event)
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
         let record = FutureRecord::to(topic)
             .key("") // No specific key for direct topic publish
             .payload(&payload);
@@ -226,7 +209,14 @@ impl EventPublisher for KafkaEventBus {
         &self,
         group_name: &str,
         _consumer_name: &str,
-        handler: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>> + Send + Sync>,
+        handler: Arc<
+            dyn Fn(
+                    Event,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>>
+                + Send
+                + Sync,
+        >,
     ) -> TraitResult<()> {
         let consumer_topics = vec![
             self.topics.orders_created.clone(),
@@ -242,14 +232,16 @@ impl EventPublisher for KafkaEventBus {
             &self.bootstrap_servers,
             consumer_topics,
             Some(group_name.to_string()),
-        ).map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
+        )
+        .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
 
-        consumer.stream(move |event| {
-            let h = handler.clone();
-            async move {
-                h(event).await.map_err(|e| anyhow::anyhow!(e.to_string()))
-            }
-        }).await.map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+        consumer
+            .stream(move |event| {
+                let h = handler.clone();
+                async move { h(event).await.map_err(|e| anyhow::anyhow!(e.to_string())) }
+            })
+            .await
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 }
 
@@ -259,15 +251,9 @@ impl KafkaEventBus {
         let (topic, key) = self.route_event(event);
         let payload = serde_json::to_vec(event)?;
 
-        let record = FutureRecord::to(topic)
-            .key(&key)
-            .payload(&payload);
+        let record = FutureRecord::to(topic).key(&key).payload(&payload);
 
-        match self
-            .producer
-            .send(record, Duration::from_secs(5))
-            .await
-        {
+        match self.producer.send(record, Duration::from_secs(5)).await {
             Ok((partition, offset)) => {
                 let id = format!("{}:{}:{}", topic, partition, offset);
                 info!(

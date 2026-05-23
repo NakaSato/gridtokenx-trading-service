@@ -1,26 +1,32 @@
 mod builder;
 
-use tracing::{info, error};
-use sqlx::postgres::PgPoolOptions;
 use builder::ServiceBuilder;
+use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 use trading_api::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup telemetry
     trading_infra::init_telemetry("trading-service");
-    
+
     // Install default crypto provider for rustls (required for rustls 0.23+)
-    rustls::crypto::ring::default_provider().install_default().expect("Failed to install default crypto provider");
-    
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install default crypto provider");
+
     info!("Starting GridTokenX Trading Service (Modular Monolith)");
 
     // 2. Load Config
     let config = std::sync::Arc::new(trading_core::config::Config::from_env()?);
-    
-    let port: u16 = std::env::var("HTTP_PORT").unwrap_or_else(|_| "8093".to_string()).parse()?;
-    let grpc_port: u16 = std::env::var("GRPC_PORT").unwrap_or_else(|_| "8092".to_string()).parse()?;
+
+    let port: u16 = std::env::var("HTTP_PORT")
+        .unwrap_or_else(|_| "8093".to_string())
+        .parse()?;
+    let grpc_port: u16 = std::env::var("GRPC_PORT")
+        .unwrap_or_else(|_| "8092".to_string())
+        .parse()?;
 
     // 3. Initialize DB
     let pool = PgPoolOptions::new()
@@ -29,10 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // 4. Build system
-    let (infra, services) = ServiceBuilder::build(
-        pool,
-        config.clone(),
-    ).await?;
+    let (infra, services) = ServiceBuilder::build(pool, config.clone()).await?;
 
     info!("System assembled successfully");
 
@@ -90,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
     shutdown_token.cancel();
-    
+
     // Give it a moment to stop
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
