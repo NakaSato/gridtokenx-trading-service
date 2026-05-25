@@ -1,7 +1,7 @@
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 use trading_core::fast_price::FastPrice;
 use trading_core::traits::{EventPublisher, OrderRepository, SettlementRepository, TraitResult};
 use trading_engine::engine::{MatchingEngine, TopologySnapshot};
@@ -34,8 +34,8 @@ impl MatcherService {
     /// Run a matching cycle for all active orders
     pub async fn run_matching_cycle(&self) -> TraitResult<usize> {
         // 1. Fetch active orders
-        let mut buy_orders = self.order_repo.get_active_buy_orders().await?;
-        let mut sell_orders = self.order_repo.get_active_sell_orders().await?;
+        let buy_orders = self.order_repo.get_active_buy_orders().await?;
+        let sell_orders = self.order_repo.get_active_sell_orders().await?;
 
         if buy_orders.is_empty() || sell_orders.is_empty() {
             return Ok(0);

@@ -217,15 +217,8 @@ impl SettlementService {
                     }
                 }
                 Err(e) => {
-                    // Fallback to static incentive if on-chain config fetch fails (e.g., zone not initialized)
-                    if gridtokenx_blockchain_core::island::IslandRegistry::get_island_config(
-                        zone_id,
-                    )
-                    .is_some()
-                    {
-                        feed_in_tariff *= rust_decimal_macros::dec!(1.15);
-                        warn!("⚠️ Failed to fetch dynamic ZoneConfig ({}). Falling back to static island incentive (1.15x).", e);
-                    }
+                    // If on-chain config fetch fails, we proceed with base tariff.
+                    warn!("⚠️ Failed to fetch dynamic ZoneConfig for Zone {}: {}. Using base Feed-in-Tariff.", zone_id, e);
                 }
             }
         }

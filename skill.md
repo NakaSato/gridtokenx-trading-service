@@ -304,7 +304,6 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 # observability
 tracing = "0.1"
 tracing-subscriber = "0.3"
-opentelemetry = "0.24"
 
 # errors
 thiserror = "1"

@@ -48,7 +48,6 @@ async fn test_settlement_numeric_integrity() {
         matched_at: chrono::Utc::now(),
         buyer_session_token: None,
         seller_session_token: None,
-        otel_trace_context: None,
     };
 
     // 4. Initialize BlockchainSettlementProvider (with dummy BlockchainService)
