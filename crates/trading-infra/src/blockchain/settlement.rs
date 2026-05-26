@@ -1,7 +1,7 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::Signer;
 use std::sync::Arc;
 use tracing::info;
 
@@ -144,16 +144,16 @@ impl BlockchainSettlementProvider {
     }
 
     /// Execute direct energy token transfer (Secondary/Fallback)
-    #[tracing::instrument(skip(self, settlement, seller_keypair), fields(settlement_id = %settlement.id))]
+    #[tracing::instrument(skip(self, settlement, seller_signer), fields(settlement_id = %settlement.id))]
     pub async fn execute_energy_transfer(
         &self,
         settlement: &Settlement,
-        seller_keypair: &Keypair,
+        seller_signer: &(dyn Signer + Send + Sync),
         buyer_pubkey: &Pubkey,
     ) -> trading_core::error::Result<SettlementTransaction> {
         let mint_str = std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default();
         let mint = BlockchainService::parse_pubkey(&mint_str)?;
-        let seller_pubkey = seller_keypair.pubkey();
+        let seller_pubkey = seller_signer.pubkey();
 
         let seller_token_account = self
             .blockchain
@@ -170,7 +170,7 @@ impl BlockchainSettlementProvider {
         let signature = self
             .blockchain
             .transfer_tokens(
-                seller_keypair,
+                seller_signer,
                 &seller_token_account,
                 &buyer_token_account,
                 &mint,

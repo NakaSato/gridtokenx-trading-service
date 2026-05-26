@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signer;
 use std::sync::Arc;
 use tracing::info;
 use trading_core::traits::{BlockchainGateway, TraitResult};
@@ -157,7 +158,7 @@ impl BlockchainGateway for BlockchainService {
                 amount_u64,
                 "Solar",           // Source
                 "Oracle Verified", // Validation data
-                &authority,
+                &authority as &(dyn Signer + Send + Sync),
             )
             .await
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
@@ -184,5 +185,35 @@ impl BlockchainGateway for BlockchainService {
         provider
             .execute_generation_mint(&wallet_pubkey, energy_amount, timestamp)
             .await
+    }
+
+    async fn execute_create_order(
+        &self,
+        user_id: Uuid,
+        market_pubkey: &str,
+        amount: u64,
+        price: u64,
+        order_side: &str,
+        erc_id: Option<&str>,
+        zone_id: u32,
+    ) -> TraitResult<(String, String, u64)> {
+        let signer = self.get_custodial_signer(user_id).await.map_err(|e| {
+            trading_core::error::ApiError::Internal(format!("Failed to get custodial signer: {}", e))
+        })?;
+
+        let (sig, pda, index) = self
+            .execute_create_order(
+                &signer,
+                market_pubkey,
+                amount,
+                price,
+                order_side,
+                erc_id,
+                zone_id,
+            )
+            .await
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
+
+        Ok((sig.to_string(), pda, index))
     }
 }

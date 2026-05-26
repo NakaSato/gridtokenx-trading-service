@@ -14,6 +14,7 @@ use tracing::info;
 pub struct BlockchainService {
     pub core: Arc<gridtokenx_blockchain_core::BlockchainService>,
     pub db: Option<sqlx::PgPool>,
+    pub identity_gateway: Option<Arc<dyn trading_core::traits::IdentityGateway>>,
 }
 
 impl std::fmt::Debug for BlockchainService {
@@ -59,7 +60,14 @@ impl BlockchainService {
         Ok(Self {
             core: Arc::new(core),
             db,
+            identity_gateway: None,
         })
+    }
+
+    /// Set the identity gateway for custodial signing
+    pub fn with_identity_gateway(mut self, gateway: Arc<dyn trading_core::traits::IdentityGateway>) -> Self {
+        self.identity_gateway = Some(gateway);
+        self
     }
 
     /// Load the authority keypair from the environment/config
@@ -197,13 +205,13 @@ impl BlockchainService {
     /// Ensure token account exists
     pub async fn ensure_token_account_exists(
         &self,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
         user_wallet: &Pubkey,
         mint: &Pubkey,
     ) -> Result<Pubkey> {
         self.core
             .token_manager
-            .ensure_token_account_exists(authority, user_wallet, mint)
+            .ensure_token_account_exists_with_signer(authority, user_wallet, mint)
             .await
     }
 
@@ -234,7 +242,7 @@ impl BlockchainService {
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_create_order(
         &self,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
         market_pubkey: &str,
         amount: u64,
         price: u64,
@@ -268,7 +276,7 @@ impl BlockchainService {
         let sig = self
             .core
             .on_chain_manager
-            .build_and_send_transaction(vec![instruction], &[authority])
+            .build_and_send_transaction_with_signers(vec![instruction], &[authority as &(dyn Signer + Send + Sync)])
             .await?;
         Ok((sig, order_pda.to_string(), index))
     }
@@ -276,7 +284,7 @@ impl BlockchainService {
     /// Execute on-chain match_orders
     pub async fn execute_match_orders(
         &self,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
         market_pubkey: &str,
         buy_order_pubkey: &str,
         sell_order_pubkey: &str,
@@ -297,14 +305,14 @@ impl BlockchainService {
 
         self.core
             .on_chain_manager
-            .build_and_send_transaction(vec![instruction], &[authority])
+            .build_and_send_transaction_with_signers(vec![instruction], &[authority as &(dyn Signer + Send + Sync)])
             .await
     }
 
     /// Lock tokens to escrow (transfer)
     pub async fn lock_tokens_to_escrow(
         &self,
-        user: &Keypair,
+        user: &(dyn Signer + Send + Sync),
         from_ata: &Pubkey,
         to_ata: &Pubkey,
         mint: &Pubkey,
@@ -313,14 +321,14 @@ impl BlockchainService {
     ) -> Result<Signature> {
         self.core
             .token_manager
-            .transfer_tokens(user, from_ata, to_ata, mint, amount, decimals)
+            .transfer_tokens_with_signer(user, from_ata, to_ata, mint, amount, decimals)
             .await
     }
 
     /// Release escrow to seller
     pub async fn release_escrow_to_seller(
         &self,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
         escrow_ata: &Pubkey,
         receiver_ata: &Pubkey,
         mint: &Pubkey,
@@ -329,14 +337,14 @@ impl BlockchainService {
     ) -> Result<Signature> {
         self.core
             .token_manager
-            .transfer_tokens(authority, escrow_ata, receiver_ata, mint, amount, decimals)
+            .transfer_tokens_with_signer(authority, escrow_ata, receiver_ata, mint, amount, decimals)
             .await
     }
 
     /// Refund escrow to buyer
     pub async fn refund_escrow_to_buyer(
         &self,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
         escrow_ata: &Pubkey,
         user_ata: &Pubkey,
         mint: &Pubkey,
@@ -345,7 +353,7 @@ impl BlockchainService {
     ) -> Result<Signature> {
         self.core
             .token_manager
-            .transfer_tokens(authority, escrow_ata, user_ata, mint, amount, decimals)
+            .transfer_tokens_with_signer(authority, escrow_ata, user_ata, mint, amount, decimals)
             .await
     }
 
@@ -409,10 +417,10 @@ impl BlockchainService {
         energy_amount: u64,
         renewable_source: &str,
         validation_data: &str,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
     ) -> Result<Signature> {
         self.core
-            .issue_erc(
+            .issue_erc_with_signer(
                 certificate_id,
                 user_wallet,
                 meter_account,
@@ -428,11 +436,11 @@ impl BlockchainService {
     pub async fn transfer_erc(
         &self,
         certificate_id: &str,
-        owner: &Keypair,
+        owner: &(dyn Signer + Send + Sync),
         new_owner: &Pubkey,
     ) -> Result<Signature> {
         self.core
-            .transfer_erc(certificate_id, owner, new_owner)
+            .transfer_erc_with_signer(certificate_id, owner, new_owner)
             .await
     }
 
@@ -441,15 +449,10 @@ impl BlockchainService {
         &self,
         certificate_id: &str,
         reason: &str,
-        authority: &Keypair,
+        authority: &(dyn Signer + Send + Sync),
     ) -> Result<Signature> {
-        let instruction = self
-            .core
-            .instruction_builder
-            .build_revoke_erc_instruction(certificate_id, reason)?;
         self.core
-            .on_chain_manager
-            .build_and_send_transaction(vec![instruction], &[authority])
+            .revoke_erc_with_signer(certificate_id, reason, authority)
             .await
     }
 
@@ -524,7 +527,7 @@ impl BlockchainService {
 
     pub async fn transfer_tokens(
         &self,
-        user: &Keypair,
+        user: &(dyn Signer + Send + Sync),
         from_ata: &Pubkey,
         to_ata: &Pubkey,
         mint: &Pubkey,
@@ -533,7 +536,7 @@ impl BlockchainService {
     ) -> Result<Signature> {
         self.core
             .token_manager
-            .transfer_tokens(user, from_ata, to_ata, mint, amount, decimals)
+            .transfer_tokens_with_signer(user, from_ata, to_ata, mint, amount, decimals)
             .await
     }
 
@@ -751,5 +754,16 @@ impl BlockchainService {
             Some(addr) => Ok(Some(Self::parse_pubkey(&addr)?)),
             None => Ok(None),
         }
+    }
+
+    /// Get a custodial signer for a user
+    pub async fn get_custodial_signer(&self, user_id: uuid::Uuid) -> Result<crate::identity::CustodialSigner> {
+        let gateway = self.identity_gateway.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Identity gateway not configured for custodial signing"))?;
+        
+        let wallet = self.get_user_primary_wallet(&user_id).await?
+            .ok_or_else(|| anyhow::anyhow!("User has no primary wallet for signing"))?;
+            
+        Ok(crate::identity::CustodialSigner::new(user_id, wallet, gateway.clone()))
     }
 }

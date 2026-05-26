@@ -32,6 +32,7 @@ trading-persistence = { path = "crates/trading-persistence" }
 trading-infra = { path = "crates/trading-infra" }
 trading-logic = { path = "crates/trading-logic" }
 trading-api = { path = "crates/trading-api" }
+iam-protocol = { path = "../gridtokenx-iam-service/crates/iam-protocol" }
 
 # ── Async Runtime ────────────────────────────────────────────────────────────
 tokio = { version = "1.48", features = [

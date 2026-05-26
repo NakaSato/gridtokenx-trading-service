@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         analytics_repo: infra.analytics_repo,
         events: infra.events,
         blockchain: infra.blockchain,
+        identity: infra.identity,
         audit: infra.audit,
         matcher: services.matcher,
         settlement: services.settlement,

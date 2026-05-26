@@ -20,6 +20,7 @@ pub struct Infrastructure {
     pub carbon_repo: Arc<dyn CarbonRepository>,
     pub analytics_repo: Arc<dyn AnalyticsRepository>,
     pub blockchain: Arc<dyn BlockchainGateway>,
+    pub identity: Arc<dyn IdentityGateway>,
     pub cache: Arc<dyn CacheStore>,
     pub audit: Arc<dyn AuditLog>,
     pub events: Arc<dyn EventPublisher>,
@@ -52,6 +53,13 @@ impl ServiceBuilder {
         let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
 
+        let identity: Arc<dyn IdentityGateway> = Arc::new(
+            trading_infra::identity::IamIdentityGateway::new(
+                &config.iam_service_url,
+                config.internal_api_key.clone(),
+            )
+        );
+
         let blockchain: Arc<dyn BlockchainGateway> = Arc::new(
             BlockchainService::new(
                 chain_bridge_url.to_string(),
@@ -60,7 +68,8 @@ impl ServiceBuilder {
                 Some(db_pool.clone()),
                 None,
             )
-            .await?,
+            .await?
+            .with_identity_gateway(identity.clone()),
         );
 
         let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
@@ -97,6 +106,7 @@ impl ServiceBuilder {
             carbon_repo,
             analytics_repo,
             blockchain: blockchain.clone(),
+            identity: identity.clone(),
             cache,
             audit: audit.clone(),
             events: events.clone(),

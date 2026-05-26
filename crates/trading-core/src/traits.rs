@@ -228,6 +228,18 @@ pub trait BlockchainGateway: Send + Sync {
         energy_amount: Decimal,
         timestamp: i64,
     ) -> TraitResult<String>;
+
+    /// Execute on-chain create_order with custodial signing.
+    async fn execute_create_order(
+        &self,
+        user_id: Uuid,
+        market_pubkey: &str,
+        amount: u64,
+        price: u64,
+        order_side: &str,
+        erc_id: Option<&str>,
+        zone_id: u32,
+    ) -> TraitResult<(String, String, u64)>;
 }
 
 /// Cache store (Redis).
@@ -242,6 +254,18 @@ pub trait CacheStore: Send + Sync {
 #[async_trait]
 pub trait AuditLog: Send + Sync {
     async fn log_action(&self, user_id: Uuid, action: &str, details: &str) -> TraitResult<()>;
+}
+
+/// Identity and Access Management gateway.
+#[async_trait]
+pub trait IdentityGateway: Send + Sync {
+    /// Request IAM to sign a message with a user's managed wallet.
+    async fn sign_message(
+        &self,
+        user_id: Uuid,
+        wallet_address: Option<String>,
+        message: Vec<u8>,
+    ) -> TraitResult<Vec<u8>>;
 }
 
 /// Virtual Power Plant (VPP) persistence.

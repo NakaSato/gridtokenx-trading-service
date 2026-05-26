@@ -23,6 +23,7 @@ pub struct Config {
     pub solana_programs: SolanaProgramsConfig,
     pub encryption_secret: String,
     pub iam_service_url: String,
+    pub internal_api_key: String,
     /// Enable Kafka-backed event sourcing (falls back to Redis Streams if false)
     pub kafka_enabled: bool,
     /// Kafka bootstrap servers (e.g., "localhost:9001")
@@ -117,6 +118,7 @@ impl Config {
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_SERVICE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:5010".to_string()),
+            internal_api_key: env::var("INTERNAL_API_KEY").unwrap_or_default(),
             kafka_enabled: env::var("KAFKA_EVENTS_ENABLED")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse()

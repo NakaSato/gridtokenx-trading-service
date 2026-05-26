@@ -6,6 +6,13 @@ description = "External integration adapters (blockchain, Kafka, Redis, audit) f
 
 [dependencies]
 trading-core.workspace = true
+iam-protocol.workspace = true
+
+# gRPC / ConnectRPC
+connectrpc.workspace = true
+buffa.workspace = true
+http.workspace = true
+http-body.workspace = true
 
 # Async
 tokio.workspace = true
