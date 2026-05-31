@@ -3,15 +3,16 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use uuid::Uuid;
 use std::sync::Arc;
-use gridtokenx_trading_service::domain::trading::engine::fast_decimal::FastPrice;
-use gridtokenx_trading_service::domain::trading::clearing::types::TradeMatch;
-use gridtokenx_trading_service::infra::blockchain::settlement::BlockchainSettlementProvider;
-use gridtokenx_trading_service::infra::blockchain::BlockchainService;
-use gridtokenx_trading_service::core::config::SolanaProgramsConfig;
+use trading_core::fast_price::FastPrice;
+use trading_core::models::TradeMatch;
+use trading_infra::blockchain::settlement::BlockchainSettlementProvider;
+use trading_infra::blockchain::BlockchainService;
+use trading_core::config::SolanaProgramsConfig;
 
 #[tokio::test]
 async fn test_settlement_numeric_integrity() {
     // 1. Setup Environment
+    std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
     std::env::set_var("ENERGY_TOKEN_MINT", "EneryTokenMint111111111111111111111111111");
     std::env::set_var("CURRENCY_TOKEN_MINT", "CurrntTokenMint1111111111111111111111111");
     std::env::set_var("FEE_COLLECTOR_WALLET", "FeeCollector111111111111111111111111111");
@@ -57,6 +58,7 @@ async fn test_settlement_numeric_integrity() {
         energy_token_program_id: "Energy1111111111111111111111111111111".to_string(),
         governance_program_id: "Gov11111111111111111111111111111111111".to_string(),
         trading_program_id: "Trade1111111111111111111111111111111111".to_string(),
+        trading_market_id: "Market1111111111111111111111111111111111".to_string(),
     };
 
     // We use a dummy URL. Service creation should succeed if it doesn't try to connect immediately.
@@ -64,6 +66,7 @@ async fn test_settlement_numeric_integrity() {
         "http://localhost:8899".to_string(),
         "localnet".to_string(),
         program_ids,
+        None,
         None,
     ).await.unwrap());
 

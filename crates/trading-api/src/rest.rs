@@ -115,6 +115,8 @@ pub async fn submit_order(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
 
+    tracing::info!("Submit order request: {:?}", req);
+
     let amount = Decimal::from_str(&req.energy_amount_kwh).map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
@@ -175,7 +177,7 @@ pub async fn submit_order(
     if req.custodial_sign.unwrap_or(false) {
         info!("🔗 On-chain order creation requested for user {}", user.user_id);
         
-        let market_pubkey = "C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu"; // Default market for now
+        let market_pubkey = &state.config.solana_programs.trading_market_id;
         let amount_u64 = (amount * Decimal::from(1_000_000_000i64)).to_u64().unwrap_or(0);
         let price_u64 = (price * Decimal::from(1_000_000i64)).to_u64().unwrap_or(0);
         

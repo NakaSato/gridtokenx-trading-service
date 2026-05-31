@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package gridtokenx.chain.v1;
+
+service ChainBridgeService {
+  rpc SimulateTransaction (SimulateTransactionRequest) returns (SimulateTransactionResponse) {}
+  rpc SubmitTransaction (SubmitTransactionRequest) returns (SubmitTransactionResponse) {}
+  
+  // Read operations migrated from Solana RPC
+  rpc GetBalance (GetBalanceRequest) returns (GetBalanceResponse) {}
+  rpc GetAccountData (GetAccountDataRequest) returns (GetAccountDataResponse) {}
+  rpc GetLatestBlockhash (GetLatestBlockhashRequest) returns (GetLatestBlockhashResponse) {}
+  rpc GetRecentPrioritizationFees (GetRecentPrioritizationFeesRequest) returns (GetRecentPrioritizationFeesResponse) {}
+  rpc GetTokenAccountBalance (GetTokenAccountBalanceRequest) returns (GetTokenAccountBalanceResponse) {}
+  rpc GetSignatureStatus (GetSignatureStatusRequest) returns (GetSignatureStatusResponse) {}
+  rpc GetSlot (GetSlotRequest) returns (GetSlotResponse) {}
+  rpc RequestAirdrop (RequestAirdropRequest) returns (RequestAirdropResponse) {}
+  rpc GetTransactionDetails (GetTransactionDetailsRequest) returns (GetTransactionDetailsResponse) {}
+  rpc GetEpochInfo (GetEpochInfoRequest) returns (GetEpochInfoResponse) {}
+}
+
+message SimulateTransactionRequest {
+  bytes serialized_transaction = 1;
+  string key_id = 2;
+}
+
+message SimulateTransactionResponse {
+  bool success = 1;
+  uint64 compute_units_consumed = 2;
+  string error_message = 3;
+  repeated string logs = 4;
+}
+
+message SubmitTransactionRequest {
+  bytes serialized_transaction = 1;
+  bool skip_preflight = 2;
+  uint32 retry_count = 3;
+  string key_id = 4; // ID of the key in Vault to use for signing
+}
+
+message SubmitTransactionResponse {
+  bool success = 1;
+  string signature = 2;
+  string error_message = 3;
+  uint64 slot = 4;
+}
+
+message AccountMeta {
+  string pubkey = 1;
+  bool is_signer = 2;
+  bool is_writable = 3;
+}
+
+message GetBalanceRequest {
+  string pubkey = 1;
+  bool force_refresh = 2;
+}
+
+message GetBalanceResponse {
+  uint64 lamports = 1;
+}
+
+message GetAccountDataRequest {
+  string pubkey = 1;
+}
+
+message GetAccountDataResponse {
+  bool exists = 1;
+  bytes data = 2;
+}
+
+message GetLatestBlockhashRequest {}
+
+message GetLatestBlockhashResponse {
+  string blockhash = 1;
+  uint64 last_valid_block_height = 2;
+}
+
+message GetRecentPrioritizationFeesRequest {
+  repeated string account_keys = 1;
+}
+
+message GetRecentPrioritizationFeesResponse {
+  repeated PrioritizationFee fees = 1;
+}
+
+message PrioritizationFee {
+  uint64 slot = 1;
+  uint64 prioritization_fee = 2;
+}
+
+message GetTokenAccountBalanceRequest {
+  string pubkey = 1;
+}
+
+message GetTokenAccountBalanceResponse {
+  string amount = 1;
+  uint32 decimals = 2;
+  double ui_amount = 3;
+}
+
+message GetSignatureStatusRequest {
+  string signature = 1;
+}
+
+message GetSignatureStatusResponse {
+  bool confirmed = 1;
+  string status = 2; // e.g. "processed", "confirmed", "finalized"
+  string error = 3;
+}
+
+message GetSlotRequest {}
+
+message GetSlotResponse {
+  uint64 slot = 1;
+}
+
+message RequestAirdropRequest {
+  string pubkey = 1;
+  uint64 lamports = 2;
+}
+
+message RequestAirdropResponse {
+  bool success = 1;
+  string signature = 2;
+  string error_message = 3;
+}
+
+message GetTransactionDetailsRequest {
+  string signature = 1;
+}
+
+message GetTransactionDetailsResponse {
+  bool found = 1;
+  uint64 slot = 2;
+  repeated string account_keys = 3;
+  string error = 4;
+}
+
+message GetEpochInfoRequest {}
+
+message GetEpochInfoResponse {
+  uint64 epoch = 1;
+  uint64 slot = 2;
+}

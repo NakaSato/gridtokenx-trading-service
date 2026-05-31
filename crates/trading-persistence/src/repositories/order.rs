@@ -96,8 +96,9 @@ impl OrderRepository for PostgresOrderRepository {
             r#"
             INSERT INTO trading_orders (
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
-                status, time_in_force, zone_id, meter_id, session_token
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                status, time_in_force, zone_id, meter_id, session_token,
+                order_pda, order_index, blockchain_tx_hash, blockchain_status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
         )
         .bind(order.id)
@@ -111,6 +112,10 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(order.zone_id)
         .bind(order.meter_id)
         .bind(&order.session_token)
+        .bind(&order.order_pda)
+        .bind(order.order_index)
+        .bind(&order.blockchain_tx_hash)
+        .bind(&order.blockchain_status)
         .execute(&self.pool)
         .await?;
 

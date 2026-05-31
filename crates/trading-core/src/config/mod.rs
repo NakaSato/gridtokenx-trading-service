@@ -16,6 +16,7 @@ pub struct Config {
     pub solana_rpc_url: String,
     pub chain_bridge_url: String,
     pub solana_ws_url: String,
+    pub solana_cluster: String,
     pub energy_token_mint: String,
     pub max_connections: u32,
     pub log_level: String,
@@ -46,16 +47,18 @@ pub struct SolanaProgramsConfig {
     pub energy_token_program_id: String,
     pub trading_program_id: String,
     pub governance_program_id: String,
+    pub trading_market_id: String,
 }
 
 impl Default for SolanaProgramsConfig {
     fn default() -> Self {
         Self {
-            registry_program_id: "C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu".to_string(),
-            oracle_program_id: "9XqNt1FqeKyhh4jBaagBSDUpJSMJhEy5gi8E5xx2RaeY".to_string(),
-            energy_token_program_id: "FC28Av9roMDjx5PHH7GkSQQB6qo1vi4jsXR4ymiaV4CW".to_string(),
-            trading_program_id: "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string(),
-            governance_program_id: "Czz3aK3CmJfTVJJYDkuu3DcCGfWmuBruC4gbKTqDeq9x".to_string(),
+            registry_program_id: "5xdQsDuGa1AaLVnddGhevvf2bngCvSob4dAepETS7oaJ".to_string(),
+            oracle_program_id: "D5MCbSHxhxZTRFyUMdTHcQvjzwjx5Lb8jg9PQ2LTja8S".to_string(),
+            energy_token_program_id: "EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe".to_string(),
+            trading_program_id: "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd".to_string(),
+            governance_program_id: "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ".to_string(),
+            trading_market_id: "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string(),
         }
     }
 }
@@ -95,6 +98,7 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:5040".to_string()),
             solana_ws_url: env::var("SOLANA_WS_URL")
                 .map_err(|_| anyhow::anyhow!("SOLANA_WS_URL environment variable is required"))?,
+            solana_cluster: env::var("SOLANA_CLUSTER").unwrap_or_else(|_| "localnet".to_string()),
             energy_token_mint: env::var("ENERGY_TOKEN_MINT").map_err(|_| {
                 anyhow::anyhow!("ENERGY_TOKEN_MINT environment variable is required")
             })?,
@@ -105,18 +109,21 @@ impl Config {
             tokenization: TokenizationConfig::from_env()?,
             solana_programs: SolanaProgramsConfig {
                 registry_program_id: env::var("SOLANA_REGISTRY_PROGRAM_ID")
-                    .unwrap_or_else(|_| "C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu".to_string()),
+                    .unwrap_or_else(|_| "5xdQsDuGa1AaLVnddGhevvf2bngCvSob4dAepETS7oaJ".to_string()),
                 oracle_program_id: env::var("SOLANA_ORACLE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "9XqNt1FqeKyhh4jBaagBSDUpJSMJhEy5gi8E5xx2RaeY".to_string()),
+                    .unwrap_or_else(|_| "D5MCbSHxhxZTRFyUMdTHcQvjzwjx5Lb8jg9PQ2LTja8S".to_string()),
                 energy_token_program_id: env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
-                    .unwrap_or_else(|_| "FC28Av9roMDjx5PHH7GkSQQB6qo1vi4jsXR4ymiaV4CW".to_string()),
+                    .unwrap_or_else(|_| "EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe".to_string()),
                 trading_program_id: env::var("SOLANA_TRADING_PROGRAM_ID")
-                    .unwrap_or_else(|_| "HHAG2cG6sGHTWFwiEh1HBgfqZJWBbnsYzv4f5KtHavUr".to_string()),
+                    .unwrap_or_else(|_| "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd".to_string()),
                 governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "Czz3aK3CmJfTVJJYDkuu3DcCGfWmuBruC4gbKTqDeq9x".to_string()),
+                    .unwrap_or_else(|_| "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ".to_string()),
+                trading_market_id: env::var("SOLANA_TRADING_MARKET_ID")
+                    .unwrap_or_else(|_| "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string()),
             },
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
-            iam_service_url: env::var("IAM_SERVICE_URL")
+            iam_service_url: env::var("IAM_GRPC_URL")
+                .or_else(|_| env::var("IAM_SERVICE_URL"))
                 .unwrap_or_else(|_| "http://127.0.0.1:5010".to_string()),
             internal_api_key: env::var("INTERNAL_API_KEY").unwrap_or_default(),
             kafka_enabled: env::var("KAFKA_EVENTS_ENABLED")

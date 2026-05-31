@@ -46,8 +46,10 @@ impl Signer for CustodialSigner {
         let gateway = self.gateway.clone();
         let message_vec = message.to_vec();
 
-        let sig_bytes = handle.block_on(async move {
-            gateway.sign_message(user_id, wallet_address, message_vec).await
+        let sig_bytes = tokio::task::block_in_place(|| {
+            handle.block_on(async move {
+                gateway.sign_message(user_id, wallet_address, message_vec).await
+            })
         }).map_err(|e| {
             solana_sdk::signer::SignerError::Custom(format!("IAM signing failed: {}", e))
         })?;

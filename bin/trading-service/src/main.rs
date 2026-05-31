@@ -1,6 +1,4 @@
-mod builder;
-
-use builder::ServiceBuilder;
+use trading_service::builder::ServiceBuilder;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -70,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 7. Start API Server
     let state = AppState {
+        config: config.clone(),
         order_repo: infra.order_repo,
         settlement_repo: infra.settlement_repo,
         futures_repo: infra.futures_repo,

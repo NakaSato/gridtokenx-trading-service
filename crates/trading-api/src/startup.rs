@@ -15,110 +15,7 @@ pub async fn run(
     token: CancellationToken,
 ) -> anyhow::Result<()> {
     // 1. Build REST Router
-    let app = Router::new()
-        // Spot / Core Orders
-        .route(
-            "/api/v1/orders",
-            axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
-        )
-        .route(
-            "/api/v1/orders/",
-            axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
-        )
-        .route(
-            "/api/v1/orders/{id}",
-            axum::routing::get(crate::rest::list_orders).delete(crate::rest::cancel_order),
-        ) // Note: list_orders is probably get_order
-        .route(
-            "/api/v1/quotes",
-            axum::routing::post(crate::rest::create_quote),
-        )
-        .route(
-            "/api/v1/zones/{zone_id}/book",
-            axum::routing::get(crate::rest::get_order_book),
-        )
-        .route(
-            "/api/v1/stats",
-            axum::routing::get(crate::rest::get_market_stats),
-        )
-        // Futures
-        .nest(
-            "/api/v1/futures",
-            Router::new()
-                .route(
-                    "/products",
-                    axum::routing::get(crate::rest::get_futures_products),
-                )
-                .route(
-                    "/candles",
-                    axum::routing::get(crate::rest::get_futures_candles),
-                )
-                .route(
-                    "/book",
-                    axum::routing::get(crate::rest::get_futures_order_book),
-                )
-                .route(
-                    "/orders",
-                    axum::routing::post(crate::rest::create_futures_order)
-                        .get(crate::rest::get_futures_orders),
-                )
-                .route(
-                    "/positions",
-                    axum::routing::get(crate::rest::get_futures_positions),
-                )
-                .route(
-                    "/positions/{id}",
-                    axum::routing::delete(crate::rest::close_futures_position),
-                ),
-        )
-        // User Data & Analytics
-        .route(
-            "/api/v1/wallets/{address}/balance",
-            axum::routing::get(crate::rest::get_wallet_balance),
-        )
-        .route(
-            "/api/v1/analytics/stats",
-            axum::routing::get(crate::rest::get_user_analytics_stats),
-        )
-        .route(
-            "/api/v1/analytics/history",
-            axum::routing::get(crate::rest::get_user_analytics_history),
-        )
-        .route(
-            "/api/v1/transactions",
-            axum::routing::get(crate::rest::get_user_transactions),
-        )
-        // Carbon / ESG
-        .nest(
-            "/api/v1/carbon",
-            Router::new()
-                .route(
-                    "/balance",
-                    axum::routing::get(crate::rest::get_carbon_balance),
-                )
-                .route(
-                    "/history",
-                    axum::routing::get(crate::rest::get_carbon_history),
-                )
-                .route(
-                    "/transactions",
-                    axum::routing::get(crate::rest::get_carbon_transactions),
-                )
-                .route(
-                    "/transfers",
-                    axum::routing::post(crate::rest::transfer_carbon_credits),
-                ),
-        )
-        // Settlement
-        .route(
-            "/api/v1/settlement/mint",
-            axum::routing::post(crate::rest::settle_generation_mint),
-        )
-        .route("/health", axum::routing::get(health_check))
-        .route("/health/ready", axum::routing::get(health_check))
-        .route("/metrics", axum::routing::get(metrics_handler))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
+    let app = build_router(state.clone());
 
     // 2. Initialize gRPC Service
     let grpc_service = TradingGrpcService::new(state);
@@ -177,4 +74,111 @@ async fn health_check() -> impl IntoResponse {
 
 async fn metrics_handler() -> impl IntoResponse {
     (StatusCode::OK, "trading_active_orders 0\n")
+}
+
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        // Spot / Core Orders
+        .route(
+            "/api/v1/orders",
+            axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
+        )
+        .route(
+            "/api/v1/orders/",
+            axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
+        )
+        .route(
+            "/api/v1/orders/:id",
+            axum::routing::get(crate::rest::list_orders).delete(crate::rest::cancel_order),
+        )
+        .route(
+            "/api/v1/quotes",
+            axum::routing::post(crate::rest::create_quote),
+        )
+        .route(
+            "/api/v1/zones/:zone_id/book",
+            axum::routing::get(crate::rest::get_order_book),
+        )
+        .route(
+            "/api/v1/stats",
+            axum::routing::get(crate::rest::get_market_stats),
+        )
+        // Futures
+        .nest(
+            "/api/v1/futures",
+            Router::new()
+                .route(
+                    "/products",
+                    axum::routing::get(crate::rest::get_futures_products),
+                )
+                .route(
+                    "/candles",
+                    axum::routing::get(crate::rest::get_futures_candles),
+                )
+                .route(
+                    "/book",
+                    axum::routing::get(crate::rest::get_futures_order_book),
+                )
+                .route(
+                    "/orders",
+                    axum::routing::post(crate::rest::create_futures_order)
+                        .get(crate::rest::get_futures_orders),
+                )
+                .route(
+                    "/positions",
+                    axum::routing::get(crate::rest::get_futures_positions),
+                )
+                .route(
+                    "/positions/:id",
+                    axum::routing::delete(crate::rest::close_futures_position),
+                ),
+        )
+        // User Data & Analytics
+        .route(
+            "/api/v1/wallets/:address/balance",
+            axum::routing::get(crate::rest::get_wallet_balance),
+        )
+        .route(
+            "/api/v1/analytics/stats",
+            axum::routing::get(crate::rest::get_user_analytics_stats),
+        )
+        .route(
+            "/api/v1/analytics/history",
+            axum::routing::get(crate::rest::get_user_analytics_history),
+        )
+        .route(
+            "/api/v1/transactions",
+            axum::routing::get(crate::rest::get_user_transactions),
+        )
+        // Carbon / ESG
+        .nest(
+            "/api/v1/carbon",
+            Router::new()
+                .route(
+                    "/balance",
+                    axum::routing::get(crate::rest::get_carbon_balance),
+                )
+                .route(
+                    "/history",
+                    axum::routing::get(crate::rest::get_carbon_history),
+                )
+                .route(
+                    "/transactions",
+                    axum::routing::get(crate::rest::get_carbon_transactions),
+                )
+                .route(
+                    "/transfers",
+                    axum::routing::post(crate::rest::transfer_carbon_credits),
+                ),
+        )
+        // Settlement
+        .route(
+            "/api/v1/settlement/mint",
+            axum::routing::post(crate::rest::settle_generation_mint),
+        )
+        .route("/health", axum::routing::get(health_check))
+        .route("/health/ready", axum::routing::get(health_check))
+        .route("/metrics", axum::routing::get(metrics_handler))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }

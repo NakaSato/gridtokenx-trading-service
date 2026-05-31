@@ -7,6 +7,7 @@ use trading_logic::{MatcherService, SettlementService};
 
 #[derive(Clone)]
 pub struct AppState {
+    pub config: Arc<trading_core::config::Config>,
     pub order_repo: Arc<dyn OrderRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,
     pub futures_repo: Arc<dyn FuturesRepository>,

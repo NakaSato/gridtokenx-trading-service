@@ -46,6 +46,7 @@ impl BlockchainService {
             governance_program_id: program_ids.governance_program_id,
             energy_token_program_id: program_ids.energy_token_program_id,
             trading_program_id: program_ids.trading_program_id,
+            trading_market_id: program_ids.trading_market_id,
         };
 
         let metrics = Arc::new(gridtokenx_blockchain_core::rpc::NoopMetrics);

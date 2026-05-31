@@ -1,0 +1,240 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use tower::ServiceExt; // for oneshot
+use sqlx::PgPool;
+use uuid::Uuid;
+use chrono::Utc;
+use serde_json::json;
+
+use trading_service::builder::ServiceBuilder;
+use trading_api::state::AppState;
+use trading_api::startup::build_router;
+use gridtokenx_blockchain_core::auth::{INTERNAL_ROLE_HEADER, GATEWAY_SECRET_HEADER};
+use trading_api::auth::USER_ID_HEADER;
+
+#[tokio::test]
+async fn test_api_routing_e2e() {
+    // 1. Establish database connection
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+
+    let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
+
+    // 2. Setup environment variables for config
+    std::env::set_var("TRADING_DATABASE_URL", &db_url);
+    std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
+    std::env::set_var("ENERGY_TOKEN_MINT", "EneryTokenMint111111111111111111111111111");
+    std::env::set_var("CURRENCY_TOKEN_MINT", "8BGFtQLRaY9Nh5BGUwjJvdeXEsscCgJAi5zTgALk1Vg5");
+    std::env::set_var("FEE_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
+    std::env::set_var("WHEELING_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
+    std::env::set_var("LOSS_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
+    std::env::set_var("SOLANA_TRADING_PROGRAM_ID", "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd");
+    std::env::set_var("REDIS_URL", "redis://localhost:7010");
+    std::env::set_var("SOLANA_RPC_URL", "http://localhost:8899");
+    std::env::set_var("SOLANA_WS_URL", "ws://localhost:8900");
+
+    let config = std::sync::Arc::new(trading_core::config::Config::from_env().expect("Failed to load config"));
+
+    // 3. Build system components (with real DB and Redis connection, no mock repositories)
+    let (infra, services) = ServiceBuilder::build(pool.clone(), config.clone()).await.expect("Failed to build system");
+
+    let state = AppState {
+        config,
+        order_repo: infra.order_repo,
+        settlement_repo: infra.settlement_repo,
+        futures_repo: infra.futures_repo,
+        carbon_repo: infra.carbon_repo,
+        analytics_repo: infra.analytics_repo,
+        events: infra.events,
+        blockchain: infra.blockchain,
+        identity: infra.identity,
+        audit: infra.audit,
+        matcher: services.matcher,
+        settlement: services.settlement,
+    };
+
+    // 4. Initialize in-memory Axum Router
+    let app = build_router(state);
+
+    // 5. Test Case 1: GET /health (Public)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body_json["status"], "ok");
+    assert_eq!(body_json["service"], "trading");
+
+    // 6. Test Case 2: GET /metrics (Public)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let metrics_str = std::str::from_utf8(&body).unwrap();
+    assert!(metrics_str.contains("trading_active_orders"));
+
+    // 7. Test Case 3: POST /api/v1/orders (Fails: Missing Auth/Role Headers)
+    let payload = json!({
+        "side": "buy",
+        "order_type": "limit",
+        "energy_amount_kwh": "12.5",
+        "price_per_kwh": "4.25",
+        "zone_id": 1
+    });
+
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/orders")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Custom extractor returns 401 Unauthorized when USER_ID_HEADER is missing
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 8. Test Case 4: POST /api/v1/orders (Fails: Missing Gateway Secret for api-gateway role)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/orders")
+                .header(INTERNAL_ROLE_HEADER, "api-gateway")
+                .header(USER_ID_HEADER, Uuid::new_v4().to_string())
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // ServiceRole: ApiGateway requires GATEWAY_SECRET_HEADER check, mismatch defaults to Unknown role, yielding 401 Unauthorized
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 9. Database Setup for Successful Operations
+    let user_id = Uuid::new_v4();
+    let email = format!("api-test-user-{}@gridtokenx.com", user_id);
+    let username = format!("api_test_user_{}", user_id);
+    let wallet = format!("Wallet_{}", user_id.to_string()[..32].to_string());
+
+    sqlx::query(
+        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)"
+    )
+    .bind(user_id)
+    .bind(&email)
+    .bind(&username)
+    .bind("mock_hash")
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert test user");
+
+    let epoch_id = Uuid::new_v4();
+    let epoch_number = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    let start_time = Utc::now();
+    let end_time = Utc::now() + chrono::Duration::minutes(15);
+
+    sqlx::query(
+        "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1, $2, $3, $4, 'pending')"
+    )
+    .bind(epoch_id)
+    .bind(epoch_number)
+    .bind(start_time)
+    .bind(end_time)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert test epoch");
+
+    // 10. Test Case 5: POST /api/v1/orders (Success: Authenticated & Valid Request)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/orders")
+                .header(INTERNAL_ROLE_HEADER, "api-gateway")
+                .header(GATEWAY_SECRET_HEADER, "gridtokenx-gateway-secret-2025")
+                .header(USER_ID_HEADER, user_id.to_string())
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let order_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let order_id_str = order_resp["id"].as_str().expect("Order response should contain UUID id");
+    let order_uuid = Uuid::parse_str(order_id_str).unwrap();
+
+    // 11. Test Case 6: GET /api/v1/orders (Success: Retrieve User Orders)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/orders")
+                .header(INTERNAL_ROLE_HEADER, "api-gateway")
+                .header(GATEWAY_SECRET_HEADER, "gridtokenx-gateway-secret-2025")
+                .header(USER_ID_HEADER, user_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let list_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let orders_list = list_resp["data"].as_array().expect("Response data should be an array");
+    assert!(orders_list.iter().any(|o| o["id"] == order_id_str));
+
+    // 12. Test Case 7: DELETE /api/v1/orders/{id} (Success: Cancel Order)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&format!("/api/v1/orders/{}", order_uuid))
+                .header(INTERNAL_ROLE_HEADER, "api-gateway")
+                .header(GATEWAY_SECRET_HEADER, "gridtokenx-gateway-secret-2025")
+                .header(USER_ID_HEADER, user_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let cancel_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(cancel_resp["status"], "cancelled");
+    assert_eq!(cancel_resp["order_id"], order_id_str);
+
+    // 13. Teardown Database
+    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+}

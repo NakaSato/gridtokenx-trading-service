@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "GridTokenX Trading Service binary"
 
+[lib]
+name = "trading_service"
+path = "src/lib.rs"
+
 [[bin]]
 name = "trading-service"
 path = "src/main.rs"
@@ -16,6 +20,7 @@ trading-persistence.workspace = true
 trading-infra.workspace = true
 trading-logic.workspace = true
 trading-api.workspace = true
+gridtokenx-blockchain-core.workspace = true
 sqlx.workspace = true
 
 # Async
@@ -38,6 +43,13 @@ anyhow.workspace = true
 # Utilities
 dotenvy.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+rust_decimal.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

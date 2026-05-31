@@ -9,6 +9,8 @@ members = [
     "crates/trading-logic",
     "crates/trading-api",
     "bin/trading-service",
+    "crates/iam-protocol-compat",
+    "crates/blockchain-core-compat",
 ]
 
 [workspace.package]
@@ -32,7 +34,7 @@ trading-persistence = { path = "crates/trading-persistence" }
 trading-infra = { path = "crates/trading-infra" }
 trading-logic = { path = "crates/trading-logic" }
 trading-api = { path = "crates/trading-api" }
-iam-protocol = { path = "../gridtokenx-iam-service/crates/iam-protocol" }
+iam-protocol = { package = "iam-protocol-compat", path = "crates/iam-protocol-compat" }
 
 # ── Async Runtime ────────────────────────────────────────────────────────────
 tokio = { version = "1.48", features = [
@@ -103,7 +105,7 @@ redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 rdkafka = { version = "0.37", features = ["zstd"] }
 
 # ── Blockchain ───────────────────────────────────────────────────────────────
-gridtokenx-blockchain-core = { path = "../gridtokenx-blockchain-core" }
+gridtokenx-blockchain-core = { package = "gridtokenx-blockchain-core-compat", path = "crates/blockchain-core-compat" }
 solana-client = "2.1.0"
 solana-sdk = "2.1.0"
 solana-program = "2.1.0"

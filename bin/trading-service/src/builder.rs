@@ -63,8 +63,8 @@ impl ServiceBuilder {
         let blockchain: Arc<dyn BlockchainGateway> = Arc::new(
             BlockchainService::new(
                 chain_bridge_url.to_string(),
-                "devnet".to_string(),
-                trading_core::config::SolanaProgramsConfig::default(),
+                config.solana_cluster.clone(),
+                config.solana_programs.clone(),
                 Some(db_pool.clone()),
                 None,
             )
