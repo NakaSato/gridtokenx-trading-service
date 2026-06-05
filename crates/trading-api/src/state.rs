@@ -19,4 +19,5 @@ pub struct AppState {
     pub audit: Arc<dyn AuditLog>,
     pub matcher: Arc<MatcherService>,
     pub settlement: Arc<SettlementService>,
+    pub vpp: Arc<trading_logic::vpp::VppService>,
 }
