@@ -132,20 +132,22 @@ impl MatcherService {
         use std::collections::HashMap;
         use trading_core::types::OrderStatus;
 
-        let mut order_deltas: HashMap<Uuid, (Decimal, OrderStatus)> = HashMap::new();
+        let mut order_deltas: HashMap<Uuid, (Decimal, OrderStatus, Option<i32>)> = HashMap::new();
 
         for m in &matches {
             // Aggregate fill amounts for buyer
-            let (buy_amt, _) = order_deltas
+            let (buy_amt, _, buy_zone) = order_deltas
                 .entry(m.buy_order_id)
-                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled));
+                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled, m.buyer_zone_id));
             *buy_amt += m.match_amount;
+            *buy_zone = m.buyer_zone_id;
 
             // Aggregate fill amounts for seller
-            let (sell_amt, _) = order_deltas
+            let (sell_amt, _, sell_zone) = order_deltas
                 .entry(m.sell_order_id)
-                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled));
+                .or_insert((Decimal::ZERO, OrderStatus::PartiallyFilled, m.seller_zone_id));
             *sell_amt += m.match_amount;
+            *sell_zone = m.seller_zone_id;
 
             // Reconstruct metadata for settlement
             let buy_meta = &buy_metadata[m.buy_metadata_index];
@@ -185,13 +187,37 @@ impl MatcherService {
                     error_message: None,
                 })
                 .await;
+
+            // Publish OrderMatched Event
+            let matched_event = trading_core::events::Event::OrderMatched(trading_core::events::OrderMatchedPayload {
+                match_id: Uuid::new_v4(), 
+                epoch_id: m.epoch_id,
+                buy_order_id: m.buy_order_id,
+                sell_order_id: m.sell_order_id,
+                amount: m.match_amount,
+                price: m.match_price,
+                buyer_id: m.buyer_id,
+                seller_id: m.seller_id,
+                timestamp: Utc::now(),
+                zone_id: m.buyer_zone_id,
+            });
+            let _ = self.events.publish(matched_event).await;
         }
 
         // Apply aggregated order updates (Batching logic for OrderRepository)
-        for (order_id, (amount, status)) in order_deltas {
+        for (order_id, (amount, status, zone_id)) in order_deltas {
             self.order_repo
                 .update_filled_amount(order_id, amount, status)
                 .await?;
+
+            // Publish OrderUpdate Event for UI/Real-time updates
+            let update_event = trading_core::events::Event::OrderUpdate {
+                id: order_id,
+                filled_amount: amount,
+                status: status.to_string(),
+                zone_id,
+            };
+            let _ = self.events.publish(update_event).await;
         }
 
         Ok(matches.len())
