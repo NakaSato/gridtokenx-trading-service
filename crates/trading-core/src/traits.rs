@@ -192,6 +192,25 @@ pub trait EventPublisher: Send + Sync {
     // The trait might be better as an 'EventBus' trait.
 }
 
+/// Transactional Outbox for reliable event delivery.
+#[async_trait]
+pub trait OutboxRepository: Send + Sync {
+    /// Insert an event into the outbox.
+    async fn insert_event(&self, event: &Event) -> TraitResult<()>;
+
+    /// Fetch pending events to be processed.
+    async fn get_pending_events(&self, limit: i32) -> TraitResult<Vec<crate::models::OutboxEvent>>;
+
+    /// Mark an event as successfully processed.
+    async fn mark_processed(&self, id: Uuid) -> TraitResult<()>;
+
+    /// Mark an event as failed and record the error.
+    async fn mark_failed(&self, id: Uuid, error: &str) -> TraitResult<()>;
+
+    /// Delete processed events older than a certain date.
+    async fn cleanup_processed(&self, before: DateTime<Utc>) -> TraitResult<u64>;
+}
+
 /// Blockchain gateway for Solana operations.
 #[async_trait]
 pub trait BlockchainGateway: Send + Sync {
@@ -213,6 +232,12 @@ pub trait BlockchainGateway: Send + Sync {
         settlement: &crate::models::Settlement,
     ) -> TraitResult<crate::models::SettlementTransaction>;
 
+    /// Execute multiple settlements in a single batched transaction.
+    async fn execute_batched_settlements(
+        &self,
+        settlements: Vec<crate::models::Settlement>,
+    ) -> TraitResult<Vec<crate::models::SettlementTransaction>>;
+
     /// Issue an ERC certificate on-chain.
     async fn issue_erc(
         &self,
@@ -228,6 +253,9 @@ pub trait BlockchainGateway: Send + Sync {
         energy_amount: Decimal,
         timestamp: i64,
     ) -> TraitResult<String>;
+
+    /// Sync total supply from SPL Mint to TokenInfo PDA.
+    async fn sync_total_supply(&self) -> TraitResult<String>;
 
     /// Execute on-chain create_order with custodial signing.
     async fn execute_create_order(
@@ -275,14 +303,21 @@ pub trait VppRepository: Send + Sync {
         &self,
         cluster_id: &str,
     ) -> TraitResult<Option<crate::models::VppCluster>>;
+    async fn get_all_clusters(&self) -> TraitResult<Vec<crate::models::VppCluster>>;
     async fn get_member_association(
         &self,
         meter_id: &str,
     ) -> TraitResult<Option<crate::models::VppMember>>;
+    async fn get_cluster_members(
+        &self,
+        cluster_id: &str,
+    ) -> TraitResult<Vec<crate::models::VppMember>>;
     async fn update_cluster_metrics(
         &self,
         cluster_id: &str,
         stored_kwh: f64,
         soc: f64,
+        flex_up: f64,
+        flex_down: f64,
     ) -> TraitResult<()>;
 }
