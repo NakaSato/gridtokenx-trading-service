@@ -51,6 +51,40 @@ pub struct OffchainOrderPayload {
     pub expires_at: i64,
 }
 
+impl OffchainOrderPayload {
+    pub fn serialize(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&self.order_id);
+        data.extend_from_slice(self.user.as_ref());
+        data.extend_from_slice(&self.energy_amount.to_le_bytes());
+        data.extend_from_slice(&self.price_per_kwh.to_le_bytes());
+        data.push(self.side);
+        data.extend_from_slice(&self.zone_id.to_le_bytes());
+        data.extend_from_slice(&self.expires_at.to_le_bytes());
+    }
+}
+
+/// Pair for batch matching
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BatchMatchPair {
+    pub buyer_payload: OffchainOrderPayload,
+    pub seller_payload: OffchainOrderPayload,
+    pub match_amount: u64,
+    pub match_price: u64,
+    pub wheeling_charge: u64,
+    pub loss_cost: u64,
+}
+
+impl BatchMatchPair {
+    pub fn serialize(&self, data: &mut Vec<u8>) {
+        self.buyer_payload.serialize(data);
+        self.seller_payload.serialize(data);
+        data.extend_from_slice(&self.match_amount.to_le_bytes());
+        data.extend_from_slice(&self.match_price.to_le_bytes());
+        data.extend_from_slice(&self.wheeling_charge.to_le_bytes());
+        data.extend_from_slice(&self.loss_cost.to_le_bytes());
+    }
+}
+
 /// Instruction builder for Solana programs
 #[derive(Clone, Debug)]
 pub struct InstructionBuilder {
@@ -88,6 +122,17 @@ impl InstructionBuilder {
         let program_id = Pubkey::from_str(&self.config.registry_program_id)
             .context("Invalid Registry program ID")?;
         let (pda, _) = Pubkey::find_program_address(&[b"user", wallet.as_ref()], &program_id);
+        Ok(pda)
+    }
+
+    /// Get zone config PDA
+    pub fn get_zone_config_pda(&self, zone_id: u32) -> Result<Pubkey> {
+        let program_id = Pubkey::from_str(&self.config.trading_program_id)
+            .context("Invalid Trading program ID")?;
+        let (pda, _) = Pubkey::find_program_address(
+            &[b"zone_config", zone_id.to_le_bytes().as_ref()],
+            &program_id,
+        );
         Ok(pda)
     }
 
@@ -466,6 +511,135 @@ impl InstructionBuilder {
         })
     }
 
+    pub fn build_batch_settle_offchain_match_instruction(
+        &self,
+        market_pubkey: &Pubkey,
+        matches: &[BatchMatchPair],
+        currency_mint: &Pubkey,
+        energy_mint: &Pubkey,
+        fee_collector_ata: &Pubkey,
+        wheeling_collector_ata: &Pubkey,
+        loss_collector_ata: &Pubkey,
+    ) -> Result<Instruction> {
+        let program_id = Pubkey::from_str(&self.config.trading_program_id)?;
+        let system_program = Pubkey::from_str(SYSTEM_PROGRAM_ID)?;
+        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkThp9Dz9L33itf29V7D3fR65")?;
+
+        // zone_id and shards are simplified for batching for now - use zone 0 or first zone
+        let zone_id = matches
+            .first()
+            .map(|m| m.buyer_payload.zone_id)
+            .unwrap_or(0);
+
+        let (zone_market_pda, _) = Pubkey::find_program_address(
+            &[
+                b"zone_market",
+                market_pubkey.as_ref(),
+                &zone_id.to_le_bytes(),
+            ],
+            &program_id,
+        );
+
+        let (market_authority_pda, _) =
+            Pubkey::find_program_address(&[b"market_authority"], &program_id);
+
+        // For simplicity in batch, we assume shards are derived from payer or market 0
+        // In a real high-throughput scenario, these would be passed in or resolved
+        let (market_shard_pda, _) =
+            Pubkey::find_program_address(&[b"market_shard", market_pubkey.as_ref(), &[0]], &program_id);
+        let (zone_shard_pda, _) =
+            Pubkey::find_program_address(&[b"zone_shard", zone_market_pda.as_ref(), &[0]], &program_id);
+
+        let mut accounts = vec![
+            AccountMeta::new_readonly(*market_pubkey, false),
+            AccountMeta::new_readonly(zone_market_pda, false), // Read-only in Batch context as it's not mut in IDL?
+            AccountMeta::new_readonly(*currency_mint, false),
+            AccountMeta::new_readonly(*energy_mint, false),
+            AccountMeta::new_readonly(market_authority_pda, false),
+            AccountMeta::new(market_shard_pda, false),
+            AccountMeta::new(zone_shard_pda, false),
+            AccountMeta::new(*fee_collector_ata, false),
+            AccountMeta::new(*wheeling_collector_ata, false),
+            AccountMeta::new(*loss_collector_ata, false),
+            AccountMeta::new(self.payer, true),
+            AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+            AccountMeta::new_readonly(token_program, false),
+            AccountMeta::new_readonly(token_2022_program, false),
+            AccountMeta::new_readonly(system_program, false),
+        ];
+
+        // Fix zone_market mutability based on lib.rs: it is mut
+        accounts[1] = AccountMeta::new(zone_market_pda, false);
+
+        // Add remaining accounts for each match
+        for m in matches {
+            let (buyer_nullifier_pda, _) = Pubkey::find_program_address(
+                &[
+                    b"nullifier",
+                    m.buyer_payload.user.as_ref(),
+                    &m.buyer_payload.order_id,
+                ],
+                &program_id,
+            );
+
+            let (seller_nullifier_pda, _) = Pubkey::find_program_address(
+                &[
+                    b"nullifier",
+                    m.seller_payload.user.as_ref(),
+                    &m.seller_payload.order_id,
+                ],
+                &program_id,
+            );
+
+            // ATAs need to be resolved. We'll pass them in via matches if we can, 
+            // but for now we expect the caller to have resolved them.
+            // Since InstructionBuilder doesn't have TokenManager, we'll assume standard derivation.
+            
+            let buyer_currency_ata = spl_associated_token_account::get_associated_token_address(
+                &m.buyer_payload.user,
+                currency_mint,
+            );
+            let seller_currency_ata = spl_associated_token_account::get_associated_token_address(
+                &m.seller_payload.user,
+                currency_mint,
+            );
+            let seller_energy_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+                &m.seller_payload.user,
+                energy_mint,
+                &token_2022_program,
+            );
+            let buyer_energy_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+                &m.buyer_payload.user,
+                energy_mint,
+                &token_2022_program,
+            );
+
+            accounts.push(AccountMeta::new(buyer_nullifier_pda, false));
+            accounts.push(AccountMeta::new(seller_nullifier_pda, false));
+            accounts.push(AccountMeta::new(buyer_currency_ata, false));
+            accounts.push(AccountMeta::new(seller_currency_ata, false));
+            accounts.push(AccountMeta::new(seller_energy_ata, false));
+            accounts.push(AccountMeta::new(buyer_energy_ata, false));
+        }
+
+        let mut data = Vec::new();
+        // batch_settle_offchain_match discriminator: [104, 149, 174, 115, 221, 21, 169, 234]
+        data.extend_from_slice(&[104, 149, 174, 115, 221, 21, 169, 234]);
+        
+        // Serialize Vec<BatchMatchPair>
+        data.extend_from_slice(&(matches.len() as u32).to_le_bytes());
+        for m in matches {
+            m.serialize(&mut data);
+        }
+
+        Ok(Instruction {
+            program_id,
+            accounts,
+            data,
+        })
+    }
+
     pub fn build_issue_erc_instruction(
         &self,
         certificate_id: &str,
@@ -673,6 +847,32 @@ impl InstructionBuilder {
         // mint_to_wallet discriminator: [17, 40, 71, 107, 142, 232, 163, 100]
         data.extend_from_slice(&[17, 40, 71, 107, 142, 232, 163, 100]);
         data.extend_from_slice(&amount.to_le_bytes());
+
+        Ok(Instruction {
+            program_id,
+            accounts,
+            data,
+        })
+    }
+
+    /// Build instruction for syncing total supply from SPL Mint to TokenInfo PDA
+    pub fn build_sync_total_supply_instruction(
+        &self,
+        mint: Pubkey,
+        token_info: Pubkey,
+        authority: Pubkey,
+    ) -> Result<Instruction> {
+        let program_id = Pubkey::from_str(&self.config.energy_token_program_id)?;
+
+        let accounts = vec![
+            AccountMeta::new(token_info, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(authority, true),
+        ];
+
+        let mut data = Vec::new();
+        // sync_total_supply discriminator: [120, 134, 71, 126, 104, 34, 131, 15]
+        data.extend_from_slice(&[120, 134, 71, 126, 104, 34, 131, 15]);
 
         Ok(Instruction {
             program_id,
