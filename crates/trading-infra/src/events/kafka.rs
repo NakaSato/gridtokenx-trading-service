@@ -5,6 +5,7 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
+use uuid::Uuid;
 
 use trading_core::events::Event;
 use trading_core::traits::{EventPublisher, TraitResult};
@@ -71,13 +72,13 @@ impl KafkaEventBus {
         let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", bootstrap_servers)
             .set("message.timeout.ms", "5000")
-            .set("queue.buffering.max.messages", "100000")
-            .set("queue.buffering.max.kbytes", "1048576") // 1GB buffer
-            .set("batch.num.messages", "1000")
-            .set("linger.ms", "5") // Batch for 5ms before sending
-            .set("compression.type", "lz4")
-            .set("acks", "1") // Leader ack only for low latency
-            .set("retries", "3")
+            .set("queue.buffering.max.messages", "1000000") // Increased for scale
+            .set("queue.buffering.max.kbytes", "2097152") // 2GB buffer
+            .set("batch.num.messages", "5000") // Larger batches
+            .set("linger.ms", "20") // Batch for 20ms before sending
+            .set("compression.type", "zstd") // Better compression at scale
+            .set("acks", "all") // Stronger durability for scale
+            .set("retries", "10")
             .set("retry.backoff.ms", "100")
             .create()
             .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer: {}", e))?;
@@ -137,33 +138,38 @@ impl KafkaEventBus {
         Ok(published)
     }
 
-    /// Route an event to its topic and partition key
+    /// Route an event to its topic and partition key.
+    /// Uses consistent zone-based partitioning for market locality.
     fn route_event<'a>(&'a self, event: &Event) -> (&'a str, String) {
         match event {
             Event::OrderCreated(order) => (
                 &self.topics.orders_created,
-                order.zone_id.unwrap_or(0).to_string(), // Partition by zone
+                Self::zone_key(order.zone_id, &order.id),
             ),
             Event::OrderMatched(payload) => (
                 &self.topics.orders_matched,
-                payload.epoch_id.to_string(), // Partition by epoch
+                Self::zone_key(payload.zone_id, &payload.match_id),
             ),
-            Event::OrderUpdate { id, .. } => (
+            Event::OrderUpdate { id, zone_id, .. } => (
                 &self.topics.orders_updated,
-                id.to_string(), // Partition by order ID
+                Self::zone_key(*zone_id, id),
             ),
             Event::SettlementRequested(settlement) => (
                 &self.topics.settlements,
-                settlement.epoch_id.to_string(), // Partition by epoch
+                Self::zone_key(settlement.buyer_zone_id, &settlement.id),
             ),
-            Event::SettlementProcessed(payload) => {
-                (&self.topics.settlements, payload.settlement_id.to_string())
-            }
-            Event::PeakPriceUpdate { id, .. } => (&self.topics.orders_updated, id.to_string()),
+            Event::SettlementProcessed(payload) => (
+                &self.topics.settlements,
+                payload.settlement_id.to_string(), // Fallback to ID
+            ),
+            Event::PeakPriceUpdate { id, zone_id, .. } => (
+                &self.topics.orders_updated,
+                Self::zone_key(*zone_id, id),
+            ),
             Event::TriggerExecution { id, .. } => (&self.topics.triggers, id.to_string()),
             Event::ErcIssued(payload) => (&self.topics.settlements, payload.user_id.to_string()),
             Event::UserRegistered(payload) => (
-                &self.topics.orders_created, // Or dedicated identity topic
+                &self.topics.orders_created,
                 payload.user_id.to_string(),
             ),
             Event::UserOnboarded(payload) => {
@@ -172,7 +178,20 @@ impl KafkaEventBus {
             Event::UserWalletLinked(payload) => {
                 (&self.topics.participants, payload.user_id.to_string())
             }
-            Event::OracleReading(payload) => (&self.topics.telemetry, payload.meter_id.clone()),
+            Event::OracleReading(payload) => (
+                &self.topics.telemetry,
+                Self::zone_key(payload.zone_id, &payload.reading_id),
+            ),
+            Event::VppDispatched(payload) => (&self.topics.telemetry, payload.cluster_id.clone()),
+        }
+    }
+
+    /// Helper to generate a consistent partition key based on zone_id.
+    /// Falls back to the object UUID if no zone_id is present.
+    fn zone_key(zone_id: Option<i32>, id: &Uuid) -> String {
+        match zone_id {
+            Some(z) => format!("zone_{}", z),
+            None => id.to_string(),
         }
     }
 }
