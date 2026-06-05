@@ -51,3 +51,34 @@ pub fn build_mint_to_wallet_ix(
         data,
     }
 }
+
+/// Builds the Anchor CPI instruction for the energy-token sync_total_supply endpoint
+pub fn build_sync_total_supply_ix(
+    payer: Pubkey,
+) -> Instruction {
+    let program_id =
+        std::str::FromStr::from_str("EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe").unwrap();
+
+    let (mint_pda, _) = Pubkey::find_program_address(&[b"mint_2022"], &program_id);
+
+    let (token_info_pda, _) =
+        Pubkey::find_program_address(&[b"token_info_2022"], &program_id);
+
+    let authority = payer;
+
+    let accounts = vec![
+        AccountMeta::new(token_info_pda, false),                 // 1. token_info (mut)
+        AccountMeta::new_readonly(mint_pda, false),              // 2. mint (readonly)
+        AccountMeta::new_readonly(authority, true),              // 3. authority (signer)
+    ];
+
+    // Build data payload: Anchor discriminator for sync_total_supply
+    let mut data = Vec::with_capacity(8);
+    data.extend_from_slice(&[120, 134, 71, 126, 104, 34, 131, 15]); // global:sync_total_supply
+
+    Instruction {
+        program_id,
+        accounts,
+        data,
+    }
+}
