@@ -48,5 +48,11 @@ anyhow.workspace = true
 # API docs
 utoipa.workspace = true
 
+[dev-dependencies]
+mockall = "0.13"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio-test = "0.4"
+
 [lints]
 workspace = true
