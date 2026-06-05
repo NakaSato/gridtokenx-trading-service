@@ -412,4 +412,76 @@ impl BlockchainSettlementProvider {
 
         Ok(signature.to_string())
     }
+
+    /// Execute multiple on-chain generation mints in a single batched transaction.
+    #[tracing::instrument(skip(self, inputs), fields(count = inputs.len()))]
+    pub async fn execute_batched_generation_mints(
+        &self,
+        inputs: Vec<(Pubkey, Decimal)>,
+    ) -> trading_core::error::Result<String> {
+        if inputs.is_empty() {
+            return Ok("".to_string());
+        }
+
+        let platform_authority = self
+            .blockchain
+            .get_authority_keypair()
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
+
+        let mint_pda = self
+            .blockchain
+            .instruction_builder()
+            .get_mint_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive mint PDA: {}", e)))?;
+        let token_info_pda = self
+            .blockchain
+            .instruction_builder()
+            .get_token_info_pda()
+            .map_err(|e| ApiError::Internal(format!("Failed to derive token info PDA: {}", e)))?;
+
+        let mut instructions = Vec::with_capacity(inputs.len());
+
+        for (user_wallet, amount_kwh) in inputs {
+            // Calculate atomic units for energy (9 decimal places for GRX)
+            let amount_atomic =
+                ToPrimitive::to_u64(&(amount_kwh * Decimal::from(1_000_000_000i64)).trunc())
+                    .unwrap_or(0);
+
+            // Calculate User ATA
+            let user_ata = self
+                .blockchain
+                .calculate_ata_address(&user_wallet, &mint_pda)?;
+
+            // Build Instruction
+            let instruction = self
+                .blockchain
+                .instruction_builder()
+                .build_mint_to_wallet_instruction(
+                    mint_pda,
+                    token_info_pda,
+                    user_ata,
+                    user_wallet,
+                    platform_authority.pubkey(),
+                    amount_atomic,
+                )
+                .map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
+
+            instructions.push(instruction);
+        }
+
+        // Add priority fee
+        self.blockchain
+            .add_priority_fee_to_instructions(&mut instructions, "batched_token_minting")
+            .await?;
+
+        // Execute Transaction
+        let signature = self
+            .blockchain
+            .build_and_send_transaction(instructions, &[&platform_authority])
+            .await
+            .map_err(|e| ApiError::Internal(format!("Batched blockchain mint failed: {}", e)))?;
+
+        Ok(signature.to_string())
+    }
 }
