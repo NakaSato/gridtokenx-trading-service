@@ -572,3 +572,33 @@ pub struct TransactionData {
     pub timestamp: DateTime<Utc>,
     pub reference_id: Option<Uuid>,
 }
+
+// ── Outbox Models ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub enum OutboxStatus {
+    Pending,
+    Processed,
+    Failed,
+}
+
+impl std::fmt::Display for OutboxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Processed => write!(f, "processed"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OutboxEvent {
+    pub id: Uuid,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub status: OutboxStatus,
+    pub attempts: i32,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
