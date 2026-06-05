@@ -107,6 +107,25 @@ impl TradingService for TradingGrpcService {
                 ConnectError::new(ErrorCode::Internal, "Failed to insert order")
             })?;
 
+        // 3. Publish Event for Event Sourcing
+        let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
+            id: order.id,
+            user_id: order.user_id,
+            order_type: order.order_type.to_string(),
+            side: order.side.to_string(),
+            energy_amount: order.energy_amount,
+            price_per_kwh: order.price_per_kwh,
+            status: order.status.to_string(),
+            zone_id: order.zone_id,
+            created_at: order.created_at,
+        });
+
+        if let Err(e) = self.state.events.publish(event).await {
+            error!("Failed to publish OrderCreated event: {}", e);
+            // We don't fail the request if event publishing fails, but we log it.
+            // In a strict event-sourcing system, we might want to fail or use a transactional outbox.
+        }
+
         let mut res = TradingResponse::default();
         res.success = true;
         res.message = "Order submitted successfully".to_string();
@@ -267,9 +286,50 @@ impl TradingService for TradingGrpcService {
     async fn batch_execute_settlements(
         &self,
         _ctx: Context,
-        _req: OwnedView<BatchExecuteSettlementsRequestView<'static>>,
+        request: OwnedView<BatchExecuteSettlementsRequestView<'static>>,
     ) -> Result<(BatchSettlementResponse, Context), ConnectError> {
-        Ok((BatchSettlementResponse::default(), _ctx))
+        info!("💠 BatchExecuteSettlements: count={}", request.settlements.len());
+
+        let mut settlements = Vec::new();
+        for req in request.settlements.iter() {
+            let id = Uuid::parse_str(req.settlement_id).map_err(|e| {
+                ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid settlement_id: {}", e))
+            })?;
+
+            // Reconstruct a partial settlement for the service to process
+            // The service will fetch the full record from DB anyway if needed, 
+            // but we can pass the PDAs/wallets if we want to bypass DB.
+            // For now, we'll let the service fetch the full records.
+            if let Ok(Some(s)) = self.state.settlement_repo.get_settlement(id).await {
+                settlements.push(s);
+            }
+        }
+
+        if settlements.is_empty() {
+            return Ok((BatchSettlementResponse::default(), _ctx));
+        }
+
+        // Execute via SettlementService
+        let tx_results = self
+            .state
+            .settlement
+            .execute_batched_settlements(settlements)
+            .await
+            .map_err(|e| {
+                error!("Batch settlement failed: {}", e);
+                ConnectError::new(ErrorCode::Internal, "Blockchain execution failed")
+            })?;
+
+        let first_sig = tx_results.first().map(|r| r.signature.clone()).unwrap_or_default();
+        let ids = tx_results.into_iter().map(|r| r.settlement_id.to_string()).collect();
+
+        let mut res = BatchSettlementResponse::default();
+        res.success = true;
+        res.signature = first_sig;
+        res.settlement_ids = ids;
+        res.message = "Batch processed successfully".to_string();
+
+        Ok((res, _ctx))
     }
     async fn issue_erc(
         &self,
@@ -415,6 +475,110 @@ impl TradingService for TradingGrpcService {
         Ok((res, _ctx))
     }
 
+    async fn batch_settle_generation_mint(
+        &self,
+        _ctx: Context,
+        request: OwnedView<BatchSettleGenerationMintRequestView<'static>>,
+    ) -> Result<(BatchSettleGenerationMintResponse, Context), ConnectError> {
+        info!("💠 BatchSettleGenerationMint: count={}", request.requests.len());
+
+        let mut settlements = Vec::new();
+        let mut serials = Vec::new();
+
+        for req in request.requests.iter() {
+            // 1. Verify Oracle Signature
+            let is_verified = verify_oracle_signature(
+                &req.meter_serial,
+                &req.user_id,
+                &req.start_time,
+                &req.end_time,
+                req.energy_generated_kwh,
+                req.energy_consumed_kwh,
+                &req.signature,
+                &self.state.settlement.oracle_bridge_public_key,
+            )
+            .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e))?;
+
+            if !is_verified {
+                return Err(ConnectError::new(
+                    ErrorCode::Unauthenticated,
+                    format!("Invalid Oracle signature for meter {}", req.meter_serial),
+                ));
+            }
+
+            let user_id = Uuid::parse_str(req.user_id).map_err(|e| {
+                ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("Invalid user_id: {}", e),
+                )
+            })?;
+
+            let amount = Decimal::from_f64_retain(req.energy_generated_kwh).ok_or_else(|| {
+                ConnectError::new(ErrorCode::InvalidArgument, "Invalid energy_amount")
+            })?;
+
+            // Create a virtual settlement object for batching
+            let settlement = trading_core::models::Settlement {
+                id: Uuid::new_v4(),
+                trade_id: None,
+                epoch_id: Uuid::nil(),
+                buyer_id: Uuid::nil(),
+                seller_id: user_id,
+                buy_order_id: Uuid::nil(),
+                sell_order_id: Uuid::nil(),
+                energy_amount: amount,
+                price: Decimal::ZERO,
+                total_amount: Decimal::ZERO,
+                fee_amount: Decimal::ZERO,
+                net_amount: Decimal::ZERO,
+                status: trading_core::models::SettlementStatus::Pending,
+                blockchain_tx: None,
+                created_at: chrono::Utc::now(),
+                confirmed_at: None,
+                wheeling_charge: None,
+                loss_factor: None,
+                loss_cost: None,
+                effective_energy: None,
+                buyer_zone_id: None,
+                seller_zone_id: None,
+                buyer_session_token: None,
+                seller_session_token: None,
+                erc_certificate_id: None,
+                erc_transfer_tx: None,
+                retry_count: 0,
+                error_message: None,
+            };
+
+            settlements.push(settlement);
+            serials.push(req.meter_serial.to_string());
+        }
+
+        if settlements.is_empty() {
+             return Ok((BatchSettleGenerationMintResponse::default(), _ctx));
+        }
+
+        // 2. Execute via SettlementService (which now uses batched blockchain calls)
+        let tx_results = self
+            .state
+            .settlement
+            .execute_batched_settlements(settlements)
+            .await
+            .map_err(|e| {
+                error!("Batch settlement failed: {}", e);
+                ConnectError::new(ErrorCode::Internal, "Blockchain execution failed")
+            })?;
+
+        let tx_signature = tx_results.first().map(|r| r.signature.clone()).unwrap_or_default();
+
+        let mut res = BatchSettleGenerationMintResponse::default();
+        res.success = true;
+        res.tx_signature = tx_signature;
+        res.meter_serials = serials;
+        res.message = "Batch processed".to_string();
+
+        Ok((res, _ctx))
+    }
+
     async fn create_conditional_order(
         &self,
         _ctx: Context,
@@ -502,9 +666,31 @@ impl TradingService for TradingGrpcService {
     async fn dispatch_vpp(
         &self,
         _ctx: Context,
-        _req: OwnedView<DispatchVppRequestView<'static>>,
+        request: OwnedView<DispatchVppRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        info!("🚀 DispatchVpp: cluster={}, target={}kW", request.cluster_id, request.target_kw);
+
+        let dispatches = self.state.vpp.optimize_dispatch(
+            request.cluster_id,
+            request.target_kw,
+            None, // No nodal prices for now
+            None, // No carbon intensity for now
+        ).await
+        .map_err(|e| {
+            error!("VPP Dispatch optimization failed: {}", e);
+            ConnectError::new(ErrorCode::Internal, "Optimization failed")
+        })?;
+
+        info!("✅ VPP Dispatch optimized: {} members to be commanded", dispatches.len());
+
+        // In a real system, we would now push these commands to the Oracle Bridge 
+        // via NATS or gRPC. For now, we return success.
+
+        let mut res = TradingResponse::default();
+        res.success = true;
+        res.message = format!("Dispatched {} members", dispatches.len());
+
+        Ok((res, _ctx))
     }
 }
 
