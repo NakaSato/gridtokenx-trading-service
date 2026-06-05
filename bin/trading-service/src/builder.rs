@@ -16,20 +16,24 @@ pub struct Infrastructure {
     pub db: PgPool,
     pub order_repo: Arc<dyn OrderRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,
+    pub outbox_repo: Arc<dyn OutboxRepository>,
     pub futures_repo: Arc<dyn FuturesRepository>,
     pub carbon_repo: Arc<dyn CarbonRepository>,
     pub analytics_repo: Arc<dyn AnalyticsRepository>,
+    pub vpp_repo: Arc<dyn VppRepository>,
     pub blockchain: Arc<dyn BlockchainGateway>,
     pub identity: Arc<dyn IdentityGateway>,
     pub cache: Arc<dyn CacheStore>,
     pub audit: Arc<dyn AuditLog>,
     pub events: Arc<dyn EventPublisher>,
+    pub event_bus: Arc<dyn EventPublisher>,
 }
 
 /// Container for all domain services
 pub struct AppServices {
     pub settlement: Arc<SettlementService>,
     pub matcher: Arc<MatcherService>,
+    pub vpp: Arc<trading_logic::vpp::VppService>,
     pub oracle_consumer: Arc<trading_logic::workers::OracleConsumer>,
 }
 
@@ -49,9 +53,11 @@ impl ServiceBuilder {
 
         let order_repo = Arc::new(PostgresOrderRepository::new(db_pool.clone()));
         let settlement_repo = Arc::new(PostgresSettlementRepository::new(db_pool.clone()));
+        let outbox_repo = Arc::new(trading_persistence::repositories::PostgresOutboxRepository::new(db_pool.clone()));
         let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
         let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
+        let vpp_repo = Arc::new(trading_persistence::repositories::PostgresVppRepository::new(db_pool.clone()));
 
         let identity: Arc<dyn IdentityGateway> = Arc::new(
             trading_infra::identity::IamIdentityGateway::new(
@@ -89,33 +95,50 @@ impl ServiceBuilder {
         let event_bus = Arc::new(
             trading_infra::events::EventBus::new(
                 redis_url,
-                false, // kafka_enabled: disable for now to focus on Redis telemetry
+                config.kafka_enabled,
                 Some(kafka_brokers),
-                Some("trading"),
+                Some(&config.kafka_topic_prefix),
             )
             .await?,
         );
 
-        let events: Arc<dyn EventPublisher> = event_bus.clone();
+        // Transactional Outbox Publisher & Worker
+        let outbox_worker = trading_infra::events::outbox_worker::OutboxWorker::new(
+            outbox_repo.clone(),
+            event_bus.clone(),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = outbox_worker.run().await {
+                tracing::error!("Outbox worker failed: {}", e);
+            }
+        });
+
+        let events: Arc<dyn EventPublisher> = Arc::new(
+            trading_infra::events::OutboxPublisher::new(outbox_repo.clone())
+        );
 
         let infra = Infrastructure {
             db: db_pool,
             order_repo: order_repo.clone(),
             settlement_repo: settlement_repo.clone(),
+            outbox_repo: outbox_repo.clone(),
             futures_repo,
             carbon_repo,
             analytics_repo,
+            vpp_repo: vpp_repo.clone(),
             blockchain: blockchain.clone(),
             identity: identity.clone(),
             cache,
             audit: audit.clone(),
             events: events.clone(),
+            event_bus: event_bus.clone(),
         };
 
         // 2. Services
         let settlement_service = Arc::new(SettlementService::new(
             settlement_repo.clone(),
             blockchain.clone(),
+            events.clone(),
             audit.clone(),
             config.platform_user_id,
             config.oracle_feed_in_tariff,
@@ -129,9 +152,18 @@ impl ServiceBuilder {
             Arc::new(GridAwareTopology::new()),
         ));
 
+        let forecaster = Arc::new(trading_logic::forecasting::ForecastingService::new());
+
+        let vpp_service = Arc::new(trading_logic::vpp::VppService::new(
+            vpp_repo.clone(),
+            audit.clone(),
+            events.clone(),
+            forecaster,
+        ));
+
         // Initialize Oracle Consumer
         let oracle_consumer = Arc::new(trading_logic::workers::OracleConsumer::new(
-            events.clone(),
+            event_bus.clone(),
             settlement_service.clone(),
             "trading_oracle_group".to_string(),
             format!("trading_oracle_{}", Uuid::new_v4()),
@@ -140,6 +172,7 @@ impl ServiceBuilder {
         let services = AppServices {
             settlement: settlement_service,
             matcher: matcher_service,
+            vpp: vpp_service,
             oracle_consumer,
         };
 
