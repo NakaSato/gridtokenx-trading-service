@@ -12,22 +12,47 @@ use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use trading_core::traits::{BlockchainGateway, TraitResult};
 use uuid::Uuid;
 
 #[async_trait]
 impl BlockchainGateway for BlockchainService {
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<trading_core::models::ZoneConfig> {
-        // Shim implementation: Return a default config for the zone.
-        // In production, this would fetch from the Solana Registry PDA.
-        Ok(trading_core::models::ZoneConfig {
-            zone_id,
-            incentive_multiplier: Decimal::from(1),
-            wheeling_charge: Decimal::from(0),
-            maintenance_mode: false,
-            last_updated: chrono::Utc::now(),
-        })
+        let pda = self.instruction_builder().get_zone_config_pda(zone_id as u32)
+            .map_err(|e| trading_core::error::ApiError::Internal(format!("PDA derivation error: {}", e)))?;
+
+        match self.get_account_data(&pda).await {
+            Ok(data) => {
+                if data.len() < 8 + 136 {
+                    return Err(trading_core::error::ApiError::Internal("Invalid ZoneConfig account data size".to_string()));
+                }
+                
+                // Skip Anchor discriminator (8 bytes)
+                let multiplier_bps = u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8]));
+                let wheeling_bps = u64::from_le_bytes(data[24..32].try_into().unwrap_or([0; 8]));
+                let maintenance_mode = data[32] != 0;
+                let last_updated_ts = i64::from_le_bytes(data[72..80].try_into().unwrap_or([0; 8]));
+
+                Ok(trading_core::models::ZoneConfig {
+                    zone_id,
+                    incentive_multiplier: Decimal::from(multiplier_bps) / Decimal::from(10_000),
+                    wheeling_charge: Decimal::from(wheeling_bps) / Decimal::from(10_000),
+                    maintenance_mode,
+                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(chrono::Utc::now),
+                })
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to fetch on-chain ZoneConfig for {}: {}. Falling back to default.", zone_id, e);
+                Ok(trading_core::models::ZoneConfig {
+                    zone_id,
+                    incentive_multiplier: Decimal::from(1),
+                    wheeling_charge: Decimal::from(0),
+                    maintenance_mode: false,
+                    last_updated: chrono::Utc::now(),
+                })
+            }
+        }
     }
 
     async fn is_user_registered(&self, _user_id: Uuid) -> TraitResult<bool> {
@@ -111,6 +136,73 @@ impl BlockchainGateway for BlockchainService {
         }
     }
 
+    async fn execute_batched_settlements(
+        &self,
+        settlements: Vec<trading_core::models::Settlement>,
+    ) -> TraitResult<Vec<trading_core::models::SettlementTransaction>> {
+        if settlements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        info!("Executing batched on-chain settlements for {} records", settlements.len());
+
+        // Split into Oracle and Trade settlements
+        let (oracle_settlements, trade_settlements): (Vec<_>, Vec<_>) = 
+            settlements.into_iter().partition(|s| s.trade_id.is_none());
+
+        let mut results = Vec::new();
+
+        // 1. Process Oracle Settlements in batches
+        if !oracle_settlements.is_empty() {
+            let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
+            
+            let mut mint_inputs = Vec::new();
+            let mut oracle_ids = Vec::new();
+
+            for settlement in oracle_settlements {
+                let seller_wallet = self
+                    .get_user_primary_wallet(&settlement.seller_id)
+                    .await
+                    .map_err(|e| {
+                        trading_core::error::ApiError::Internal(format!(
+                            "Failed to resolve seller wallet: {}",
+                            e
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        trading_core::error::ApiError::NotFound(format!(
+                            "Primary wallet not found for user {}",
+                            settlement.seller_id
+                        ))
+                    })?;
+
+                mint_inputs.push((seller_wallet, settlement.energy_amount));
+                oracle_ids.push(settlement.id);
+            }
+
+            if !mint_inputs.is_empty() {
+                let signature = provider.execute_batched_generation_mints(mint_inputs).await?;
+
+                for id in oracle_ids {
+                    results.push(trading_core::models::SettlementTransaction {
+                        settlement_id: id,
+                        signature: signature.clone(),
+                        slot: 0,
+                        confirmation_status: "confirmed".to_string(),
+                    });
+                }
+            }
+        }
+
+        // 2. Process Trade Settlements (Placeholder)
+        if !trade_settlements.is_empty() {
+             warn!("Batch settlement for matching engine trades not yet implemented");
+             // Handle or error
+        }
+
+        Ok(results)
+    }
+
     async fn issue_erc(
         &self,
         user_id: Uuid,
@@ -185,6 +277,22 @@ impl BlockchainGateway for BlockchainService {
         provider
             .execute_generation_mint(&wallet_pubkey, energy_amount, timestamp)
             .await
+    }
+
+    async fn sync_total_supply(&self) -> TraitResult<String> {
+        info!("Syncing total supply for Energy Token...");
+        let authority = self.get_authority_keypair().await.map_err(|e| {
+            trading_core::error::ApiError::Internal(format!("Failed to load authority: {}", e))
+        })?;
+
+        let signature = self
+            .core
+            .sync_total_supply(&authority as &(dyn Signer + Send + Sync))
+            .await
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
+
+        info!("Total supply synced successfully: {}", signature);
+        Ok(signature.to_string())
     }
 
     async fn execute_create_order(
