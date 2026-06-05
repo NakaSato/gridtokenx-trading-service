@@ -314,6 +314,41 @@ impl BlockchainService {
             .await
     }
 
+    /// Execute on-chain batch atomic settlement
+    pub async fn execute_batch_settle_offchain_match_with_signers(
+        &self,
+        payer_authority: &(dyn Signer + Send + Sync),
+        market_pubkey: &Pubkey,
+        matches: &[instructions::BatchMatchPair],
+        currency_mint: &Pubkey,
+        energy_mint: &Pubkey,
+        fee_collector_ata: &Pubkey,
+        wheeling_collector_ata: &Pubkey,
+        loss_collector_ata: &Pubkey,
+        priority: Option<PriorityLevel>,
+    ) -> Result<Signature> {
+        let instruction = self
+            .instruction_builder
+            .build_batch_settle_offchain_match_instruction(
+                market_pubkey,
+                matches,
+                currency_mint,
+                energy_mint,
+                fee_collector_ata,
+                wheeling_collector_ata,
+                loss_collector_ata,
+            )?;
+
+        self.on_chain_manager
+            .build_and_send_transaction_with_priority_and_signers(
+                vec![instruction],
+                &[payer_authority],
+                "batch_settlement",
+                priority,
+            )
+            .await
+    }
+
     /// Execute multiple instructions in a single atomic transaction
     pub async fn execute_batched_instructions(
         &self,
@@ -450,6 +485,25 @@ impl BlockchainService {
                 &mint,
                 amount_kwh,
             )
+            .await
+    }
+
+    /// Sync total supply from SPL Mint to TokenInfo PDA
+    pub async fn sync_total_supply(
+        &self,
+        authority: &(dyn Signer + Send + Sync),
+    ) -> Result<Signature> {
+        let mint = self.instruction_builder.get_mint_pda()?;
+        let token_info = self.instruction_builder.get_token_info_pda()?;
+
+        let instruction = self.instruction_builder.build_sync_total_supply_instruction(
+            mint,
+            token_info,
+            authority.pubkey(),
+        )?;
+
+        self.on_chain_manager
+            .build_and_send_transaction_with_signers(vec![instruction], &[authority])
             .await
     }
 
