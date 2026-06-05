@@ -1,5 +1,7 @@
 pub mod kafka;
 pub mod kafka_consumer;
+pub mod outbox;
+pub mod outbox_worker;
 
 use anyhow::Result;
 use redis::aio::ConnectionManager;
@@ -9,6 +11,8 @@ use tracing::{error, info};
 use trading_core::events::Event;
 
 pub use kafka::KafkaEventBus;
+pub use outbox::OutboxPublisher;
+pub use outbox_worker::OutboxWorker;
 
 /// Unified event bus that delegates to either Redis Streams or Kafka
 /// based on configuration. Controlled by `KAFKA_EVENTS_ENABLED` env var.
