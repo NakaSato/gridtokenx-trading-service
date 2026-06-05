@@ -176,6 +176,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/settlement/mint",
             axum::routing::post(crate::rest::settle_generation_mint),
         )
+        .route(
+            "/api/v1/settlement/generation-mint",
+            axum::routing::post(crate::rest::settle_generation_mint),
+        )
+        .route(
+            "/api/v1/settlement/generation-mint/batch",
+            axum::routing::post(crate::rest::batch_settle_generation_mint),
+        )
         .route("/health", axum::routing::get(health_check))
         .route("/health/ready", axum::routing::get(health_check))
         .route("/metrics", axum::routing::get(metrics_handler))
