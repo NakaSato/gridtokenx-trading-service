@@ -59,6 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         settlement_worker.run().await;
     });
 
+    let supply_sync_worker = trading_logic::SupplySyncWorker::new(
+        infra.blockchain.clone(),
+        config.tokenization.polling_interval_secs,
+    );
+    tokio::spawn(async move {
+        supply_sync_worker.run().await;
+    });
+
     let oracle_consumer = services.oracle_consumer.clone();
     tokio::spawn(async move {
         if let Err(e) = oracle_consumer.run().await {
@@ -80,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audit: infra.audit,
         matcher: services.matcher,
         settlement: services.settlement,
+        vpp: services.vpp,
     };
 
     tokio::spawn(async move {
