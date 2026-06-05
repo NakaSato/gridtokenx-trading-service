@@ -1,15 +1,17 @@
+use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use trading_core::error::ApiError;
 use trading_core::models::{Settlement, SettlementStatus};
-use trading_core::traits::{AuditLog, BlockchainGateway, SettlementRepository, TraitResult};
+use trading_core::traits::{AuditLog, BlockchainGateway, EventPublisher, SettlementRepository, TraitResult};
 use uuid::Uuid;
 
 /// Service for orchestrating the settlement lifecycle
 pub struct SettlementService {
     repo: Arc<dyn SettlementRepository>,
     blockchain: Arc<dyn BlockchainGateway>,
+    events: Arc<dyn EventPublisher>,
     audit: Arc<dyn AuditLog>,
     platform_user_id: Uuid,
     oracle_feed_in_tariff: rust_decimal::Decimal,
@@ -20,6 +22,7 @@ impl SettlementService {
     pub fn new(
         repo: Arc<dyn SettlementRepository>,
         blockchain: Arc<dyn BlockchainGateway>,
+        events: Arc<dyn EventPublisher>,
         audit: Arc<dyn AuditLog>,
         platform_user_id: Uuid,
         oracle_feed_in_tariff: rust_decimal::Decimal,
@@ -28,11 +31,16 @@ impl SettlementService {
         Self {
             repo,
             blockchain,
+            events,
             audit,
             platform_user_id,
             oracle_feed_in_tariff,
             oracle_bridge_public_key,
         }
+    }
+
+    pub fn platform_user_id(&self) -> Uuid {
+        self.platform_user_id
     }
 
     /// Process a pending settlement on-chain
@@ -85,7 +93,18 @@ impl SettlementService {
                     )
                     .await?;
 
-                // 5. Audit log
+                // 5. Publish SettlementProcessed Event
+                let processed_event = trading_core::events::Event::SettlementProcessed(
+                    trading_core::events::SettlementProcessedPayload {
+                        settlement_id,
+                        tx_signature: tx_result.signature.clone(),
+                        status: SettlementStatus::Completed.to_string(),
+                        timestamp: Utc::now(),
+                    },
+                );
+                let _ = self.events.publish(processed_event).await;
+
+                // 6. Audit log
                 let _ = self
                     .audit
                     .log_action(
@@ -163,17 +182,75 @@ impl SettlementService {
         let pending = self.repo.get_pending_settlements(limit).await?;
         let count = pending.len();
 
-        if count > 0 {
-            info!("Found {} pending settlements to process", count);
+        if count == 0 {
+            return Ok(0);
         }
 
-        for settlement in pending {
-            if let Err(e) = self.process_settlement(settlement.id).await {
-                error!("Error processing settlement {}: {}", settlement.id, e);
+        info!("Found {} pending settlements to process in batch", count);
+
+        // 1. Mark all as Processing
+        for settlement in &pending {
+            self.repo
+                .update_settlement_status(
+                    settlement.id,
+                    &SettlementStatus::Processing.to_string(),
+                    None,
+                    None,
+                )
+                .await?;
+        }
+
+        // 2. Execute batched blockchain transaction
+        match self.blockchain.execute_batched_settlements(pending.clone()).await {
+            Ok(tx_results) => {
+                let mut success_count = 0;
+                for tx_result in tx_results {
+                    info!(
+                        "Settlement {} successful on-chain: {}",
+                        tx_result.settlement_id, tx_result.signature
+                    );
+
+                    // Update status to Completed
+                    self.repo
+                        .update_settlement_status(
+                            tx_result.settlement_id,
+                            &SettlementStatus::Completed.to_string(),
+                            Some(&tx_result.signature),
+                            None,
+                        )
+                        .await?;
+                    
+                    // Publish SettlementProcessed Event
+                    let processed_event = trading_core::events::Event::SettlementProcessed(
+                        trading_core::events::SettlementProcessedPayload {
+                            settlement_id: tx_result.settlement_id,
+                            tx_signature: tx_result.signature.clone(),
+                            status: SettlementStatus::Completed.to_string(),
+                            timestamp: Utc::now(),
+                        },
+                    );
+                    let _ = self.events.publish(processed_event).await;
+
+                    success_count += 1;
+                }
+                Ok(success_count)
+            }
+            Err(e) => {
+                error!("Batch settlement failed: {}", e);
+                // Mark all as Failed or revert to Pending for retry
+                for settlement in pending {
+                    let _ = self.repo
+                        .update_settlement_status(
+                            settlement.id,
+                            &SettlementStatus::Failed.to_string(),
+                            None,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                }
+                Err(e)
             }
         }
-
-        Ok(count)
     }
 
     /// Process a normalized oracle reading and create a settlement if surplus is detected
@@ -258,6 +335,10 @@ impl SettlementService {
 
         self.repo.insert_settlement(&settlement).await?;
 
+        // Publish SettlementRequested Event
+        let requested_event = trading_core::events::Event::SettlementRequested(settlement.clone());
+        let _ = self.events.publish(requested_event).await;
+
         info!("Settlement {} created for surplus energy", settlement.id);
 
         Ok(())
@@ -301,5 +382,18 @@ impl SettlementService {
             .await;
 
         Ok(tx_sig)
+    }
+
+    /// Execute multiple settlements on-chain in a single batched transaction.
+    pub async fn execute_batched_settlements(
+        &self,
+        settlements: Vec<Settlement>,
+    ) -> TraitResult<Vec<trading_core::models::SettlementTransaction>> {
+        if settlements.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Execute on blockchain
+        self.blockchain.execute_batched_settlements(settlements).await
     }
 }
