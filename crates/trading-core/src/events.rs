@@ -19,10 +19,12 @@ pub enum Event {
         id: Uuid,
         filled_amount: Decimal,
         status: String,
+        zone_id: Option<i32>,
     },
     PeakPriceUpdate {
         id: Uuid,
         peak_price: Decimal,
+        zone_id: Option<i32>,
     },
     TriggerExecution {
         id: Uuid,
@@ -35,6 +37,15 @@ pub enum Event {
     UserOnboarded(UserOnboardedPayload),
     UserWalletLinked(UserWalletLinkedPayload),
     OracleReading(OracleReadingPayload),
+    VppDispatched(VppDispatchedPayload),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VppDispatchedPayload {
+    pub cluster_id: String,
+    pub target_kw: f64,
+    pub members_commanded: usize,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Lightweight payload for OrderCreated events.
