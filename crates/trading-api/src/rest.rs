@@ -214,6 +214,23 @@ pub async fn submit_order(
         )
     })?;
 
+    // Publish Event for Event Sourcing
+    let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
+        id: order.id,
+        user_id: order.user_id,
+        order_type: order.order_type.to_string(),
+        side: order.side.to_string(),
+        energy_amount: order.energy_amount,
+        price_per_kwh: order.price_per_kwh,
+        status: order.status.to_string(),
+        zone_id: order.zone_id,
+        created_at: order.created_at,
+    });
+
+    if let Err(e) = state.events.publish(event).await {
+        error!("Failed to publish OrderCreated event: {}", e);
+    }
+
     Ok(Json(SubmitOrderResponse {
         id: order.id,
         status: "open".to_string(),
@@ -760,5 +777,145 @@ pub async fn settle_generation_mint(
         success: true,
         signature: result,
         amount_minted: req.energy_generated_kwh.to_string(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchGenerationMintRequest {
+    pub requests: Vec<GenerationMintRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchGenerationMintResponse {
+    pub success: bool,
+    pub tx_signature: String,
+    pub meter_serials: Vec<String>,
+}
+
+pub async fn batch_settle_generation_mint(
+    State(state): State<AppState>,
+    Json(req): Json<BatchGenerationMintRequest>,
+) -> Result<Json<BatchGenerationMintResponse>, (axum::http::StatusCode, String)> {
+    info!(
+        "Processing batched generation mint settlement: count={}",
+        req.requests.len()
+    );
+
+    let mut settlements = Vec::new();
+    let mut serials = Vec::new();
+
+    // 1. Verify and prepare all requests
+    for r in req.requests {
+        // Verification logic (reused from single settlement)
+        let public_key_str = &state.settlement.oracle_bridge_public_key;
+        let public_key_bytes = bs58::decode(public_key_str).into_vec().map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid public key config: {}", e),
+            )
+        })?;
+
+        use ed25519_dalek::{Signature as EdSignature, Verifier, VerifyingKey};
+
+        let verifying_key = VerifyingKey::from_bytes(&public_key_bytes.try_into().map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid public key length".to_string(),
+            )
+        })?)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create verifying key: {}", e),
+            )
+        })?;
+
+        let signature_bytes = bs58::decode(&r.signature).into_vec().map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid signature format: {}", e),
+            )
+        })?;
+
+        let signature = EdSignature::from_bytes(&signature_bytes.try_into().map_err(|_| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "Invalid signature length".to_string(),
+            )
+        })?);
+
+        let message = format!(
+            "{}:{}:{}:{}:{}",
+            r.user_id, r.meter_serial, r.energy_generated_kwh, r.start_time, r.end_time
+        );
+
+        if let Err(e) = verifying_key.verify(message.as_bytes(), &signature) {
+            return Err((
+                axum::http::StatusCode::UNAUTHORIZED,
+                format!("Invalid oracle signature for meter {}", r.meter_serial),
+            ));
+        }
+
+        let settlement = trading_core::models::Settlement {
+            id: Uuid::new_v4(),
+            trade_id: None,
+            epoch_id: Uuid::nil(),
+            buyer_id: state.settlement.platform_user_id(),
+            seller_id: r.user_id,
+            buy_order_id: Uuid::nil(),
+            sell_order_id: Uuid::nil(),
+            energy_amount: r.energy_generated_kwh,
+            price: Decimal::ZERO,
+            total_amount: Decimal::ZERO,
+            fee_amount: Decimal::ZERO,
+            net_amount: Decimal::ZERO,
+            status: trading_core::models::SettlementStatus::Pending,
+            blockchain_tx: None,
+            created_at: chrono::Utc::now(),
+            confirmed_at: None,
+            wheeling_charge: None,
+            loss_factor: None,
+            loss_cost: None,
+            effective_energy: None,
+            buyer_zone_id: None,
+            seller_zone_id: None,
+            buyer_session_token: None,
+            seller_session_token: None,
+            erc_certificate_id: None,
+            erc_transfer_tx: None,
+            retry_count: 0,
+            error_message: None,
+        };
+
+        settlements.push(settlement);
+        serials.push(r.meter_serial);
+    }
+
+    if settlements.is_empty() {
+        return Ok(Json(BatchGenerationMintResponse {
+            success: true,
+            tx_signature: "".to_string(),
+            meter_serials: Vec::new(),
+        }));
+    }
+
+    // 2. Execute via SettlementService
+    let results = state
+        .settlement
+        .execute_batched_settlements(settlements)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Batch settlement failed: {}", e),
+            )
+        })?;
+
+    let tx_sig = results.first().map(|r| r.signature.clone()).unwrap_or_default();
+
+    Ok(Json(BatchGenerationMintResponse {
+        success: true,
+        tx_signature: tx_sig,
+        meter_serials: serials,
     }))
 }
