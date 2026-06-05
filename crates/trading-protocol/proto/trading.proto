@@ -37,6 +37,7 @@ service TradingService {
 
   // Oracle Bridge Settlement (Generation Mint)
   rpc SettleGenerationMint (SettleGenerationMintRequest) returns (SettleGenerationMintResponse);
+  rpc BatchSettleGenerationMint (BatchSettleGenerationMintRequest) returns (BatchSettleGenerationMintResponse);
 
   // Conditional Orders
   rpc CreateConditionalOrder(CreateConditionalOrderRequest) returns (TradingResponse);
@@ -433,6 +434,18 @@ message SettleGenerationMintResponse {
   string status = 4;
 }
 
+message BatchSettleGenerationMintRequest {
+  repeated SettleGenerationMintRequest requests = 1;
+}
+
+message BatchSettleGenerationMintResponse {
+  bool success = 1;
+  string message = 2;
+  string tx_signature = 3;
+  uint64 slot = 4;
+  repeated string meter_serials = 5;
+}
+
 // =============================================================================
 // VPP (Virtual Power Plant) Orchestration
 // =============================================================================
@@ -468,6 +481,7 @@ message DispatchVppRequest {
   string cluster_id = 1;
   string dispatch_mode = 2; // "idle", "charge", "discharge", "balancing"
   double target_soc = 3;
+  double target_kw = 4;
 }
 
 // Settlement Messages
