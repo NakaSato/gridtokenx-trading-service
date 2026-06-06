@@ -819,6 +819,19 @@ pub async fn batch_settle_generation_mint(
     let mut settlements = Vec::new();
     let mut serials = Vec::new();
 
+    // Resolve the live market epoch once for the whole batch (settlements.epoch_id
+    // is a NOT NULL FK to market_epochs; a nil epoch FK-fails the insert).
+    let epoch_id = state
+        .order_repo
+        .get_or_create_active_epoch()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to resolve active epoch: {}", e),
+            )
+        })?;
+
     // 1. Verify and prepare all requests
     for r in req.requests {
         // Verification logic (reused from single settlement)
@@ -874,7 +887,7 @@ pub async fn batch_settle_generation_mint(
         let settlement = trading_core::models::Settlement {
             id: Uuid::new_v4(),
             trade_id: None,
-            epoch_id: Uuid::nil(),
+            epoch_id,
             buyer_id: state.settlement.platform_user_id(),
             seller_id: r.user_id,
             buy_order_id: Uuid::nil(),

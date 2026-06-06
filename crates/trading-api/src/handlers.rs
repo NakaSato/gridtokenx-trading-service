@@ -497,6 +497,20 @@ impl TradingService for TradingGrpcService {
         let mut settlements = Vec::new();
         let mut serials = Vec::new();
 
+        // Resolve the live market epoch once for the batch (settlements.epoch_id is
+        // a NOT NULL FK to market_epochs; a nil epoch FK-fails the insert).
+        let epoch_id = self
+            .state
+            .order_repo
+            .get_or_create_active_epoch()
+            .await
+            .map_err(|e| {
+                ConnectError::new(
+                    ErrorCode::Internal,
+                    format!("Failed to resolve active epoch: {}", e),
+                )
+            })?;
+
         for req in request.requests.iter() {
             // 1. Verify Oracle Signature
             let is_verified = verify_oracle_signature(
@@ -533,7 +547,7 @@ impl TradingService for TradingGrpcService {
             let settlement = trading_core::models::Settlement {
                 id: Uuid::new_v4(),
                 trade_id: None,
-                epoch_id: Uuid::nil(),
+                epoch_id,
                 buyer_id: Uuid::nil(),
                 seller_id: user_id,
                 buy_order_id: Uuid::nil(),

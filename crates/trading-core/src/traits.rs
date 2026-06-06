@@ -79,6 +79,12 @@ pub trait SettlementRepository: Send + Sync {
     /// Insert a new settlement.
     async fn insert_settlement(&self, settlement: &Settlement) -> TraitResult<()>;
 
+    /// Resolve the current market epoch (creating one if none is open) so a
+    /// settlement built outside the matching engine — e.g. generation-mint or
+    /// the settlement engine — can reference a real `market_epochs` row instead
+    /// of a nil/hardcoded UUID that would FK-fail.
+    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid>;
+
     /// Insert an order-match ledger row (the `order_matches` table). Records the
     /// crossing of a buy/sell order; `settlement_id` links it to the settlement
     /// created for the same fill, `zone_id` tags it for sharded analytics.

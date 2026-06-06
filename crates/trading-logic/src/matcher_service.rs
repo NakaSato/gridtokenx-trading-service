@@ -168,8 +168,10 @@ impl MatcherService {
 
             // Create settlement record FIRST: order_matches.settlement_id is a FK to
             // settlements(id), so the settlement row must exist before the match row
-            // references it.
-            let _ = self
+            // references it. If the settlement insert fails, record the match with a
+            // NULL settlement link (the FK is nullable) rather than dropping the
+            // ledger row, and surface the error instead of swallowing it.
+            let settlement_link = match self
                 .settlement_repo
                 .insert_settlement(&trading_core::models::Settlement {
                     id: settlement_id,
@@ -201,10 +203,18 @@ impl MatcherService {
                     retry_count: 0,
                     error_message: None,
                 })
-                .await;
+                .await
+            {
+                Ok(()) => Some(settlement_id),
+                Err(e) => {
+                    tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist settlement row; recording order_matches without settlement link");
+                    None
+                }
+            };
 
-            // Persist the order-match ledger row (order_matches) now that its
-            // settlement exists. Tagged with the buyer's zone for sharded analytics.
+            // Persist the order-match ledger row (order_matches). Links to the
+            // settlement when it persisted (NULL otherwise). Tagged with the buyer's
+            // zone for sharded analytics.
             if let Err(e) = self
                 .settlement_repo
                 .insert_match(
@@ -218,7 +228,7 @@ impl MatcherService {
                         match_time: Utc::now(),
                         status: "pending".to_string(),
                     },
-                    Some(settlement_id),
+                    settlement_link,
                     m.buyer_zone_id,
                 )
                 .await

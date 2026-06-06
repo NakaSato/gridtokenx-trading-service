@@ -302,10 +302,14 @@ impl SettlementService {
 
         let total_amount = payload.kwh * feed_in_tariff;
 
+        // Stamp the live market epoch (settlements.epoch_id is a NOT NULL FK to
+        // market_epochs). A hardcoded/nil epoch FK-fails the insert below.
+        let epoch_id = self.repo.get_or_create_active_epoch().await?;
+
         let settlement = Settlement {
             id: Uuid::new_v4(),
             trade_id: None, // Direct oracle settlement doesn't have a trade_id from matching engine
-            epoch_id: Uuid::parse_str("12345678-1234-1234-1234-123456789012").unwrap(),
+            epoch_id,
             buyer_id: self.platform_user_id,
             seller_id: user_id,
             buy_order_id: Uuid::nil(),

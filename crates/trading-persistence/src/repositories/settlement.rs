@@ -139,6 +139,10 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(())
     }
 
+    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+        crate::repositories::epoch::get_or_create_active_epoch(&self.pool).await
+    }
+
     async fn insert_match(
         &self,
         m: &OrderMatch,

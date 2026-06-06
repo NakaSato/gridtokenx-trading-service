@@ -252,47 +252,6 @@ impl OrderRepository for PostgresOrderRepository {
     }
 
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
-        // Serialize epoch creation across concurrent first-orders: market_epochs
-        // .epoch_number is UNIQUE, so two callers that both find no active epoch
-        // would race on INSERT. A transaction-scoped advisory lock (released on
-        // commit/rollback) makes the select-or-insert atomic. The lock key is an
-        // arbitrary constant shared only by this routine.
-        const EPOCH_LOCK_KEY: i64 = 0x677269_64; // "grid"
-
-        let mut tx = self.pool.begin().await?;
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(EPOCH_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
-
-        // Reuse the open epoch whose window still covers now.
-        let existing: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM market_epochs \
-             WHERE status = 'active' AND end_time > NOW() \
-             ORDER BY end_time DESC LIMIT 1",
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        if let Some((id,)) = existing {
-            tx.commit().await?;
-            return Ok(id);
-        }
-
-        // None open — start a new rolling 15-minute epoch (matches the oracle's
-        // 15-minute aggregation window). epoch_number = max + 1.
-        let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO market_epochs (epoch_number, start_time, end_time, status) \
-             VALUES ( \
-                 (SELECT COALESCE(MAX(epoch_number), 0) + 1 FROM market_epochs), \
-                 NOW(), NOW() + INTERVAL '15 minutes', 'active' \
-             ) RETURNING id",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(id)
+        crate::repositories::epoch::get_or_create_active_epoch(&self.pool).await
     }
 }
