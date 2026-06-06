@@ -255,23 +255,53 @@ pub async fn submit_order(
 
 pub async fn get_order_book(
     role: ServiceRole,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(zone_id): Path<i32>,
 ) -> Result<Json<OrderBookResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
-    // Mock for now to match the redesign spec
+
+    let entries = state
+        .order_repo
+        .get_active_orders_by_zone(zone_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    // Aggregate remaining (unfilled) energy by price level. BTreeMap keeps the
+    // levels ordered by price; asks (sells) ascend from the best (lowest) ask,
+    // bids (buys) descend from the best (highest) bid.
+    let mut ask_levels: std::collections::BTreeMap<Decimal, Decimal> = Default::default();
+    let mut bid_levels: std::collections::BTreeMap<Decimal, Decimal> = Default::default();
+    for e in &entries {
+        let book = match e.side {
+            trading_core::types::OrderSide::Sell => &mut ask_levels,
+            trading_core::types::OrderSide::Buy => &mut bid_levels,
+        };
+        *book.entry(e.price_per_kwh).or_insert(Decimal::ZERO) += e.energy_amount;
+    }
+
+    let asks: Vec<[String; 2]> = ask_levels
+        .iter()
+        .map(|(price, amount)| [price.to_string(), amount.to_string()])
+        .collect();
+    let bids: Vec<[String; 2]> = bid_levels
+        .iter()
+        .rev()
+        .map(|(price, amount)| [price.to_string(), amount.to_string()])
+        .collect();
+
     Ok(Json(OrderBookResponse {
         zone_id,
-        last_update_id: 89432,
-        asks: vec![
-            ["4.60".to_string(), "120.00".to_string()],
-            ["4.70".to_string(), "85.50".to_string()],
-        ],
-        bids: vec![
-            ["4.40".to_string(), "200.00".to_string()],
-            ["4.30".to_string(), "50.00".to_string()],
-        ],
+        // No exchange-wide sequence source yet; expose the resting-order count as
+        // a change proxy (replace with a real sequence when the matcher emits one).
+        last_update_id: entries.len() as u64,
+        asks,
+        bids,
     }))
 }
 
