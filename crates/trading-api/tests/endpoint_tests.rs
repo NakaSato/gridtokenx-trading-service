@@ -63,6 +63,7 @@ impl SettlementRepository for MockSystem {
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {
         Ok(self.settlements.lock().unwrap().iter().find(|s| s.id == id).cloned())
     }
+    async fn insert_match(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>) -> TraitResult<()> { Ok(()) }
     async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
     async fn update_settlement_status(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>) -> TraitResult<()> { Ok(()) }
 }

@@ -161,11 +161,18 @@ impl MatcherService {
             let buy_meta = &buy_metadata[m.buy_metadata_index];
             let sell_meta = &sell_metadata[m.sell_metadata_index];
 
-            // Create settlement record
+            // Shared ids: the match-ledger row, the settlement it links to, and the
+            // OrderMatched event all reference the same match so the records reconcile.
+            let match_id = Uuid::new_v4();
+            let settlement_id = Uuid::new_v4();
+
+            // Create settlement record FIRST: order_matches.settlement_id is a FK to
+            // settlements(id), so the settlement row must exist before the match row
+            // references it.
             let _ = self
                 .settlement_repo
                 .insert_settlement(&trading_core::models::Settlement {
-                    id: Uuid::new_v4(),
+                    id: settlement_id,
                     trade_id: Some(Uuid::new_v4()),
                     epoch_id: m.epoch_id,
                     buyer_id: m.buyer_id,
@@ -196,9 +203,32 @@ impl MatcherService {
                 })
                 .await;
 
+            // Persist the order-match ledger row (order_matches) now that its
+            // settlement exists. Tagged with the buyer's zone for sharded analytics.
+            if let Err(e) = self
+                .settlement_repo
+                .insert_match(
+                    &trading_core::models::OrderMatch {
+                        id: match_id,
+                        epoch_id: m.epoch_id,
+                        buy_order_id: m.buy_order_id,
+                        sell_order_id: m.sell_order_id,
+                        matched_amount: m.match_amount,
+                        match_price: m.match_price,
+                        match_time: Utc::now(),
+                        status: "pending".to_string(),
+                    },
+                    Some(settlement_id),
+                    m.buyer_zone_id,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist order_matches row");
+            }
+
             // Publish OrderMatched Event
             let matched_event = trading_core::events::Event::OrderMatched(trading_core::events::OrderMatchedPayload {
-                match_id: Uuid::new_v4(), 
+                match_id,
                 epoch_id: m.epoch_id,
                 buy_order_id: m.buy_order_id,
                 sell_order_id: m.sell_order_id,

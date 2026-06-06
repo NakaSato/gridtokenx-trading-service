@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::events::Event;
-use crate::models::{ConditionalOrder, OrderBookEntry, RecurringOrder, Settlement, TradingOrder};
+use crate::models::{
+    ConditionalOrder, OrderBookEntry, OrderMatch, RecurringOrder, Settlement, TradingOrder,
+};
 use crate::types::OrderStatus;
 
 /// Result alias for trait methods.
@@ -69,6 +71,16 @@ pub trait OrderRepository: Send + Sync {
 pub trait SettlementRepository: Send + Sync {
     /// Insert a new settlement.
     async fn insert_settlement(&self, settlement: &Settlement) -> TraitResult<()>;
+
+    /// Insert an order-match ledger row (the `order_matches` table). Records the
+    /// crossing of a buy/sell order; `settlement_id` links it to the settlement
+    /// created for the same fill, `zone_id` tags it for sharded analytics.
+    async fn insert_match(
+        &self,
+        m: &OrderMatch,
+        settlement_id: Option<Uuid>,
+        zone_id: Option<i32>,
+    ) -> TraitResult<()>;
 
     /// Get a settlement by ID.
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>>;

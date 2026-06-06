@@ -6,7 +6,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
-use trading_core::models::{Settlement, SettlementStatus};
+use trading_core::models::{OrderMatch, Settlement, SettlementStatus};
 use trading_core::traits::{SettlementRepository, TraitResult};
 
 #[derive(Debug, Clone, FromRow)]
@@ -133,6 +133,37 @@ impl SettlementRepository for PostgresSettlementRepository {
         .bind(s.confirmed_at)
         .bind(&s.erc_certificate_id)
         .bind(&s.erc_transfer_tx)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn insert_match(
+        &self,
+        m: &OrderMatch,
+        settlement_id: Option<Uuid>,
+        zone_id: Option<i32>,
+    ) -> TraitResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO order_matches (
+                id, epoch_id, buy_order_id, sell_order_id,
+                matched_amount, match_price, match_time, status,
+                settlement_id, zone_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(m.id)
+        .bind(m.epoch_id)
+        .bind(m.buy_order_id)
+        .bind(m.sell_order_id)
+        .bind(m.matched_amount)
+        .bind(m.match_price)
+        .bind(m.match_time)
+        .bind(&m.status)
+        .bind(settlement_id)
+        .bind(zone_id)
         .execute(&self.pool)
         .await?;
 
