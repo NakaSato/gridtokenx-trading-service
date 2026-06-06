@@ -162,6 +162,7 @@ impl InstructionBuilder {
     }
 
     /// Build instruction for creating energy trade order
+    #[allow(clippy::too_many_arguments)]
     pub fn build_create_order_instruction(
         &self,
         market_pubkey: &Pubkey,
@@ -355,6 +356,7 @@ impl InstructionBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_execute_atomic_settlement_instruction(
         &self,
         market: Pubkey,
@@ -383,6 +385,9 @@ impl InstructionBuilder {
             &[b"zone_market", market.as_ref(), &0_u32.to_le_bytes()], // Default zone 0 for atomic
             &program_id,
         );
+        let energy_token_program = Pubkey::from_str(&self.config.energy_token_program_id)
+            .context("Invalid energy token program ID")?;
+        let poa_config = self.get_poa_config_pubkey()?;
 
         let accounts = vec![
             AccountMeta::new(market, false),
@@ -401,8 +406,8 @@ impl InstructionBuilder {
             AccountMeta::new_readonly(escrow_authority, true),
             AccountMeta::new_readonly(market_authority, true),
             AccountMeta::new_readonly(system_program, false),
-            AccountMeta::new_readonly(self.config.energy_token_program_id.parse().unwrap(), false), // Secondary program for settlement
-            AccountMeta::new_readonly(self.get_poa_config_pubkey().unwrap(), false), // Governance
+            AccountMeta::new_readonly(energy_token_program, false), // Secondary program for settlement
+            AccountMeta::new_readonly(poa_config, false),           // Governance
         ];
 
         let mut data = Vec::new();
@@ -420,6 +425,7 @@ impl InstructionBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_settle_offchain_match_instruction(
         &self,
         market_pubkey: &Pubkey,
@@ -511,6 +517,7 @@ impl InstructionBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_batch_settle_offchain_match_instruction(
         &self,
         market_pubkey: &Pubkey,
@@ -546,10 +553,14 @@ impl InstructionBuilder {
 
         // For simplicity in batch, we assume shards are derived from payer or market 0
         // In a real high-throughput scenario, these would be passed in or resolved
-        let (market_shard_pda, _) =
-            Pubkey::find_program_address(&[b"market_shard", market_pubkey.as_ref(), &[0]], &program_id);
-        let (zone_shard_pda, _) =
-            Pubkey::find_program_address(&[b"zone_shard", zone_market_pda.as_ref(), &[0]], &program_id);
+        let (market_shard_pda, _) = Pubkey::find_program_address(
+            &[b"market_shard", market_pubkey.as_ref(), &[0]],
+            &program_id,
+        );
+        let (zone_shard_pda, _) = Pubkey::find_program_address(
+            &[b"zone_shard", zone_market_pda.as_ref(), &[0]],
+            &program_id,
+        );
 
         let mut accounts = vec![
             AccountMeta::new_readonly(*market_pubkey, false),
@@ -592,10 +603,10 @@ impl InstructionBuilder {
                 &program_id,
             );
 
-            // ATAs need to be resolved. We'll pass them in via matches if we can, 
+            // ATAs need to be resolved. We'll pass them in via matches if we can,
             // but for now we expect the caller to have resolved them.
             // Since InstructionBuilder doesn't have TokenManager, we'll assume standard derivation.
-            
+
             let buyer_currency_ata = spl_associated_token_account::get_associated_token_address(
                 &m.buyer_payload.user,
                 currency_mint,
@@ -604,16 +615,18 @@ impl InstructionBuilder {
                 &m.seller_payload.user,
                 currency_mint,
             );
-            let seller_energy_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
-                &m.seller_payload.user,
-                energy_mint,
-                &token_2022_program,
-            );
-            let buyer_energy_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
-                &m.buyer_payload.user,
-                energy_mint,
-                &token_2022_program,
-            );
+            let seller_energy_ata =
+                spl_associated_token_account::get_associated_token_address_with_program_id(
+                    &m.seller_payload.user,
+                    energy_mint,
+                    &token_2022_program,
+                );
+            let buyer_energy_ata =
+                spl_associated_token_account::get_associated_token_address_with_program_id(
+                    &m.buyer_payload.user,
+                    energy_mint,
+                    &token_2022_program,
+                );
 
             accounts.push(AccountMeta::new(buyer_nullifier_pda, false));
             accounts.push(AccountMeta::new(seller_nullifier_pda, false));
@@ -626,7 +639,7 @@ impl InstructionBuilder {
         let mut data = Vec::new();
         // batch_settle_offchain_match discriminator: [104, 149, 174, 115, 221, 21, 169, 234]
         data.extend_from_slice(&[104, 149, 174, 115, 221, 21, 169, 234]);
-        
+
         // Serialize Vec<BatchMatchPair>
         data.extend_from_slice(&(matches.len() as u32).to_le_bytes());
         for m in matches {
@@ -765,37 +778,24 @@ impl InstructionBuilder {
     ) -> Result<Instruction> {
         let registry_program = Pubkey::from_str(&self.config.registry_program_id)
             .context("Invalid Registry program ID")?;
-        let energy_token_program = Pubkey::from_str(&self.config.energy_token_program_id)
-            .context("Invalid Energy Token program ID")?;
         let system_program = Pubkey::from_str(SYSTEM_PROGRAM_ID)?;
 
         let registry_pda = self.get_registry_pda()?;
         let user_account_pda = self.get_user_account_pda(&authority)?;
         let shard_pda = self.get_registry_shard_pda(shard_id)?;
 
-        let mint_pda = self.get_mint_pda()?;
-        let token_info_pda = self.get_token_info_pda()?;
-        let token_program = spl_token_2022::id();
-
-        // Get user token account (ATA)
-        let user_token_account =
-            spl_associated_token_account::get_associated_token_address_with_program_id(
-                &authority,
-                &mint_pda,
-                &token_program,
-            );
-
+        // On-chain `RegisterUser` takes exactly 6 accounts in this order. The
+        // welcome-airdrop mint CPI was decoupled from registration, so the old
+        // token accounts (energy_token_program, mint, ATA, token_info,
+        // token_program) are no longer part of this context — leaving them in
+        // shifted `energy_token_program` onto the `system_program` slot and
+        // tripped Anchor's `InvalidProgramId` (error 3008 / 0xbc0).
         let accounts = vec![
             AccountMeta::new(user_account_pda, false),
             AccountMeta::new(shard_pda, false),
-            AccountMeta::new(registry_pda, false),
+            AccountMeta::new_readonly(registry_pda, false),
             AccountMeta::new_readonly(authority, false),
             AccountMeta::new(self.payer, true),
-            AccountMeta::new_readonly(energy_token_program, false),
-            AccountMeta::new(mint_pda, false),
-            AccountMeta::new(user_token_account, false),
-            AccountMeta::new_readonly(token_info_pda, false),
-            AccountMeta::new_readonly(token_program, false),
             AccountMeta::new_readonly(system_program, false),
         ];
 
@@ -826,9 +826,10 @@ impl InstructionBuilder {
         amount: u64,
     ) -> Result<Instruction> {
         let program_id = Pubkey::from_str(&self.config.energy_token_program_id)?;
+        // Energy mint (seed `mint_2022`) is Token-2022 — its ATA + mint CPI must
+        // use the Token-2022 program, matching the register/mint/balance paths.
         let token_program = spl_token_2022::id();
-        let associated_token_program =
-            Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+        let associated_token_program = spl_associated_token_account::id();
         let system_program = Pubkey::from_str(SYSTEM_PROGRAM_ID)?;
 
         let accounts = vec![
@@ -971,11 +972,14 @@ impl InstructionBuilder {
     }
 
     /// Get meter account PDA
-    pub fn get_meter_account_pda(&self, serial_number: &str) -> Result<Pubkey> {
+    pub fn get_meter_account_pda(&self, owner: &Pubkey, serial_number: &str) -> Result<Pubkey> {
         let program_id = Pubkey::from_str(&self.config.registry_program_id)
             .context("Invalid Registry program ID")?;
+        // Seeds MUST match the on-chain RegisterMeter context:
+        // [b"meter", owner.key(), meter_id]. Omitting `owner` derives a PDA the
+        // program will reject with ConstraintSeeds.
         let (pda, _) = Pubkey::find_program_address(
-            &[b"meter", serial_number.as_bytes()],
+            &[b"meter", owner.as_ref(), serial_number.as_bytes()],
             &program_id,
         );
         Ok(pda)
@@ -996,26 +1000,33 @@ impl InstructionBuilder {
         let user_account_pda = self.get_user_account_pda(&owner)?;
         let registry_pda = self.get_registry_pda()?;
         let shard_pda = self.get_registry_shard_pda(shard_id)?;
-        let meter_account_pda = self.get_meter_account_pda(&meter_id)?;
+        let meter_account_pda = self.get_meter_account_pda(&owner, &meter_id)?;
 
+        // Account order matches on-chain `RegisterMeter`: meter_account,
+        // user_account, registry_shard, registry, owner, payer, system_program.
+        // `owner` is the user's (Vault-custodied, non-signing) authority pubkey;
+        // the bridge `payer` funds the meter PDA rent and is the only signer.
         let accounts = vec![
             AccountMeta::new(meter_account_pda, false),
             AccountMeta::new(user_account_pda, false),
             AccountMeta::new(shard_pda, false),
             AccountMeta::new(registry_pda, false),
-            AccountMeta::new(owner, true), // owner IS a signer in the program
+            AccountMeta::new_readonly(owner, false),
+            AccountMeta::new(self.payer, true),
             AccountMeta::new_readonly(system_program, false),
         ];
 
         let mut data = Vec::new();
-        // register_meter discriminator: [156, 172, 12, 102, 116, 219, 137, 203]
-        data.extend_from_slice(&[156, 172, 12, 102, 116, 219, 137, 203]);
-        
+        // register_meter discriminator = sha256("global:register_meter")[..8].
+        // Matches registry IDL; the previous value was stale and tripped
+        // InstructionFallbackNotFound (error 101 / 0x65).
+        data.extend_from_slice(&[49, 106, 87, 72, 138, 214, 224, 125]);
+
         // Serialize Serial Number (String)
         let bytes = meter_id.as_bytes();
         data.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         data.extend_from_slice(bytes);
-        
+
         data.push(meter_type as u8);
         data.push(shard_id);
 
@@ -1032,7 +1043,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_pda_derivation() {
-        let program_id = Pubkey::from_str("C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu").unwrap();
+        let program_id = Pubkey::from_str_const("C8RT8L5pZCVDrf9v94CNNk3XPBKZU5p4o4aPnAVQGiTu");
         let shard_id: u8 = 0;
         let (shard_pda, _) =
             Pubkey::find_program_address(&[b"registry_shard", &[shard_id]], &program_id);
@@ -1040,5 +1051,68 @@ mod tests {
 
         let (registry_pda, _) = Pubkey::find_program_address(&[b"registry"], &program_id);
         println!("EXPECTED_REGISTRY_PDA: {}", registry_pda);
+    }
+
+    /// Locks the energy `mint_to_wallet` builder against regressing the
+    /// token-program account back to classic SPL Token. The energy mint (seed
+    /// `mint_2022`) is Token-2022, so the CPI's token-program account MUST be
+    /// `spl_token_2022::id()` — using classic `spl_token::id()` derives the
+    /// wrong ATA and the on-chain constraint rejects it. Also pins the Anchor
+    /// discriminator, the amount encoding, and the 9-account order.
+    #[test]
+    fn test_mint_to_wallet_uses_token_2022() {
+        let payer = Pubkey::new_unique();
+        let builder = InstructionBuilder::new(payer, crate::config::SolanaProgramsConfig::default());
+
+        let mint = Pubkey::new_unique();
+        let token_info = Pubkey::new_unique();
+        let destination = Pubkey::new_unique();
+        let destination_owner = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let amount: u64 = 4_200;
+
+        let ix = builder
+            .build_mint_to_wallet_instruction(
+                mint,
+                token_info,
+                destination,
+                destination_owner,
+                authority,
+                amount,
+            )
+            .expect("builder should succeed with default config");
+
+        // 9 accounts in the on-chain order.
+        assert_eq!(ix.accounts.len(), 9, "account count");
+        assert_eq!(ix.accounts[0].pubkey, mint);
+        assert_eq!(ix.accounts[1].pubkey, token_info);
+        assert_eq!(ix.accounts[2].pubkey, destination);
+        assert_eq!(ix.accounts[3].pubkey, destination_owner);
+        assert_eq!(ix.accounts[4].pubkey, authority);
+        assert!(ix.accounts[4].is_signer, "authority signs");
+        assert_eq!(ix.accounts[5].pubkey, payer);
+        assert!(ix.accounts[5].is_signer, "payer signs");
+
+        // The regression guard: token-program slot must be Token-2022, not classic.
+        assert_eq!(
+            ix.accounts[6].pubkey,
+            spl_token_2022::id(),
+            "token-program account must be Token-2022"
+        );
+        assert_ne!(ix.accounts[6].pubkey, spl_token::id());
+        assert_eq!(ix.accounts[7].pubkey, spl_associated_token_account::id());
+
+        // Discriminator + amount encoding.
+        assert_eq!(&ix.data[..8], &[17, 40, 71, 107, 142, 232, 163, 100]);
+        assert_eq!(&ix.data[8..16], &amount.to_le_bytes());
+
+        // program_id is the energy token program from config.
+        assert_eq!(
+            ix.program_id,
+            Pubkey::from_str(
+                &crate::config::SolanaProgramsConfig::default().energy_token_program_id
+            )
+            .unwrap()
+        );
     }
 }

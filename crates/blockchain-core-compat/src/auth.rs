@@ -9,6 +9,19 @@ use std::str::FromStr;
 pub const INTERNAL_ROLE_HEADER: &str = "x-gridtokenx-role";
 pub const GATEWAY_SECRET_HEADER: &str = "x-gridtokenx-gateway-secret";
 
+/// Length-independent constant-time byte comparison for secret checks.
+/// Avoids the early-exit timing oracle of `==` / `!=` on `&str`.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Carries the extracted SPIFFE identity of the caller.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpiffeIdentity(pub String);
@@ -72,31 +85,45 @@ impl FromStr for ServiceRole {
     }
 }
 
+/// True when `uri` equals `base` or extends it at a path-segment boundary.
+/// Prevents `…/iam-service-evil` from matching the `…/iam-service` trust domain
+/// (plain `starts_with` did).
+fn spiffe_matches(uri: &str, base: &str) -> bool {
+    uri == base
+        || uri
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 impl From<&SpiffeIdentity> for ServiceRole {
     fn from(identity: &SpiffeIdentity) -> Self {
-        let uri = &identity.0;
-        if uri.starts_with("spiffe://gridtokenx.th/prod/apisix") {
-            Self::ApiGateway
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/iam-service") {
-            Self::IamService
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/trading-service/api") {
-            Self::TradingApi
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/trading-service/matcher") {
-            Self::TradingMatcher
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/oracle-bridge") {
-            Self::OracleBridge
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/settlement-service") {
-            Self::SettlementService
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/reporting-service") {
-            Self::ReportingService
-        } else if uri.starts_with("spiffe://gridtokenx.th/prod/admin") {
-            Self::Admin
-        } else {
-            Self::Unknown
+        let uri = identity.0.as_str();
+        // Most-specific paths first (trading-service/{api,matcher} before any
+        // shorter prefix would matter).
+        const TABLE: &[(&str, ServiceRole)] = &[
+            ("spiffe://gridtokenx.th/prod/apisix", ServiceRole::ApiGateway),
+            ("spiffe://gridtokenx.th/prod/iam-service", ServiceRole::IamService),
+            ("spiffe://gridtokenx.th/prod/trading-service/api", ServiceRole::TradingApi),
+            ("spiffe://gridtokenx.th/prod/trading-service/matcher", ServiceRole::TradingMatcher),
+            ("spiffe://gridtokenx.th/prod/oracle-bridge", ServiceRole::OracleBridge),
+            ("spiffe://gridtokenx.th/prod/settlement-service", ServiceRole::SettlementService),
+            ("spiffe://gridtokenx.th/prod/reporting-service", ServiceRole::ReportingService),
+            ("spiffe://gridtokenx.th/prod/admin", ServiceRole::Admin),
+        ];
+        for (base, role) in TABLE {
+            if spiffe_matches(uri, base) {
+                return *role;
+            }
         }
+        Self::Unknown
     }
 }
 
+// NOTE: this compat shim runs on axum 0.7.9 (trading-service workspace), whose
+// `FromRequestParts` is `async_trait`-desugared. Upstream gridtokenx-blockchain-core
+// is on axum 0.8 (native RPITIT) and omits this attribute — the ONLY permitted
+// divergence from the upstream source. Everything else in this file is a verbatim
+// mirror; keep it that way until trading-service moves to axum 0.8.
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for ServiceRole
 where
@@ -134,15 +161,35 @@ impl ServiceRole {
             .and_then(|v: &HeaderValue| v.to_str().ok())
             .and_then(|s: &str| s.parse::<ServiceRole>().ok())
         {
-            // If the role is ApiGateway, it MUST be accompanied by the gateway secret
+            // If the role is ApiGateway, it MUST be accompanied by the gateway secret.
             if role == ServiceRole::ApiGateway {
-                let expected_secret = std::env::var("GATEWAY_SECRET")
-                    .unwrap_or_else(|_| "gridtokenx-gateway-secret-2025".to_string());
+                // Fail closed: with GATEWAY_SECRET unset we do NOT fall back to a
+                // public hardcoded constant (that let anyone claim ApiGateway). The
+                // dev convenience default is only honoured when CHAIN_BRIDGE_INSECURE=true.
+                let expected_secret = match std::env::var("GATEWAY_SECRET") {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let dev_mode = std::env::var("CHAIN_BRIDGE_INSECURE")
+                            .map(|v| v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        if dev_mode {
+                            "gridtokenx-gateway-secret-2025".to_string()
+                        } else {
+                            tracing::error!(
+                                "RBAC: GATEWAY_SECRET unset and not in dev mode — denying ApiGateway"
+                            );
+                            return ServiceRole::Unknown;
+                        }
+                    }
+                };
                 let provided_secret = headers
                     .get(GATEWAY_SECRET_HEADER)
                     .and_then(|v| v.to_str().ok());
 
-                if provided_secret != Some(&expected_secret) {
+                let ok = provided_secret
+                    .map(|p| constant_time_eq(p.as_bytes(), expected_secret.as_bytes()))
+                    .unwrap_or(false);
+                if !ok {
                     tracing::warn!(
                         "RBAC Verification Failed: API Gateway secret mismatch or missing"
                     );
@@ -185,9 +232,12 @@ mod tests {
     fn test_role_display_and_from_str() {
         let role = ServiceRole::IamService;
         assert_eq!(role.to_string(), "iam-service");
-        assert_eq!(ServiceRole::from_str("iam-service").unwrap(), role);
         assert_eq!(
-            ServiceRole::from_str("unknown-role").unwrap(),
+            ServiceRole::from_str("iam-service").expect("known role should parse"),
+            role
+        );
+        assert_eq!(
+            ServiceRole::from_str("unknown-role").expect("unknown roles map to Unknown"),
             ServiceRole::Unknown
         );
     }
@@ -234,6 +284,30 @@ mod tests {
     }
 
     #[test]
+    fn test_spiffe_segment_boundary() {
+        // Sub-path of a trusted base -> role honoured.
+        assert_eq!(
+            ServiceRole::from(&SpiffeIdentity(
+                "spiffe://gridtokenx.th/prod/iam-service/workload-1".to_string()
+            )),
+            ServiceRole::IamService
+        );
+        // Look-alike that only shares a prefix -> rejected.
+        assert_eq!(
+            ServiceRole::from(&SpiffeIdentity(
+                "spiffe://gridtokenx.th/prod/iam-service-evil".to_string()
+            )),
+            ServiceRole::Unknown
+        );
+        assert_eq!(
+            ServiceRole::from(&SpiffeIdentity(
+                "spiffe://gridtokenx.th/prod/admin-x".to_string()
+            )),
+            ServiceRole::Unknown
+        );
+    }
+
+    #[test]
     fn test_role_from_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -249,6 +323,60 @@ mod tests {
         assert_eq!(role_fallback, ServiceRole::Unknown);
     }
 
+    fn gateway_headers(secret: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(INTERNAL_ROLE_HEADER, HeaderValue::from_static("api-gateway"));
+        if let Some(s) = secret {
+            h.insert(
+                GATEWAY_SECRET_HEADER,
+                HeaderValue::from_str(s).expect("valid header"),
+            );
+        }
+        h
+    }
+
+    // Only mutates GATEWAY_SECRET, which no other test reads — keeps this safe
+    // under the parallel runner. We deliberately do NOT toggle
+    // CHAIN_BRIDGE_INSECURE here: it is process-global and read by policy.rs, so
+    // flipping it on would race other tests. The dev-default branch is covered by
+    // the helper-level test below instead.
+    #[test]
+    fn test_gateway_secret_fail_closed() {
+        // Matching secret -> ApiGateway
+        std::env::set_var("GATEWAY_SECRET", "s3cret");
+        assert_eq!(
+            ServiceRole::from_headers(&gateway_headers(Some("s3cret"))),
+            ServiceRole::ApiGateway
+        );
+
+        // Wrong secret -> Unknown
+        assert_eq!(
+            ServiceRole::from_headers(&gateway_headers(Some("wrong"))),
+            ServiceRole::Unknown
+        );
+
+        // Missing header -> Unknown
+        assert_eq!(
+            ServiceRole::from_headers(&gateway_headers(None)),
+            ServiceRole::Unknown
+        );
+
+        // No env -> fail closed (Unknown) even with the legacy public default.
+        std::env::remove_var("GATEWAY_SECRET");
+        assert_eq!(
+            ServiceRole::from_headers(&gateway_headers(Some("gridtokenx-gateway-secret-2025"))),
+            ServiceRole::Unknown
+        );
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
     #[test]
     fn test_rbac_require() {
         let role = ServiceRole::IamService;
@@ -259,8 +387,10 @@ mod tests {
 
         // Failure case
         let result = role.require(ServiceRole::TradingApi);
-        assert!(result.is_err());
-        assert_eq!(result.err().unwrap().0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            result.expect_err("role should be rejected").0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
@@ -274,7 +404,9 @@ mod tests {
 
         // Failure case
         let result = ServiceRole::OracleBridge.require_any(&allowed);
-        assert!(result.is_err());
-        assert_eq!(result.err().unwrap().0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            result.expect_err("role should be rejected").0,
+            StatusCode::FORBIDDEN
+        );
     }
 }

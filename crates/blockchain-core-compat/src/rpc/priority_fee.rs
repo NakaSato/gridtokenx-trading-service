@@ -32,11 +32,10 @@ impl TransactionType {
     }
 
     pub fn should_use_priority_fees(&self) -> bool {
-        match self {
-            TransactionType::WalletConnection => false,
-            TransactionType::MeterReading => false,
-            _ => true,
-        }
+        !matches!(
+            self,
+            TransactionType::WalletConnection | TransactionType::MeterReading
+        )
     }
 }
 
@@ -279,7 +278,8 @@ mod tests {
     #[test]
     fn test_add_priority_fee_instructions() {
         let mut ixs = vec![];
-        PriorityFeeService::add_priority_fee(&mut ixs, PriorityLevel::High, Some(400_000)).unwrap();
+        PriorityFeeService::add_priority_fee(&mut ixs, PriorityLevel::High, Some(400_000))
+            .expect("priority fee instructions should be added");
 
         assert_eq!(ixs.len(), 2);
         // Correct order: limit then price

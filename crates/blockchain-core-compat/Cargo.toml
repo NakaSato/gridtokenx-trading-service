@@ -12,6 +12,7 @@ mocks = []
 solana-sdk = "2.1.0"
 solana-transaction-status = "2.2.1"
 solana-program = "2.1.0"
+solana-system-interface = { version = "1.0.0", features = ["bincode"] }
 
 # Anchor
 anchor-lang = { version = "1.0.0", features = ["init-if-needed"] }

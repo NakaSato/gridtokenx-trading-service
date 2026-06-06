@@ -11,7 +11,10 @@ use crate::rpc::nats_schema::{
 };
 use crate::rpc::transaction::{ChainBridgeProvider, RealChainBridgeProvider};
 
-/// Hybrid provider: writes go through NATS JetStream, reads stay on gRPC.
+/// Hybrid provider: writes go through core NATS request/reply, reads stay on
+/// gRPC. (Core NATS is at-most-once — not JetStream. Effect-level dedup is the
+/// bridge's job via `idempotency_key`; JetStream durability is a future phase.
+/// See `NATS_IDEMPOTENCY_DESIGN.md`.)
 pub struct NatsChainBridgeProvider {
     nats: async_nats::Client,
     /// SPIFFE URI of this service — included in every published message
@@ -62,6 +65,19 @@ impl ChainBridgeProvider for NatsChainBridgeProvider {
         let correlation_id = uuid::Uuid::new_v4().to_string();
         let reply_subject = format!("chain.tx.result.{}", correlation_id);
 
+        // Dedup identity. No domain id is plumbed through the proto request yet,
+        // so fall back to sha256(serialized_tx): this dedups identical re-sends
+        // but NOT re-signed retries (a fresh blockhash changes the bytes). Once
+        // callers thread a logical id (settle:.. / mint:.. — see the design doc),
+        // that becomes the key and re-signed retries are covered too.
+        let idempotency_key = fallback_idempotency_key(&request.serialized_transaction);
+        tracing::debug!(
+            %correlation_id,
+            %idempotency_key,
+            "submit_transaction using fallback (tx-hash) idempotency key — \
+             re-signed retries are not deduplicated until a domain key is supplied"
+        );
+
         let mut reply_sub = self
             .nats
             .subscribe(reply_subject.clone())
@@ -70,6 +86,7 @@ impl ChainBridgeProvider for NatsChainBridgeProvider {
 
         let envelope = TxSubmitMessage {
             correlation_id: correlation_id.clone(),
+            idempotency_key,
             reply_subject,
             serialized_tx: request.serialized_transaction,
             key_id: request.key_id,
@@ -92,6 +109,13 @@ impl ChainBridgeProvider for NatsChainBridgeProvider {
         match tokio::time::timeout(self.tx_timeout, reply_sub.next()).await {
             Ok(Some(msg)) => {
                 let result: TxResultMessage = serde_json::from_slice(&msg.payload)?;
+                if result.deduplicated {
+                    tracing::info!(
+                        %correlation_id,
+                        signature = result.signature.as_deref().unwrap_or(""),
+                        "submit_transaction served from bridge dedup store (idempotent re-send, no second on-chain tx)"
+                    );
+                }
                 self.metrics.track_operation(
                     "nats_submit_transaction",
                     start_time.elapsed().as_millis() as f64,
@@ -102,7 +126,6 @@ impl ChainBridgeProvider for NatsChainBridgeProvider {
                     signature: result.signature.unwrap_or_default(),
                     error_message: result.error.unwrap_or_default(),
                     slot: result.slot,
-                    ..Default::default()
                 })
             }
             Ok(None) => {
@@ -250,5 +273,59 @@ impl ChainBridgeProvider for NatsChainBridgeProvider {
         request: GetTransactionDetailsRequest,
     ) -> Result<GetTransactionDetailsResponse> {
         self.grpc.get_transaction_details(request).await
+    }
+}
+
+/// Stable dedup key derived from the serialized transaction bytes — used when no
+/// caller-supplied domain idempotency key exists. Hex-encoded sha256. Identical
+/// bytes → identical key (dedups exact re-sends); differing bytes (e.g. a
+/// re-signed retry with a new blockhash) → different key (not deduplicated).
+fn fallback_idempotency_key(serialized_tx: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(serialized_tx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_key_is_deterministic_and_hex() {
+        let tx = b"some-serialized-transaction-bytes";
+        let a = fallback_idempotency_key(tx);
+        let b = fallback_idempotency_key(tx);
+        assert_eq!(a, b, "same bytes must yield the same key");
+        assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn fallback_key_differs_for_different_bytes() {
+        // A re-signed retry (new blockhash) changes the bytes → different key,
+        // so the tx-hash fallback does NOT cover re-signed retries. This asserts
+        // that limitation explicitly (the design's reason for a domain key).
+        let k1 = fallback_idempotency_key(b"tx-with-blockhash-A");
+        let k2 = fallback_idempotency_key(b"tx-with-blockhash-B");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn result_message_back_compat_defaults_deduplicated_false() {
+        // A bridge that predates the `deduplicated` field omits it; decode must
+        // not fail and must default to false.
+        let json = r#"{"correlation_id":"c1","success":true,"signature":"sig","error":null,"slot":7}"#;
+        let msg: TxResultMessage = serde_json::from_str(json).expect("decode legacy result");
+        assert!(!msg.deduplicated);
+        assert!(msg.success);
+        assert_eq!(msg.slot, 7);
+    }
+
+    #[test]
+    fn submit_message_back_compat_defaults_idempotency_key_empty() {
+        // A submit envelope from before the field existed decodes with an empty
+        // key (= legacy/unprotected path on the bridge).
+        let json = r#"{"correlation_id":"c1","reply_subject":"r","serialized_tx":[1,2,3],"key_id":"k","skip_preflight":false,"retry_count":0,"service_identity":"svc","created_at_ms":0}"#;
+        let msg: TxSubmitMessage = serde_json::from_str(json).expect("decode legacy submit");
+        assert!(msg.idempotency_key.is_empty());
     }
 }

@@ -123,7 +123,8 @@ impl OnChainManager {
             .add_priority_fee_to_instructions(&mut instructions, transaction_type, priority)
             .await?;
 
-        self.build_and_send_transaction_with_signers(instructions, signers).await
+        self.build_and_send_transaction_with_signers(instructions, signers)
+            .await
     }
 
     pub fn instruction_builder(&self) -> &InstructionBuilder {

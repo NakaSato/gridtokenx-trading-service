@@ -17,6 +17,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+// Dev fallback fee-payer. MUST match the key Chain Bridge signs with when
+// CHAIN_BRIDGE_INSECURE=true (its InsecureKeypairProvider dev keypair, and the
+// Registry authority hardcoded at chain-bridge api.rs). On-chain register_user
+// makes the payer the sole transaction signer, so a drift here yields
+// "Transaction did not pass signature verification". Override per-env with
+// SOLANA_PAYER_KEY (the real Vault platform_admin pubkey in prod).
+const DEFAULT_PAYER: Pubkey =
+    Pubkey::from_str_const("EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
+
+/// Deterministic 16-way shard for a key — must mirror the Registry program's
+/// `shard_for` (`key.to_bytes()[0] % 16`) exactly, or register_user/register_meter
+/// fail with InvalidShardId (0x177c). See superproject CLAUDE.md invariant #3.
+fn shard_for(key: &Pubkey) -> u8 {
+    key.to_bytes()[0] % 16
+}
+
 pub mod chain_v1 {
     tonic::include_proto!("gridtokenx.chain.v1");
 }
@@ -29,7 +45,7 @@ pub use metrics::{BlockchainMetrics, NoopMetrics};
 pub use on_chain::OnChainManager;
 pub use priority_fee::{PriorityFeeService, PriorityLevel, TransactionType};
 pub use token::TokenManager;
-pub use transaction::TransactionHandler;
+pub use transaction::{SignatureState, TransactionHandler};
 pub use utils::BlockchainUtils;
 
 use crate::config::SolanaProgramsConfig;
@@ -138,16 +154,13 @@ impl BlockchainService {
         // 2. infra/solana/dev-wallet.json
         // 3. Fallback to hardcoded dev-wallet pubkey
         let payer = if let Ok(key_b58) = std::env::var("SOLANA_PAYER_KEY") {
-            Pubkey::from_str(&key_b58).unwrap_or_else(|_| {
-                Pubkey::from_str("2ndDBhSWDXPAsgvkVVzsNJLfAAX9mKZkU9z5JaeSkQE4").unwrap()
-            })
+            Pubkey::from_str(&key_b58).unwrap_or(DEFAULT_PAYER)
         } else if let Ok(kp) =
             utils::BlockchainUtils::load_keypair_from_file("infra/solana/dev-wallet.json")
         {
             kp.pubkey()
         } else {
-            Pubkey::from_str("2ndDBhSWDXPAsgvkVVzsNJLfAAX9mKZkU9z5JaeSkQE4")
-                .unwrap_or_else(|_| Pubkey::default())
+            DEFAULT_PAYER
         };
 
         info!("🔑 Using blockchain payer: {}", payer);
@@ -315,6 +328,7 @@ impl BlockchainService {
     }
 
     /// Execute on-chain batch atomic settlement
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_batch_settle_offchain_match_with_signers(
         &self,
         payer_authority: &(dyn Signer + Send + Sync),
@@ -372,6 +386,7 @@ impl BlockchainService {
     }
 
     /// Issue an ERC certificate on-chain
+    #[allow(clippy::too_many_arguments)]
     pub async fn issue_erc(
         &self,
         certificate_id: &str,
@@ -395,6 +410,7 @@ impl BlockchainService {
     }
 
     /// Issue an ERC certificate on-chain with custom signer
+    #[allow(clippy::too_many_arguments)]
     pub async fn issue_erc_with_signer(
         &self,
         certificate_id: &str,
@@ -496,11 +512,9 @@ impl BlockchainService {
         let mint = self.instruction_builder.get_mint_pda()?;
         let token_info = self.instruction_builder.get_token_info_pda()?;
 
-        let instruction = self.instruction_builder.build_sync_total_supply_instruction(
-            mint,
-            token_info,
-            authority.pubkey(),
-        )?;
+        let instruction = self
+            .instruction_builder
+            .build_sync_total_supply_instruction(mint, token_info, authority.pubkey())?;
 
         self.on_chain_manager
             .build_and_send_transaction_with_signers(vec![instruction], &[authority])
@@ -535,13 +549,25 @@ impl BlockchainService {
         lat_e7: i32,
         long_e7: i32,
         h3_index: u64,
-        shard_id: u8,
+        _shard_id: u8,
     ) -> Result<Signature> {
         info!("🌐 Registering user {} on-chain", authority);
+
+        // The Registry program enforces `shard_id == authority.to_bytes()[0] % 16`
+        // (registry::shard_for / superproject CLAUDE.md invariant #3). Callers can't
+        // be trusted to compute this — IAM defaults it to 0 — so derive it here as
+        // the single source of truth; a stale caller value yields on-chain error
+        // 0x177c (InvalidShardId).
+        let shard_id = shard_for(&authority);
 
         let mut instructions = Vec::new();
 
         // 1. Initialize ATA (Idempotent)
+        // The energy mint (seed `mint_2022`) is owned by Token-2022, so its ATA
+        // MUST be derived under spl_token_2022. Classic spl_token here produced a
+        // different ATA address than the mint/balance paths (TokenManager and
+        // AccountManager both use Token-2022), leaving an orphaned account and a
+        // silent "0 balance".
         let mint_pda = self.instruction_builder.get_mint_pda()?;
         let ata_instruction =
             spl_associated_token_account::instruction::create_associated_token_account_idempotent(
@@ -551,7 +577,6 @@ impl BlockchainService {
                 &spl_token_2022::id(),
             );
         instructions.push(ata_instruction);
-
 
         // 2. Register User
         let register_instruction = self.instruction_builder.build_register_user_instruction(
@@ -572,19 +597,24 @@ impl BlockchainService {
         owner: Pubkey,
         meter_id: String,
         meter_type: instructions::MeterType,
-        shard_id: u8,
+        _shard_id: u8,
         _priority: Option<PriorityLevel>,
     ) -> Result<Signature> {
-        info!("🌐 Registering meter {} for owner {} on-chain", meter_id, owner);
+        info!(
+            "🌐 Registering meter {} for owner {} on-chain",
+            meter_id, owner
+        );
+
+        // Same shard invariant as register_user: the program requires
+        // `shard_id == owner.to_bytes()[0] % 16`. Derive it from the owner key
+        // rather than trusting the caller-supplied value (error 0x177c otherwise).
+        let shard_id = shard_for(&owner);
 
         let mut instructions = Vec::new();
 
-        let register_instruction = self.instruction_builder.build_register_meter_instruction(
-            owner,
-            meter_id,
-            meter_type,
-            shard_id,
-        )?;
+        let register_instruction = self
+            .instruction_builder
+            .build_register_meter_instruction(owner, meter_id, meter_type, shard_id)?;
         instructions.push(register_instruction);
 
         self.on_chain_manager
@@ -598,8 +628,29 @@ impl BlockchainService {
             "💸 Requesting airdrop of {} lamports for {}",
             lamports, pubkey
         );
-        // In the sovereign bridge, we might have a specific endpoint or just log it.
-        // For now, we'll just log it as a success if we are in dev mode.
-        Ok(())
+        // Route through Chain Bridge rather than silently succeeding. The bridge
+        // rejects this outside dev clusters, surfacing a real error to the caller.
+        self.transaction_handler
+            .request_airdrop(pubkey, lamports)
+            .await
+            .map(|_sig| ())
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::shard_for;
+    use solana_sdk::pubkey::Pubkey;
+
+    // Lock the shard formula to the Registry program's `shard_for`
+    // (key.to_bytes()[0] % 16). Drift here reintroduces InvalidShardId (0x177c)
+    // on register_user / register_meter.
+    #[test]
+    fn shard_for_matches_registry_first_byte_mod_16() {
+        for _ in 0..256 {
+            let pk = Pubkey::new_unique();
+            assert_eq!(shard_for(&pk), pk.to_bytes()[0] % 16);
+            assert!(shard_for(&pk) < 16);
+        }
     }
 }
