@@ -89,7 +89,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/orders/:id",
-            axum::routing::get(crate::rest::list_orders).delete(crate::rest::cancel_order),
+            axum::routing::get(crate::rest::get_order_by_id).delete(crate::rest::cancel_order),
         )
         .route(
             "/api/v1/quotes",

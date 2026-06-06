@@ -322,6 +322,52 @@ pub async fn list_orders(
     }))
 }
 
+pub async fn get_order_by_id(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OrderData>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let order = state
+        .order_repo
+        .get_order(id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?
+        .ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            "Order not found".to_string(),
+        ))?;
+
+    // Ownership scoping: a gateway-scoped caller may only read its own user's
+    // order; admins may read any. 404 (not 403) so an id's existence isn't
+    // leaked across users.
+    if role != ServiceRole::Admin && order.user_id != user.user_id {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Order not found".to_string(),
+        ));
+    }
+
+    Ok(Json(OrderData {
+        id: order.id,
+        zone_id: order.zone_id.unwrap_or(0),
+        side: order.side.to_string().to_lowercase(),
+        status: order.status.to_string().to_lowercase(),
+        energy_amount_kwh: order.energy_amount.to_string(),
+        price_per_kwh: order.price_per_kwh.to_string(),
+        filled_amount_kwh: order.filled_amount.to_string(),
+        created_at: order.created_at.unwrap_or_else(Utc::now),
+    }))
+}
+
 pub async fn cancel_order(
     role: ServiceRole,
     user: UserContext,
