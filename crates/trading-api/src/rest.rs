@@ -207,6 +207,21 @@ pub async fn submit_order(
         }
     }
 
+    // Stamp the order with the active market epoch so the matcher's settlement
+    // and order_matches inserts satisfy their NOT NULL FK to market_epochs.
+    order.epoch_id = Some(
+        state
+            .order_repo
+            .get_or_create_active_epoch()
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to resolve active epoch: {}", e),
+                )
+            })?,
+    );
+
     state.order_repo.insert_order(&order).await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,

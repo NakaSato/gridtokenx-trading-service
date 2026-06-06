@@ -64,6 +64,18 @@ impl TradingService for TradingGrpcService {
             ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
         })?;
 
+        // Resolve the active market epoch so the matcher's settlement and
+        // order_matches inserts satisfy their NOT NULL FK to market_epochs.
+        let epoch_id = self
+            .state
+            .order_repo
+            .get_or_create_active_epoch()
+            .await
+            .map_err(|e| {
+                error!("Failed to resolve active epoch: {}", e);
+                ConnectError::new(ErrorCode::Internal, "Failed to resolve active epoch")
+            })?;
+
         let order = TradingOrder {
             id: Uuid::new_v4(),
             user_id,
@@ -76,7 +88,7 @@ impl TradingService for TradingGrpcService {
             expires_at: Some(Utc::now() + chrono::Duration::hours(24)),
             created_at: Some(Utc::now()),
             filled_at: None,
-            epoch_id: None,
+            epoch_id: Some(epoch_id),
             zone_id: request.zone_id,
             meter_id: if request.meter_id.is_empty() {
                 None

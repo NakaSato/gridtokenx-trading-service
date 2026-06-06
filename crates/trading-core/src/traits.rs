@@ -28,6 +28,13 @@ pub trait OrderRepository: Send + Sync {
     /// Insert a new order into the database.
     async fn insert_order(&self, order: &TradingOrder) -> TraitResult<()>;
 
+    /// Return the id of the current active market epoch, creating one if none
+    /// is open. Orders must be stamped with this on placement: `order_matches`
+    /// and `settlements` both have a NOT NULL FK to `market_epochs(id)`, so a
+    /// NULL/nil epoch makes the matcher's ledger inserts fail the FK. Must be
+    /// race-safe against concurrent first-orders (the epoch number is UNIQUE).
+    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid>;
+
     /// Get an order by ID.
     async fn get_order(&self, id: Uuid) -> TraitResult<Option<TradingOrder>>;
 

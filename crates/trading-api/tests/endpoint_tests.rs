@@ -39,6 +39,9 @@ impl OrderRepository for MockSystem {
         self.orders.lock().unwrap().push(order.clone());
         Ok(())
     }
+    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+        Ok(Uuid::nil())
+    }
     async fn get_order(&self, id: Uuid) -> TraitResult<Option<TradingOrder>> {
         Ok(self.orders.lock().unwrap().iter().find(|o| o.id == id).cloned())
     }
