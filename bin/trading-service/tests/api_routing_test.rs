@@ -54,6 +54,7 @@ async fn test_api_routing_e2e() {
         audit: infra.audit,
         matcher: services.matcher,
         settlement: services.settlement,
+        vpp: services.vpp,
     };
 
     // 4. Initialize in-memory Axum Router
