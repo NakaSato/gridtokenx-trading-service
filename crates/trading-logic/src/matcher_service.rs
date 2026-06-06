@@ -134,6 +134,14 @@ impl MatcherService {
 
         let mut order_deltas: HashMap<Uuid, (Decimal, OrderStatus, Option<i32>)> = HashMap::new();
 
+        // Order totals (energy_amount, prior filled_amount) keyed by id, so the apply
+        // loop can mark an order Filled once its full energy_amount is covered and
+        // accumulate onto prior fills (filled_amount is set absolutely, not incremented).
+        let mut order_totals: HashMap<Uuid, (Decimal, Decimal)> = HashMap::new();
+        for o in buy_orders.iter().chain(sell_orders.iter()) {
+            order_totals.insert(o.id, (o.energy_amount, o.filled_amount));
+        }
+
         for m in &matches {
             // Aggregate fill amounts for buyer
             let (buy_amt, _, buy_zone) = order_deltas
@@ -205,15 +213,28 @@ impl MatcherService {
         }
 
         // Apply aggregated order updates (Batching logic for OrderRepository)
-        for (order_id, (amount, status, zone_id)) in order_deltas {
+        for (order_id, (amount, _status, zone_id)) in order_deltas {
+            // Accumulate this cycle's fill onto any prior fills, then mark the order
+            // Filled once its full energy_amount is covered (else PartiallyFilled).
+            let (energy_amount, prior_filled) = order_totals
+                .get(&order_id)
+                .copied()
+                .unwrap_or((Decimal::ZERO, Decimal::ZERO));
+            let cumulative = prior_filled + amount;
+            let status = if energy_amount > Decimal::ZERO && cumulative >= energy_amount {
+                OrderStatus::Filled
+            } else {
+                OrderStatus::PartiallyFilled
+            };
+
             self.order_repo
-                .update_filled_amount(order_id, amount, status)
+                .update_filled_amount(order_id, cumulative, status)
                 .await?;
 
             // Publish OrderUpdate Event for UI/Real-time updates
             let update_event = trading_core::events::Event::OrderUpdate {
                 id: order_id,
-                filled_amount: amount,
+                filled_amount: cumulative,
                 status: status.to_string(),
                 zone_id,
             };
