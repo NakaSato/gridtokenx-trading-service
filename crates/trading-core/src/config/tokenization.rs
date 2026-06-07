@@ -183,15 +183,10 @@ impl TokenizationConfig {
 
         if let Ok(val) = env::var("TOKENIZATION_MAX_RETRY_ATTEMPTS") {
             match val.parse::<u32>() {
-                #[allow(unused_comparisons)]
-                Ok(attempts) if attempts >= 0 => {
+                Ok(attempts) => {
                     config.max_retry_attempts = attempts;
                     info!("Using custom max retry attempts: {}", attempts);
                 }
-                Ok(_) => warn!(
-                    "Invalid max retry attempts: {}, must be >= 0, using default",
-                    val
-                ),
                 Err(_) => warn!("Failed to parse max retry attempts: {}, using default", val),
             }
         }
@@ -398,6 +393,8 @@ pub enum ConfigError {
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // unwrap is idiomatic in test assertions
+
     use super::*;
     use once_cell::sync::Lazy;
     use std::env;

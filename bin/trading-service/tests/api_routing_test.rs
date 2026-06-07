@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},

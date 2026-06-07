@@ -172,11 +172,11 @@ impl MatchingEngine {
                         stats.total_volume += match_amount;
 
                         if sell.remaining_amount() < MIN_TRADE_AMOUNT {
-                            zone_books.get_mut(&sell.zone_id).unwrap().remove(&(
-                                sell.price,
-                                sell.created_at_ns,
-                                sell.id,
-                            ));
+                            // Invariant: `sell` was drawn from this zone's book, so the
+                            // entry exists. `if let` avoids a panic path for the lint.
+                            if let Some(book) = zone_books.get_mut(&sell.zone_id) {
+                                book.remove(&(sell.price, sell.created_at_ns, sell.id));
+                            }
                         }
                         continue;
                     }

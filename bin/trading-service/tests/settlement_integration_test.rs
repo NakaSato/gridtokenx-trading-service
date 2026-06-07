@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
+
 use rust_decimal_macros::dec;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;

@@ -18,7 +18,7 @@ use uuid::Uuid;
 /// otherwise race on INSERT. The lock releases on commit/rollback. The 15-minute
 /// window matches the oracle's aggregation window.
 pub async fn get_or_create_active_epoch(pool: &PgPool) -> TraitResult<Uuid> {
-    const EPOCH_LOCK_KEY: i64 = 0x677269_64; // "grid"
+    const EPOCH_LOCK_KEY: i64 = 0x6772_6964; // "grid"
 
     let mut tx = pool.begin().await?;
 

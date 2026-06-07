@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
+
 use sqlx::PgPool;
 use uuid::Uuid;
 use chrono::Utc;

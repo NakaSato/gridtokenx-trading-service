@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 /// let price = FastPrice::from(dec!(1.234567890));
 /// assert_eq!(price.to_decimal(), dec!(1.234567890));
 /// ```
-#[derive(Clone, Copy, Debug, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FastPrice(i64);
 
 impl FastPrice {
@@ -130,13 +130,6 @@ impl From<Decimal> for FastPrice {
     }
 }
 
-impl PartialEq for FastPrice {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
 impl PartialOrd for FastPrice {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -159,6 +152,8 @@ impl std::fmt::Display for FastPrice {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // unwrap is idiomatic in test assertions
+
     use super::*;
     use rust_decimal_macros::dec;
 

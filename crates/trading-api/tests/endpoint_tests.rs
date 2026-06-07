@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
+
 use async_trait::async_trait;
 use axum::{
     body::Body,
@@ -334,9 +336,12 @@ async fn test_all_endpoints() {
         "zone_id": 1
     }).to_string())).await;
     assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let created_id = created["id"].as_str().expect("submit response has id");
 
-    // 2. Get Order by ID
-    let res = request(app.clone(), "GET", &format!("/api/v1/orders/{}", Uuid::new_v4()), user_id, Body::empty()).await;
+    // 2. Get Order by ID (use the order created in step 1, not a random id)
+    let res = request(app.clone(), "GET", &format!("/api/v1/orders/{}", created_id), user_id, Body::empty()).await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 3. List Orders
