@@ -30,6 +30,7 @@ pub enum Event {
         id: Uuid,
         triggered_at: DateTime<Utc>,
     },
+    PriceAlertTriggered(PriceAlertTriggeredPayload),
     OrderCreated(OrderCreatedPayload),
     ErcIssued(ErcIssuedPayload),
     SettlementProcessed(SettlementProcessedPayload),
@@ -51,6 +52,7 @@ impl Event {
             Event::OrderUpdate { .. } => "OrderUpdate",
             Event::PeakPriceUpdate { .. } => "PeakPriceUpdate",
             Event::TriggerExecution { .. } => "TriggerExecution",
+            Event::PriceAlertTriggered(_) => "PriceAlertTriggered",
             Event::OrderCreated(_) => "OrderCreated",
             Event::ErcIssued(_) => "ErcIssued",
             Event::SettlementProcessed(_) => "SettlementProcessed",
@@ -69,6 +71,19 @@ pub struct VppDispatchedPayload {
     pub target_kw: f64,
     pub members_commanded: usize,
     pub timestamp: DateTime<Utc>,
+}
+
+/// Emitted when a price alert's condition is met by the current market price
+/// (see `trigger_evaluator`). Relayed via the outbox to the notification
+/// service, which fans it out to the alert's owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceAlertTriggeredPayload {
+    pub alert_id: Uuid,
+    pub user_id: Uuid,
+    pub target_price: Decimal,
+    pub triggered_price: Decimal,
+    pub condition: String,
+    pub triggered_at: DateTime<Utc>,
 }
 
 /// Lightweight payload for OrderCreated events.

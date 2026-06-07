@@ -88,4 +88,32 @@ impl PriceAlertRepository for PostgresPriceAlertRepository {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn get_active_alerts(&self) -> TraitResult<Vec<PriceAlert>> {
+        let rows = sqlx::query_as::<_, PriceAlertDb>(
+            "SELECT * FROM price_alerts WHERE status = 'active' ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn mark_triggered(&self, id: Uuid, triggered_price: Decimal) -> TraitResult<()> {
+        // One-shot alerts move to `triggered`; repeating alerts stay `active`
+        // so a later cycle can fire them again. `triggered_at`/`triggered_price`
+        // always record the most recent firing.
+        sqlx::query(
+            r#"UPDATE price_alerts
+               SET triggered_at = NOW(),
+                   triggered_price = $2,
+                   status = CASE WHEN repeat THEN status ELSE 'triggered'::alert_status END,
+                   updated_at = NOW()
+               WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(triggered_price)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }

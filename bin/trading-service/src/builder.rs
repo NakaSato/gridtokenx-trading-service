@@ -38,6 +38,8 @@ pub struct AppServices {
     pub matcher: Arc<MatcherService>,
     pub vpp: Arc<trading_logic::vpp::VppService>,
     pub oracle_consumer: Arc<trading_logic::workers::OracleConsumer>,
+    pub recurring_evaluator: Arc<trading_logic::RecurringEvaluator>,
+    pub trigger_evaluator: Arc<trading_logic::TriggerEvaluator>,
 }
 
 /// Builder to assemble the system
@@ -138,8 +140,8 @@ impl ServiceBuilder {
             futures_repo,
             carbon_repo,
             analytics_repo,
-            price_alert_repo,
-            recurring_repo,
+            price_alert_repo: price_alert_repo.clone(),
+            recurring_repo: recurring_repo.clone(),
             vpp_repo: vpp_repo.clone(),
             blockchain: blockchain.clone(),
             identity: identity.clone(),
@@ -184,11 +186,26 @@ impl ServiceBuilder {
             format!("trading_oracle_{}", Uuid::new_v4()),
         ));
 
+        // Recurring-order & price-alert automation (Phase 6). Both read/write
+        // through the same repos + outbox as the REST layer.
+        let recurring_evaluator = Arc::new(trading_logic::RecurringEvaluator::new(
+            recurring_repo.clone(),
+            order_repo.clone(),
+        ));
+
+        let trigger_evaluator = Arc::new(trading_logic::TriggerEvaluator::new(
+            price_alert_repo.clone(),
+            order_repo.clone(),
+            events.clone(),
+        ));
+
         let services = AppServices {
             settlement: settlement_service,
             matcher: matcher_service,
             vpp: vpp_service,
             oracle_consumer,
+            recurring_evaluator,
+            trigger_evaluator,
         };
 
         Ok((infra, services))

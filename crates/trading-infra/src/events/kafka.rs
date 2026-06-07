@@ -167,6 +167,9 @@ impl KafkaEventBus {
                 Self::zone_key(*zone_id, id),
             ),
             Event::TriggerExecution { id, .. } => (&self.topics.triggers, id.to_string()),
+            Event::PriceAlertTriggered(payload) => {
+                (&self.topics.triggers, payload.alert_id.to_string())
+            }
             Event::ErcIssued(payload) => (&self.topics.settlements, payload.user_id.to_string()),
             Event::UserRegistered(payload) => (
                 &self.topics.orders_created,

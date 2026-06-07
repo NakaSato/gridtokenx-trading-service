@@ -16,5 +16,10 @@ pub mod workers;
 
 pub use energy::GridAwareTopology;
 pub use matcher_service::MatcherService;
+pub use recurring_evaluator::RecurringEvaluator;
 pub use settlement::SettlementService;
-pub use workers::{MatcherWorker, SettlementWorker, SupplySyncWorker};
+pub use trigger_evaluator::TriggerEvaluator;
+pub use workers::{
+    MatcherWorker, RecurringEvaluatorWorker, SettlementWorker, SupplySyncWorker,
+    TriggerEvaluatorWorker,
+};

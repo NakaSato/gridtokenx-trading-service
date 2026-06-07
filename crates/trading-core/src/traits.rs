@@ -218,6 +218,15 @@ pub trait PriceAlertRepository: Send + Sync {
     /// Delete an alert scoped to its owner. Returns `true` if a row was removed
     /// (so a foreign/missing id yields `false`, not an error).
     async fn delete_price_alert(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool>;
+
+    /// All `active` alerts across every user (cross-user; the trigger evaluator
+    /// scans these each cycle against the current market price).
+    async fn get_active_alerts(&self) -> TraitResult<Vec<crate::models::PriceAlert>>;
+
+    /// Record that an alert fired at `triggered_price`. Sets `triggered_at`/
+    /// `triggered_price`; a one-shot alert (`repeat = false`) moves to
+    /// `triggered`, a repeating one stays `active` so it can fire again.
+    async fn mark_triggered(&self, id: Uuid, triggered_price: Decimal) -> TraitResult<()>;
 }
 
 /// Futures persistence operations.

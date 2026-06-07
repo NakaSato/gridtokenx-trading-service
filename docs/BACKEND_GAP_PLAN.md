@@ -29,7 +29,7 @@
 | 6 | GET `/api/v1/trades`, GET `/api/v1/trades/export` | `getTrades`, `getTradeHistory`, `exportTradingHistory` | ✅ DONE — `settlements` table (no `trades` table exists) | repo `list_settlements_for_user`, 2 handlers (json + csv) |
 | 7 | POST/GET `/api/v1/price-alerts`, DELETE `/api/v1/price-alerts/{id}` | `createPriceAlert`/`listPriceAlerts`/`deletePriceAlert` | ✅ DONE — new `price_alert.rs` repo; `symbol` stored in `note` (no column) | repo create/list/delete, 3 handlers, route |
 | 8 | POST/GET `/api/v1/orders/recurring`, GET/DELETE `/{id}`, POST `/{id}/pause`, POST `/{id}/resume` | recurring CRUD | ✅ DONE — repo +5 methods; `recurring_repo` wired to AppState (was absent); `next_execution_at` helper; decimals as strings | repo +5 methods, 6 handlers, 4 routes |
-| 9 | (optional) recurring/alert execution workers | n/a (frontend = CRUD only) | stubs `recurring_evaluator.rs`, `trigger_evaluator.rs` (15B placeholders) | deferred |
+| 9 | (optional) recurring/alert execution workers | n/a (frontend = CRUD only) | ✅ DONE — `recurring_evaluator.rs` + `trigger_evaluator.rs` services + workers | see Phase 6 |
 
 ### Contract mismatches to resolve
 
@@ -76,9 +76,14 @@ New pure helper `trading_core::recurring::next_execution_at`. `recurring_repo` w
 `AppState` (was absent). Decimals string-in/string-out (`serde-float` workaround). APISIX
 `orders/*` wildcard already covers — no gateway change.
 
-**Phase 6 (deferred) — workers (#9)** — implement `recurring_evaluator` (execute due orders via
-existing matcher path) and `trigger_evaluator` (fire price alerts → noti). Not required for
-frontend to function; CRUD alone unblocks UI.
+**Phase 6 — workers (#9)** — ✅ DONE (2026-06-07, see [PHASE6_TODO.md](PHASE6_TODO.md)).
+`RecurringEvaluator` places due recurring orders via the REST create path
+(`insert_order_with_event` + `OrderCreated` outbox event; matcher worker picks them up);
+`TriggerEvaluator` derives a market price from the live order-book mid and fires active
+alerts → new `Event::PriceAlertTriggered` (outbox → noti). 2 services + 2 worker loops
+(60s recurring, 30s trigger), wired in `builder.rs`/`main.rs`. New repo methods
+`PriceAlertRepository::{get_active_alerts, mark_triggered}`. No migrations, no gateway change.
+Not required for frontend (CRUD alone unblocks UI) — this adds the automation.
 
 ## After backend lands
 

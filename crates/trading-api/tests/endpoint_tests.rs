@@ -283,6 +283,31 @@ impl PriceAlertRepository for MockSystem {
         alerts.retain(|a| !(a.id == id && a.user_id == user_id));
         Ok(alerts.len() < before)
     }
+    async fn get_active_alerts(&self) -> TraitResult<Vec<PriceAlert>> {
+        Ok(self
+            .price_alerts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.status == AlertStatus::Active)
+            .cloned()
+            .collect())
+    }
+    async fn mark_triggered(
+        &self,
+        id: Uuid,
+        triggered_price: rust_decimal::Decimal,
+    ) -> TraitResult<()> {
+        let mut alerts = self.price_alerts.lock().unwrap();
+        if let Some(a) = alerts.iter_mut().find(|a| a.id == id) {
+            a.triggered_price = Some(triggered_price);
+            a.triggered_at = Some(chrono::Utc::now());
+            if !a.repeat {
+                a.status = AlertStatus::Triggered;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]

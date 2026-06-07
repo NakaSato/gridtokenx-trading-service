@@ -74,6 +74,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Recurring-order evaluator: place due recurring orders (Phase 6).
+    let recurring_worker = trading_logic::RecurringEvaluatorWorker::new(
+        services.recurring_evaluator.clone(),
+        tokio::time::Duration::from_secs(60),
+    );
+    tokio::spawn(async move {
+        recurring_worker.run().await;
+    });
+
+    // Price-alert trigger evaluator: fire alerts against market price (Phase 6).
+    let trigger_worker = trading_logic::TriggerEvaluatorWorker::new(
+        services.trigger_evaluator.clone(),
+        tokio::time::Duration::from_secs(30),
+    );
+    tokio::spawn(async move {
+        trigger_worker.run().await;
+    });
+
     // 7. Start API Server
     let state = AppState {
         config: config.clone(),
