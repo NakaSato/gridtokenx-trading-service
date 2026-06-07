@@ -1,0 +1,212 @@
+# gridtokenx-trading-service — Architecture
+
+> The energy-trading and ERC microservice: a modular-monolith Cargo workspace whose pure
+> Continuous-Double-Auction (CDA) matching engine clears GRID/GRX orders and settles them on Solana
+> **through Chain Bridge** — never via direct RPC.
+>
+> This repo is a **git submodule** of the `gridtokenx-coresystem` superproject. Platform-wide rules
+> live in the superproject. This doc covers **only** the contents of this folder.
+
+---
+
+## 1. What This Is
+
+`gridtokenx-trading-service` is an **independent Cargo workspace** that builds a **single binary**
+(`bin/trading-service`). It is deliberately kept **out of the superproject root workspace** because
+its Solana dependencies pull in BPF target conflicts; always run `cargo` from this directory, never
+the repo root.
+
+It is a **modular monolith**: one process boots the API server and all background workers. The
+workspace is split into seven library crates plus the binary, wired along a strict layered
+dependency direction. The hot path — order matching — is a **pure, synchronous, I/O-free** engine
+(`trading-engine`); everything async (DB, blockchain, events, HTTP) lives at the edges.
+
+Workspace `version` 0.1.1, `edition` 2021. Lints are enforced workspace-wide
+(`[workspace.lints]`): `unsafe_code = "deny"`, `clippy::unwrap_used = "deny"`,
+`clippy::pedantic = "warn"` — code that `.unwrap()`s will not compile.
+
+## 2. Module Layout
+
+```
+crates/
+├── trading-core/                    domain primitives — every crate depends on this (sync)
+│   └── src/
+│       ├── lib.rs
+│       ├── types.rs                 core enums/IDs (TimeInForce, …)
+│       ├── models.rs                domain models
+│       ├── traits.rs                ALL repo/gateway traits (the DI contracts)
+│       ├── error.rs                 ApiError
+│       ├── config/                  Config::from_env(), tokenization config
+│       ├── fast_price.rs            FastPrice fixed-point (no floats on hot path)
+│       ├── numeric.rs               numeric helpers
+│       └── events.rs                domain event types
+├── trading-engine/                  PURE CDA matcher — zero async, zero I/O, zero DB (sync)
+│   └── src/
+│       ├── engine.rs                MatchingEngine::match_cycle, TopologySnapshot trait
+│       ├── types.rs                 FastOrder, MatchResult, OrderMetadata, CycleStats
+│       └── lib.rs
+├── trading-persistence/             Postgres repos implementing core traits — runtime SQLx (async)
+│   └── src/
+│       ├── pool.rs
+│       └── repositories/            order, settlement, outbox, futures, carbon, conditional,
+│                                    recurring, vpp, epoch, analytics
+├── trading-infra/                   external adapters (async)
+│   └── src/
+│       ├── blockchain/              BlockchainService → Chain Bridge (rpc, settlement, wallet)
+│       ├── events/                  Kafka + outbox EventBus, kafka_consumer, outbox_worker
+│       ├── cache/                   Redis
+│       ├── identity/                IAM gateway + signer
+│       ├── audit/                   audit log + worker
+│       ├── telemetry/               init_telemetry
+│       └── metrics.rs               Prometheus metrics
+├── trading-logic/                   services + background workers (async)
+│   └── src/
+│       ├── matcher_service.rs       MatcherService (drives trading-engine)
+│       ├── settlement.rs            SettlementService (settles via BlockchainGateway)
+│       ├── vpp.rs                   VppService (virtual power plant)
+│       ├── forecasting.rs           VPP forecasting
+│       ├── clearing.rs              market clearing
+│       ├── futures_service.rs       futures
+│       ├── erc.rs / energy.rs       carbon/REC + energy logic
+│       ├── trigger_evaluator.rs     conditional-order evaluation
+│       ├── recurring_evaluator.rs   recurring-order evaluation
+│       ├── rehydration.rs           order-book rehydration on boot
+│       ├── market_data.rs / participant.rs / p2p_config.rs
+│       └── workers/                 matcher, settlement, supply_sync, oracle_consumer
+├── trading-api/                     ConnectRPC + REST surface (async)
+│   └── src/
+│       ├── startup.rs               run(state, port, grpc_port, token) — serves HTTP + gRPC
+│       ├── state.rs                 AppState (DI surface for handlers)
+│       ├── handlers.rs              ConnectRPC handlers
+│       ├── rest.rs                  REST routes
+│       ├── auth.rs                  header-based auth (APISIX-injected)
+│       └── middleware.rs
+└── trading-protocol/                wire types
+    ├── proto/trading.proto          the authoritative proto
+    ├── build.rs                     connectrpc_build → OUT_DIR/_trading_include.rs
+    └── src/lib.rs                   generated stubs + hand-written google.protobuf.Empty
+
+bin/trading-service/                 the single binary
+└── src/
+    ├── main.rs                      boots Config, DB pool, ServiceBuilder, spawns workers + server
+    ├── builder.rs                   ServiceBuilder — the one wiring point
+    └── lib.rs
+    tests/                           repository / settlement / api_routing integration tests
+
+migrations/                          empty (.keep only) — schema owned externally, NOT this service
+```
+
+## 3. Architecture
+
+### Layered dependency direction
+
+```
+trading-core → trading-engine / persistence / infra → trading-logic → trading-api → bin/trading-service
+```
+
+Never reversed. `trading-core` owns the domain primitives and **all** the DI traits; every other
+crate depends on it. Business logic never imports HTTP types; handlers never import SQL.
+
+### The CDA matching engine (`trading-engine`)
+
+`MatchingEngine::match_cycle` (`crates/trading-engine/src/engine.rs`) is a **pure synchronous
+function** — no async, no I/O, no DB — implementing a **Continuous Double Auction**. It segments
+active orders into **zone-segmented order books** (`HashMap<Option<i32>, BTreeMap<(price, created_at,
+id), idx>>`) enforcing **price-time priority**, applies grid topology via the injected
+`TopologySnapshot` trait (wheeling charges, loss factors, flow accommodation, intra-zone discount),
+and returns `Vec<MatchResult>` + `CycleStats`. Price math uses `FastPrice` fixed-point — **no floats
+on the hot path**. Keep this crate pure and dependency-light.
+
+### Settlement via Chain Bridge
+
+There is **no direct Solana RPC**. `SettlementService` (`trading-logic/src/settlement.rs`) settles
+through an `Arc<dyn BlockchainGateway>` whose concrete impl is `BlockchainService`
+(`trading-infra/src/blockchain/`), which talks to **Chain Bridge** (`CHAIN_BRIDGE_URL`, default
+`http://127.0.0.1:5040`). Supply-sync reads tokenized supply through the same gateway.
+
+### Transactional outbox for events
+
+Domain events are written to a DB **outbox** in the same transaction as state changes
+(`OutboxRepository` / outbox repo), then `OutboxWorker` relays them to the `EventBus`. The EventBus
+fans out to **Redis Streams** always and **Kafka** when `KAFKA_EVENTS_ENABLED=true`. Services never
+publish to Kafka/Redis directly — they go through the outbox so events stay consistent with DB writes.
+
+### ServiceBuilder — the single wiring point
+
+All collaborators are `Arc<dyn Trait>` traits defined in `trading-core/src/traits.rs`
+(`OrderRepository`, `SettlementRepository`, `FuturesRepository`, `CarbonRepository`,
+`AnalyticsRepository`, `VppRepository`, `OutboxRepository`, `BlockchainGateway`, `EventPublisher`,
+`IdentityGateway`, `AuditLog`, `CacheStore`, …). Concrete impls are constructed in **exactly one
+place**: `ServiceBuilder::build` (`bin/trading-service/src/builder.rs`), which returns an
+`Infrastructure` (repos + gateways) and `AppServices` (`SettlementService`, `MatcherService`,
+`VppService`, `OracleConsumer`). To add a dependency: define the trait in `core`, implement it in
+`persistence`/`infra`, wire it in `builder.rs`, and surface it on `AppState` if a handler needs it.
+
+### Runtime topology (`bin/trading-service/src/main.rs`)
+
+`main` loads `Config::from_env()`, opens the Postgres pool, calls `ServiceBuilder::build`, then
+`tokio::spawn`s long-running workers alongside the API server under a `CancellationToken`:
+
+| Worker | Cadence | Role |
+| :--- | :--- | :--- |
+| `MatcherWorker` | every 1s | drains/matches orders via `MatcherService` → `trading-engine` |
+| `SettlementWorker` | every 10s, batch 10 | settles through Chain Bridge |
+| `SupplySyncWorker` | polling interval | syncs tokenized supply from blockchain; graceful-degrades |
+| `OracleConsumer` | event-driven | consumes oracle readings off the EventBus, feeds settlement |
+
+The API server (`trading_api::startup::run`) serves both REST and ConnectRPC; default ports are
+`HTTP_PORT = 8093` and `GRPC_PORT = 8092` (override via env).
+
+## 4. Load-Bearing Invariants
+
+1. **Standalone workspace, never the root.** This service is excluded from the superproject root
+   workspace due to BPF target conflicts. Run `cargo` from this directory only.
+2. **Keep `trading-engine` pure.** The CDA matcher is the hot path — zero async, zero I/O, zero DB.
+   Don't introduce side effects; feed it data and consume its `MatchResult`s.
+3. **No floats on the price path.** Use `FastPrice` / `rust_decimal` fixed-point, never `f64`.
+4. **No direct Solana RPC.** All blockchain access goes through `BlockchainGateway` → Chain Bridge.
+5. **Events go through the outbox.** Never publish to Kafka/Redis directly from services — write to
+   the DB outbox in the same transaction, let `OutboxWorker` relay.
+6. **Runtime SQLx, not macros — overrides root CLAUDE.md.** Persistence uses the **runtime**
+   `sqlx::query(...)` API (no `query!`/`query_as!`, no `.sqlx/` dir). Consequence: `cargo
+   check`/`build` need **no** `DATABASE_URL` and no running DB; there is **nothing to `cargo sqlx
+   prepare`**. Follow the existing pattern in `crates/trading-persistence/src/repositories/`.
+7. **Migrations are not owned here.** `migrations/` holds only `.keep`; the trading schema is
+   provisioned externally (superproject `just migrate` / IAM). Point `DATABASE_URL` at an
+   already-migrated DB; don't add a `sqlx::migrate!` call expecting local migrations.
+8. **`.unwrap()` does not compile.** `clippy::unwrap_used = "deny"` and `unsafe_code = "deny"` are
+   workspace lints. Use `?`, `.expect("reason")`, or `.context()`.
+9. **Proto codegen is connectrpc_build (buffa), not prost/tonic — overrides root CLAUDE.md.**
+   `crates/trading-protocol/build.rs` compiles `proto/trading.proto` into
+   `OUT_DIR/_trading_include.rs`; `trading-protocol` supplies a hand-written `buffa::Message` impl
+   for `google.protobuf.Empty`. The authoritative proto lives in the `trading-protocol` crate.
+10. **Wire dependencies in `builder.rs` only.** `ServiceBuilder::build` is the single composition
+    root; keep construction of `Arc<dyn Trait>` impls there.
+
+## 5. Commands
+
+Standalone workspace — run from this directory, never the repo root.
+
+```bash
+cargo check                              # fast feedback across all crates (no DATABASE_URL needed)
+cargo build --release                    # binary -> target/release/trading-service
+cargo clippy -- -D warnings              # strict lints (unwrap_used = deny, pedantic = warn)
+cargo test                               # unit tests
+cargo test -p trading-engine             # one crate
+cargo test test_order_matching -- --nocapture   # one test by name
+
+# Integration tests (need a live Postgres) live in bin/trading-service/tests/
+cargo test -p trading-service --test repository_integration_test
+cargo test -p trading-service --test settlement_integration_test
+cargo test -p trading-service --test api_routing_test
+```
+
+## Further Reading (in this repo)
+
+| File | Covers |
+| :--- | :--- |
+| `CLAUDE.md` | Fast orientation + LLM working rules (build, SQLx/migrations overrides, env) |
+| `AGENTS.md` | Contributor guide |
+| `Cargo.toml` | Workspace members, lints, shared dependency versions |
+| `Dockerfile` | Container build + deploy-time port mapping |
+| `crates/trading-protocol/proto/trading.proto` | ConnectRPC wire contract |
