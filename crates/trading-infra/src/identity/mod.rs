@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use connectrpc::client::{HttpClient, ClientConfig, CallOptions};
-use http::{HeaderValue, Uri};
-use iam_protocol::identity::{IdentityServiceClient, SignMessageRequest};
+use connectrpc::client::{HttpClient, ClientConfig};
+use http::Uri;
+use iam_protocol::identity::IdentityServiceClient;
 use std::sync::Arc;
 use trading_core::error::ApiError;
 use trading_core::traits::{IdentityGateway, TraitResult};
@@ -12,9 +12,21 @@ pub mod signer;
 pub use signer::CustodialSigner;
 
 /// Client for interacting with the IAM Identity Service.
+///
+/// NOTE: per-user message signing was removed from IAM's `IdentityService`
+/// (the `SignMessage` RPC no longer exists). Custodial signing now happens on
+/// the Chain Bridge side: a transaction is built, serialized, and published to
+/// `chain.tx.submit` where the bridge signs it with its `platform_admin` Vault
+/// Transit key. There is no per-user sign RPC to delegate to, so `sign_message`
+/// below is intentionally inert until the trading on-chain `create_order`
+/// instruction gains a non-signing owner account (mirroring the registry
+/// `RegisterUser` 6-account "owner non-signing, bridge pays" layout from
+/// commit 49728d9 / anchor 0f41280).
 #[derive(Clone)]
 pub struct IamIdentityGateway {
+    #[allow(dead_code)]
     client: Arc<IdentityServiceClient<HttpClient>>,
+    #[allow(dead_code)]
     api_key: String,
 }
 
@@ -35,34 +47,21 @@ impl IamIdentityGateway {
 impl IdentityGateway for IamIdentityGateway {
     async fn sign_message(
         &self,
-        user_id: Uuid,
-        wallet_address: Option<String>,
-        message: Vec<u8>,
+        _user_id: Uuid,
+        _wallet_address: Option<String>,
+        _message: Vec<u8>,
     ) -> TraitResult<Vec<u8>> {
-        let request = SignMessageRequest {
-            user_id: user_id.to_string(),
-            wallet_address: wallet_address.unwrap_or_default(),
-            message: message.into(),
-            ..Default::default()
-        };
-
-        let api_key_header = HeaderValue::from_str(&self.api_key)
-            .map_err(|e| ApiError::Internal(format!("Invalid API key header: {}", e)))?;
-        let role_header = HeaderValue::from_static("trading-api");
-
-        let options = CallOptions::default()
-            .with_header("x-api-key", api_key_header)
-            .with_header("x-gridtokenx-role", role_header);
-
-        match self.client.sign_message_with_options(request, options).await {
-            Ok(res) => {
-                let msg = res.view();
-                if !msg.error_message.is_empty() {
-                    return Err(ApiError::Internal(format!("IAM signing error: {}", msg.error_message)));
-                }
-                Ok(msg.signature.to_vec())
-            }
-            Err(e) => Err(ApiError::Internal(format!("gRPC call to IAM failed: {}", e))),
-        }
+        // IAM's SignMessage RPC was removed in favour of Chain Bridge custodial
+        // signing. Per-user signing has no transport here; order creation must
+        // submit an unsigned tx via `chain.tx.submit` for the bridge to sign,
+        // which in turn requires the create_order instruction to carry a
+        // non-signing owner account. Until that program-level change lands,
+        // fail loudly rather than produce an invalid signature.
+        Err(ApiError::Internal(
+            "custodial sign_message unavailable: IAM SignMessage RPC removed; \
+             order signing must route through Chain Bridge (chain.tx.submit) \
+             once create_order supports a non-signing owner account"
+                .to_string(),
+        ))
     }
 }

@@ -162,3 +162,5 @@ secrets/
 .AppleDouble
 .LSOverride
 Icon
+# Added by code-review-graph
+.code-review-graph/

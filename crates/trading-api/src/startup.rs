@@ -88,7 +88,7 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
         )
         .route(
-            "/api/v1/orders/:id",
+            "/api/v1/orders/{id}",
             axum::routing::get(crate::rest::get_order_by_id).delete(crate::rest::cancel_order),
         )
         .route(
@@ -96,7 +96,7 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(crate::rest::create_quote),
         )
         .route(
-            "/api/v1/zones/:zone_id/book",
+            "/api/v1/zones/{zone_id}/book",
             axum::routing::get(crate::rest::get_order_book),
         )
         .route(
@@ -129,13 +129,13 @@ pub fn build_router(state: AppState) -> Router {
                     axum::routing::get(crate::rest::get_futures_positions),
                 )
                 .route(
-                    "/positions/:id",
+                    "/positions/{id}",
                     axum::routing::delete(crate::rest::close_futures_position),
                 ),
         )
         // User Data & Analytics
         .route(
-            "/api/v1/wallets/:address/balance",
+            "/api/v1/wallets/{address}/balance",
             axum::routing::get(crate::rest::get_wallet_balance),
         )
         .route(

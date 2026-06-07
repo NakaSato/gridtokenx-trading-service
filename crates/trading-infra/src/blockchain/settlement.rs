@@ -384,6 +384,18 @@ impl BlockchainSettlementProvider {
             .blockchain
             .calculate_ata_address(user_wallet, &mint_pda)?;
 
+        // 0. Ensure the recipient's GRID ATA exists before minting. MintToWallet
+        // requires `destination` to be an already-initialized token account; a
+        // first-time prosumer (no ATA yet) would otherwise fail with Anchor 3012
+        // (AccountNotInitialized). Energy mint is Token-2022 → create under spl_token_2022.
+        let create_ata_ix =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &platform_authority.pubkey(),
+                user_wallet,
+                &mint_pda,
+                &spl_token_2022::id(),
+            );
+
         // 1. Build Instruction (Using Energy Token Program)
         let instruction = self
             .blockchain
@@ -398,8 +410,8 @@ impl BlockchainSettlementProvider {
             )
             .map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
 
-        // 2. Execute Transaction
-        let mut instructions = vec![instruction];
+        // 2. Execute Transaction (create ATA first, then mint)
+        let mut instructions = vec![create_ata_ix, instruction];
         self.blockchain
             .add_priority_fee_to_instructions(&mut instructions, "token_minting")
             .await?;
@@ -452,6 +464,20 @@ impl BlockchainSettlementProvider {
             let user_ata = self
                 .blockchain
                 .calculate_ata_address(&user_wallet, &mint_pda)?;
+
+            // Ensure the recipient's GRID ATA exists before minting. MintToWallet
+            // requires `destination` to be an already-initialized token account, so a
+            // first-time prosumer (no ATA yet) would otherwise fail with Anchor 3012
+            // (AccountNotInitialized). The energy mint is Token-2022, so the ATA must be
+            // derived/created under spl_token_2022 (matching mint/balance paths).
+            let create_ata_ix =
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &platform_authority.pubkey(),
+                    &user_wallet,
+                    &mint_pda,
+                    &spl_token_2022::id(),
+                );
+            instructions.push(create_ata_ix);
 
             // Build Instruction
             let instruction = self

@@ -9,7 +9,6 @@ members = [
     "crates/trading-logic",
     "crates/trading-api",
     "bin/trading-service",
-    "crates/iam-protocol-compat",
 ]
 
 [workspace.package]
@@ -33,7 +32,8 @@ trading-persistence = { path = "crates/trading-persistence" }
 trading-infra = { path = "crates/trading-infra" }
 trading-logic = { path = "crates/trading-logic" }
 trading-api = { path = "crates/trading-api" }
-iam-protocol = { package = "iam-protocol-compat", path = "crates/iam-protocol-compat" }
+iam-protocol = { path = "../gridtokenx-iam-service/crates/iam-protocol" }
+gridtokenx-telemetry = { path = "../gridtokenx-telemetry" }
 
 # ── Async Runtime ────────────────────────────────────────────────────────────
 tokio = { version = "1.48", features = [

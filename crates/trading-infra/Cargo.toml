@@ -7,6 +7,7 @@ description = "External integration adapters (blockchain, Kafka, Redis, audit) f
 [dependencies]
 trading-core.workspace = true
 iam-protocol.workspace = true
+gridtokenx-telemetry.workspace = true
 
 # gRPC / ConnectRPC
 connectrpc.workspace = true
