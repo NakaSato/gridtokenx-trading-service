@@ -82,6 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         futures_repo: infra.futures_repo,
         carbon_repo: infra.carbon_repo,
         analytics_repo: infra.analytics_repo,
+        price_alert_repo: infra.price_alert_repo,
+        recurring_repo: infra.recurring_repo,
         events: infra.events,
         blockchain: infra.blockchain,
         identity: infra.identity,

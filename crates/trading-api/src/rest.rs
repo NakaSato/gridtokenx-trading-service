@@ -1,16 +1,26 @@
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
+    http::header,
+    response::{IntoResponse, Response},
     Json,
 };
 use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::{error, info};
-use trading_core::models::TradingOrder;
-use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
+use trading_core::models::{
+    NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder, Settlement,
+    SettlementStats, TradingOrder,
+};
+use trading_core::recurring::next_execution_at;
+use trading_core::types::{
+    AlertCondition, AlertStatus, IntervalType, OrderSide, OrderStatus, OrderType, RecurringStatus,
+    TimeInForce,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -1025,4 +1035,1279 @@ pub async fn batch_settle_generation_mint(
         tx_signature: tx_sig,
         meter_serials: serials,
     }))
+}
+
+// =============================================================================
+// Markets — Config, P2P Prices, Matching Status (Phase 1, read-only)
+// =============================================================================
+
+fn dec_f64(d: Decimal) -> f64 {
+    d.to_f64().unwrap_or(0.0)
+}
+
+#[derive(Debug, Serialize)]
+pub struct MarketConfigResponse {
+    pub base_price_thb_kwh: f64,
+    pub grid_import_price_thb_kwh: f64,
+    pub grid_export_price_thb_kwh: f64,
+    pub transaction_fee_bps: u32,
+    pub min_price_per_kwh: f64,
+    pub max_price_per_kwh: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct P2PMarketPricesResponse {
+    pub base_price_thb_kwh: f64,
+    pub grid_import_price_thb_kwh: f64,
+    pub grid_export_price_thb_kwh: f64,
+    pub loss_allocation_model: String,
+    pub wheeling_charges: HashMap<String, f64>,
+    pub loss_factors: HashMap<String, f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PriceRange {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatchingStatusResponse {
+    pub pending_buy_orders: usize,
+    pub pending_sell_orders: usize,
+    pub pending_matches: usize,
+    pub buy_price_range: PriceRange,
+    pub sell_price_range: PriceRange,
+    pub can_match: bool,
+    pub match_reason: String,
+}
+
+/// GET /api/v1/markets/config — static market pricing parameters.
+pub async fn get_market_config(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<MarketConfigResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let m = &state.config.market;
+    Ok(Json(MarketConfigResponse {
+        base_price_thb_kwh: dec_f64(m.base_price_thb_kwh),
+        grid_import_price_thb_kwh: dec_f64(m.grid_import_price_thb_kwh),
+        grid_export_price_thb_kwh: dec_f64(m.grid_export_price_thb_kwh),
+        transaction_fee_bps: m.transaction_fee_bps,
+        min_price_per_kwh: dec_f64(m.min_price_per_kwh),
+        max_price_per_kwh: dec_f64(m.max_price_per_kwh),
+    }))
+}
+
+/// GET /api/v1/markets/p2p/market-prices — P2P pricing + wheeling/loss schedules.
+pub async fn get_p2p_market_prices(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<P2PMarketPricesResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let m = &state.config.market;
+    let mut wheeling_charges = HashMap::new();
+    wheeling_charges.insert("intra_zone".to_string(), dec_f64(m.intra_zone_wheeling_charge));
+    wheeling_charges.insert("cross_zone".to_string(), dec_f64(m.cross_zone_wheeling_charge));
+    let mut loss_factors = HashMap::new();
+    loss_factors.insert("intra_zone".to_string(), dec_f64(m.intra_zone_loss_factor));
+    loss_factors.insert("cross_zone".to_string(), dec_f64(m.cross_zone_loss_factor));
+
+    Ok(Json(P2PMarketPricesResponse {
+        base_price_thb_kwh: dec_f64(m.base_price_thb_kwh),
+        grid_import_price_thb_kwh: dec_f64(m.grid_import_price_thb_kwh),
+        grid_export_price_thb_kwh: dec_f64(m.grid_export_price_thb_kwh),
+        loss_allocation_model: m.loss_allocation_model.clone(),
+        wheeling_charges,
+        loss_factors,
+    }))
+}
+
+/// GET /api/v1/markets/matching-status — live order-book crossing summary.
+pub async fn get_matching_status(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<MatchingStatusResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let buys = state.order_repo.get_active_buy_orders().await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+    let sells = state.order_repo.get_active_sell_orders().await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    Ok(Json(build_matching_status(&buys, &sells)))
+}
+
+/// Pure aggregation over active orders — unit-testable without a DB.
+fn build_matching_status(buys: &[TradingOrder], sells: &[TradingOrder]) -> MatchingStatusResponse {
+    let buy_min = buys.iter().map(|o| o.price_per_kwh).min();
+    let buy_max = buys.iter().map(|o| o.price_per_kwh).max();
+    let sell_min = sells.iter().map(|o| o.price_per_kwh).min();
+    let sell_max = sells.iter().map(|o| o.price_per_kwh).max();
+
+    let can_match = matches!((buy_max, sell_min), (Some(b), Some(s)) if b >= s);
+
+    let pending_matches = match (buy_max, sell_min) {
+        (Some(b_max), Some(s_min)) if b_max >= s_min => {
+            let crossable_buys = buys.iter().filter(|o| o.price_per_kwh >= s_min).count();
+            let crossable_sells = sells.iter().filter(|o| o.price_per_kwh <= b_max).count();
+            crossable_buys.min(crossable_sells)
+        }
+        _ => 0,
+    };
+
+    let match_reason = if buys.is_empty() && sells.is_empty() {
+        "no orders"
+    } else if sells.is_empty() {
+        "no sell liquidity"
+    } else if buys.is_empty() {
+        "no buy liquidity"
+    } else if can_match {
+        "orders crossing"
+    } else {
+        "spread too wide"
+    }
+    .to_string();
+
+    MatchingStatusResponse {
+        pending_buy_orders: buys.len(),
+        pending_sell_orders: sells.len(),
+        pending_matches,
+        buy_price_range: PriceRange {
+            min: buy_min.map(dec_f64).unwrap_or(0.0),
+            max: buy_max.map(dec_f64).unwrap_or(0.0),
+        },
+        sell_price_range: PriceRange {
+            min: sell_min.map(dec_f64).unwrap_or(0.0),
+            max: sell_max.map(dec_f64).unwrap_or(0.0),
+        },
+        can_match,
+        match_reason,
+    }
+}
+
+// =============================================================================
+// Markets — Settlement Stats + P2P Order Book (Phase 2, read-only)
+// =============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct SettlementStatsResponse {
+    pub pending_count: i64,
+    pub processing_count: i64,
+    pub confirmed_count: i64,
+    pub failed_count: i64,
+    pub total_settled_value: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct P2POrderBookResponse {
+    pub asks: Vec<[String; 2]>,
+    pub bids: Vec<[String; 2]>,
+}
+
+fn build_settlement_stats_response(s: &SettlementStats) -> SettlementStatsResponse {
+    SettlementStatsResponse {
+        pending_count: s.pending_count,
+        processing_count: s.processing_count,
+        confirmed_count: s.confirmed_count,
+        failed_count: s.failed_count,
+        total_settled_value: dec_f64(s.total_settled_value),
+    }
+}
+
+/// Aggregate active orders into price-level book entries (`[price, amount]`).
+/// Bids (buys) descending, asks (sells) ascending. DB-free, unit-testable.
+fn build_p2p_orderbook(entries: &[OrderBookEntry]) -> P2POrderBookResponse {
+    use std::collections::BTreeMap;
+    let mut bids: BTreeMap<Decimal, Decimal> = BTreeMap::new();
+    let mut asks: BTreeMap<Decimal, Decimal> = BTreeMap::new();
+    for e in entries {
+        let book = match e.side {
+            OrderSide::Buy => &mut bids,
+            OrderSide::Sell => &mut asks,
+        };
+        *book.entry(e.price_per_kwh).or_insert(Decimal::ZERO) += e.energy_amount;
+    }
+    let bids_vec = bids
+        .iter()
+        .rev()
+        .map(|(p, a)| [p.to_string(), a.to_string()])
+        .collect();
+    let asks_vec = asks
+        .iter()
+        .map(|(p, a)| [p.to_string(), a.to_string()])
+        .collect();
+    P2POrderBookResponse {
+        asks: asks_vec,
+        bids: bids_vec,
+    }
+}
+
+/// GET /api/v1/markets/settlement-stats — settlement counts by status.
+pub async fn get_settlement_stats(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<SettlementStatsResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let stats = state.settlement_repo.get_settlement_stats().await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+    Ok(Json(build_settlement_stats_response(&stats)))
+}
+
+/// GET /api/v1/markets/orderbook — cross-zone P2P aggregate order book.
+pub async fn get_p2p_orderbook(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<P2POrderBookResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let entries = state.order_repo.get_all_active_orders().await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+    Ok(Json(build_p2p_orderbook(&entries)))
+}
+
+// =============================================================================
+// Trades — history (JSON) + export (CSV) (Phase 3)
+// =============================================================================
+//
+// Backed by the `settlements` table (no dedicated `trades` table exists). A
+// settlement IS a completed trade: it carries buyer/seller, energy, price,
+// total, fees and zones. Always scoped to the authenticated user (buyer OR
+// seller); `role`/`counterparty_id` are computed relative to that user.
+
+#[derive(Debug, Deserialize)]
+pub struct TradesQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    /// Export only: `csv` (default) | `json`.
+    pub format: Option<String>,
+}
+
+/// One trade row. Superset of the frontend `TradeRecord` (string decimals,
+/// `role`/`counterparty_id`, `executed_at`) plus aliases consumed by
+/// `getTradeHistory` (`buyer_id`, `seller_id`, `energy_amount`,
+/// `price_per_kwh`, `fee_amount`, `transaction_hash`, `created_at`).
+#[derive(Debug, Serialize)]
+pub struct TradeRecordResponse {
+    pub id: Uuid,
+    pub buyer_id: Uuid,
+    pub seller_id: Uuid,
+    pub counterparty_id: Uuid,
+    pub role: String,
+    pub quantity: String,
+    pub energy_amount: String,
+    pub price: String,
+    pub price_per_kwh: String,
+    pub total_value: String,
+    pub fee_amount: String,
+    pub wheeling_charge: String,
+    pub loss_cost: String,
+    pub effective_energy: String,
+    pub status: String,
+    pub transaction_hash: Option<String>,
+    pub buy_order_id: Uuid,
+    pub sell_order_id: Uuid,
+    pub buyer_zone_id: Option<i32>,
+    pub seller_zone_id: Option<i32>,
+    pub executed_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TradesListResponse {
+    pub trades: Vec<TradeRecordResponse>,
+    /// `getTrades` (TradeHistory) reads `total_count`.
+    pub total_count: i64,
+    /// `getTradeHistory` reads `total`.
+    pub total: i64,
+}
+
+fn dec_opt_str(d: Option<Decimal>) -> String {
+    d.unwrap_or(Decimal::ZERO).to_string()
+}
+
+/// Map a settlement to a trade row from the perspective of `user`.
+fn build_trade_record(s: &Settlement, user: Uuid) -> TradeRecordResponse {
+    let is_buyer = s.buyer_id == user;
+    let (role, counterparty_id) = if is_buyer {
+        ("buyer".to_string(), s.seller_id)
+    } else {
+        ("seller".to_string(), s.buyer_id)
+    };
+    TradeRecordResponse {
+        id: s.id,
+        buyer_id: s.buyer_id,
+        seller_id: s.seller_id,
+        counterparty_id,
+        role,
+        quantity: s.energy_amount.to_string(),
+        energy_amount: s.energy_amount.to_string(),
+        price: s.price.to_string(),
+        price_per_kwh: s.price.to_string(),
+        total_value: s.total_amount.to_string(),
+        fee_amount: s.fee_amount.to_string(),
+        wheeling_charge: dec_opt_str(s.wheeling_charge),
+        loss_cost: dec_opt_str(s.loss_cost),
+        effective_energy: dec_opt_str(s.effective_energy),
+        status: s.status.to_string(),
+        transaction_hash: s.blockchain_tx.clone(),
+        buy_order_id: s.buy_order_id,
+        sell_order_id: s.sell_order_id,
+        buyer_zone_id: s.buyer_zone_id,
+        seller_zone_id: s.seller_zone_id,
+        executed_at: s.created_at,
+        created_at: s.created_at,
+    }
+}
+
+fn build_trades_response(
+    settlements: &[Settlement],
+    total: i64,
+    user: Uuid,
+) -> TradesListResponse {
+    let trades = settlements.iter().map(|s| build_trade_record(s, user)).collect();
+    TradesListResponse {
+        trades,
+        total_count: total,
+        total,
+    }
+}
+
+/// RFC-4180 field escaping: quote if the value holds a comma, quote, CR or LF;
+/// double any embedded quotes.
+fn csv_field(v: &str) -> String {
+    if v.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    } else {
+        v.to_string()
+    }
+}
+
+/// Serialize trade rows to a CSV document (header + one row each). DB-free.
+fn trades_to_csv(records: &[TradeRecordResponse]) -> String {
+    let mut out = String::from(
+        "id,executed_at,role,counterparty_id,quantity,price,total_value,fee_amount,wheeling_charge,loss_cost,effective_energy,status,transaction_hash,buyer_zone_id,seller_zone_id\n",
+    );
+    for r in records {
+        let cols = [
+            r.id.to_string(),
+            r.executed_at.to_rfc3339(),
+            r.role.clone(),
+            r.counterparty_id.to_string(),
+            r.quantity.clone(),
+            r.price.clone(),
+            r.total_value.clone(),
+            r.fee_amount.clone(),
+            r.wheeling_charge.clone(),
+            r.loss_cost.clone(),
+            r.effective_energy.clone(),
+            r.status.clone(),
+            r.transaction_hash.clone().unwrap_or_default(),
+            r.buyer_zone_id.map(|z| z.to_string()).unwrap_or_default(),
+            r.seller_zone_id.map(|z| z.to_string()).unwrap_or_default(),
+        ];
+        let line: Vec<String> = cols.iter().map(|c| csv_field(c)).collect();
+        out.push_str(&line.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// GET /api/v1/trades — authenticated user's trade history (newest first).
+pub async fn get_trades(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Query(params): Query<TradesQuery>,
+) -> Result<Json<TradesListResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let limit = params.limit.unwrap_or(50).clamp(1, 500);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let (settlements, total) = state
+        .settlement_repo
+        .list_settlements_for_user(user.user_id, limit, offset)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    Ok(Json(build_trades_response(&settlements, total, user.user_id)))
+}
+
+/// GET /api/v1/trades/export — same data as CSV (or JSON via `?format=json`).
+pub async fn export_trades(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Query(params): Query<TradesQuery>,
+) -> Result<Response, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    // Export the full history (capped) rather than a single page.
+    let limit = params.limit.unwrap_or(10_000).clamp(1, 50_000);
+
+    let (settlements, _total) = state
+        .settlement_repo
+        .list_settlements_for_user(user.user_id, limit, 0)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    let records: Vec<TradeRecordResponse> = settlements
+        .iter()
+        .map(|s| build_trade_record(s, user.user_id))
+        .collect();
+
+    if params.format.as_deref() == Some("json") {
+        return Ok(Json(records).into_response());
+    }
+
+    let csv = trades_to_csv(&records);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"trades.csv\"",
+            ),
+        ],
+        csv,
+    )
+        .into_response())
+}
+
+// ── Price Alerts (Phase 4) ───────────────────────────────────────────────────
+
+/// POST body for creating a price alert. Frontend sends `symbol` (no DB column —
+/// stored in `note`), `target_price` (string decimal), `condition` (above/below).
+#[derive(Debug, Deserialize)]
+pub struct CreatePriceAlertRequest {
+    pub symbol: Option<String>,
+    pub target_price: String,
+    pub condition: String,
+}
+
+/// Wire shape matching frontend `PriceAlert` (`types/features.ts`): `symbol`
+/// echoed from `note`, `is_active` derived from status, decimals as strings.
+#[derive(Debug, Serialize)]
+pub struct PriceAlertResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub symbol: String,
+    pub target_price: String,
+    pub condition: String,
+    pub is_active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Map a stored alert to the frontend wire shape. `symbol` falls back to "" when
+/// `note` is null; `is_active` is true only while status == active.
+pub fn build_price_alert_response(a: &PriceAlert) -> PriceAlertResponse {
+    PriceAlertResponse {
+        id: a.id,
+        user_id: a.user_id,
+        symbol: a.note.clone().unwrap_or_default(),
+        target_price: a.target_price.to_string(),
+        condition: a.condition.to_string(),
+        is_active: matches!(a.status, AlertStatus::Active),
+        created_at: a.created_at,
+    }
+}
+
+/// POST /api/v1/price-alerts — create an alert for the authenticated user.
+pub async fn create_price_alert(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Json(req): Json<CreatePriceAlertRequest>,
+) -> Result<Json<PriceAlertResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let target_price = Decimal::from_str(req.target_price.trim()).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid target_price: {}", req.target_price),
+        )
+    })?;
+
+    let condition = AlertCondition::from_str(req.condition.trim().to_lowercase().as_str())
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid condition: {} (expected above|below|crosses)", req.condition),
+            )
+        })?;
+
+    let note = req.symbol.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
+
+    let alert = state
+        .price_alert_repo
+        .create_price_alert(NewPriceAlert {
+            user_id: user.user_id,
+            target_price,
+            condition,
+            note,
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    Ok(Json(build_price_alert_response(&alert)))
+}
+
+/// GET /api/v1/price-alerts — list the authenticated user's alerts (newest first).
+pub async fn list_price_alerts(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PriceAlertResponse>>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let alerts = state
+        .price_alert_repo
+        .list_price_alerts_for_user(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    Ok(Json(alerts.iter().map(build_price_alert_response).collect()))
+}
+
+/// DELETE /api/v1/price-alerts/{id} — delete an alert owned by the user.
+pub async fn delete_price_alert(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let deleted = state
+        .price_alert_repo
+        .delete_price_alert(id, user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Price alert not found".to_string(),
+        ))
+    }
+}
+
+// ── Recurring Orders (Phase 5) ───────────────────────────────────────────────
+
+/// POST body for creating a recurring order. Decimals arrive as strings and are
+/// parsed manually (the workspace `rust_decimal` uses `serde-float`, so a JSON
+/// string would otherwise fail to deserialize). `session_token` is accepted for
+/// forward-compat with auto-trading but not persisted by the CRUD path.
+#[derive(Debug, Deserialize)]
+pub struct CreateRecurringRequest {
+    pub side: String,
+    pub energy_amount: String,
+    pub max_price_per_kwh: Option<String>,
+    pub min_price_per_kwh: Option<String>,
+    pub interval_type: String,
+    pub interval_value: Option<i32>,
+    pub max_executions: Option<i32>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub session_token: Option<String>,
+}
+
+/// Wire shape mirroring frontend `RecurringOrder` (`types/features.ts:99`).
+/// Decimals are emitted as strings for an exact contract match (the float
+/// serialization would otherwise drop trailing zeros / vary by locale).
+#[derive(Debug, Serialize)]
+pub struct RecurringOrderWire {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub side: String,
+    pub energy_amount: String,
+    pub max_price_per_kwh: Option<String>,
+    pub min_price_per_kwh: Option<String>,
+    pub interval_type: String,
+    pub interval_value: i32,
+    pub next_execution_at: chrono::DateTime<chrono::Utc>,
+    pub last_executed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub status: String,
+    pub total_executions: i32,
+    pub max_executions: Option<i32>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Map a stored recurring order to the frontend wire shape (decimals → strings,
+/// enums → their serde-rename'd lowercase forms).
+pub fn build_recurring_response(o: &RecurringOrder) -> RecurringOrderWire {
+    RecurringOrderWire {
+        id: o.id,
+        user_id: o.user_id,
+        side: o.side.to_string(),
+        energy_amount: o.energy_amount.to_string(),
+        max_price_per_kwh: o.max_price_per_kwh.map(|d| d.to_string()),
+        min_price_per_kwh: o.min_price_per_kwh.map(|d| d.to_string()),
+        interval_type: o.interval_type.to_string(),
+        interval_value: o.interval_value,
+        next_execution_at: o.next_execution_at,
+        last_executed_at: o.last_executed_at,
+        status: o.status.to_string(),
+        total_executions: o.total_executions,
+        max_executions: o.max_executions,
+        name: o.name.clone(),
+        description: o.description.clone(),
+        created_at: o.created_at,
+        updated_at: o.updated_at,
+    }
+}
+
+fn parse_side(s: &str) -> Result<OrderSide, (axum::http::StatusCode, String)> {
+    match s.trim().to_lowercase().as_str() {
+        "buy" => Ok(OrderSide::Buy),
+        "sell" => Ok(OrderSide::Sell),
+        _ => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid side: {s} (expected buy|sell)"),
+        )),
+    }
+}
+
+fn parse_interval(s: &str) -> Result<IntervalType, (axum::http::StatusCode, String)> {
+    match s.trim().to_lowercase().as_str() {
+        "hourly" => Ok(IntervalType::Hourly),
+        "daily" => Ok(IntervalType::Daily),
+        "weekly" => Ok(IntervalType::Weekly),
+        "monthly" => Ok(IntervalType::Monthly),
+        _ => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid interval_type: {s} (expected hourly|daily|weekly|monthly)"),
+        )),
+    }
+}
+
+fn parse_opt_decimal(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<Decimal>, (axum::http::StatusCode, String)> {
+    match value {
+        None => Ok(None),
+        Some(v) => Decimal::from_str(v.trim())
+            .map(Some)
+            .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid {field}: {v}"))),
+    }
+}
+
+/// POST /api/v1/orders/recurring — create a recurring order for the user.
+pub async fn create_recurring_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Json(req): Json<CreateRecurringRequest>,
+) -> Result<Json<RecurringOrderWire>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let side = parse_side(&req.side)?;
+    let interval_type = parse_interval(&req.interval_type)?;
+    let energy_amount = Decimal::from_str(req.energy_amount.trim()).map_err(|_| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Invalid energy_amount: {}", req.energy_amount),
+        )
+    })?;
+    let max_price_per_kwh = parse_opt_decimal("max_price_per_kwh", req.max_price_per_kwh.as_deref())?;
+    let min_price_per_kwh = parse_opt_decimal("min_price_per_kwh", req.min_price_per_kwh.as_deref())?;
+
+    // Cadence: default every 1 interval; DB CHECK enforces > 0.
+    let interval_value = req.interval_value.unwrap_or(1);
+    if interval_value < 1 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "interval_value must be >= 1".to_string(),
+        ));
+    }
+    let next_exec = next_execution_at(Utc::now(), interval_type, interval_value);
+
+    let name = req.name.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    let description = req.description.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    let order = state
+        .recurring_repo
+        .create_recurring_order(NewRecurringOrder {
+            user_id: user.user_id,
+            side,
+            energy_amount,
+            max_price_per_kwh,
+            min_price_per_kwh,
+            interval_type,
+            interval_value,
+            next_execution_at: next_exec,
+            max_executions: req.max_executions,
+            name,
+            description,
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    Ok(Json(build_recurring_response(&order)))
+}
+
+/// GET /api/v1/orders/recurring — list the user's recurring orders (newest first).
+pub async fn list_recurring_orders(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<RecurringOrderWire>>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let orders = state
+        .recurring_repo
+        .list_recurring_orders_for_user(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    Ok(Json(orders.iter().map(build_recurring_response).collect()))
+}
+
+/// GET /api/v1/orders/recurring/{id} — fetch one recurring order owned by the user.
+pub async fn get_recurring_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RecurringOrderWire>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let order = state
+        .recurring_repo
+        .get_recurring_order(id, user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    match order {
+        Some(o) => Ok(Json(build_recurring_response(&o))),
+        None => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Recurring order not found".to_string(),
+        )),
+    }
+}
+
+/// DELETE /api/v1/orders/recurring/{id} — delete a recurring order owned by the user.
+pub async fn delete_recurring_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let deleted = state
+        .recurring_repo
+        .delete_recurring_order(id, user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Recurring order not found".to_string(),
+        ))
+    }
+}
+
+/// Shared body for pause/resume: flip status scoped to the owner; 404 if absent.
+async fn set_recurring_status_handler(
+    state: &AppState,
+    id: Uuid,
+    user_id: Uuid,
+    status: RecurringStatus,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let updated = state
+        .recurring_repo
+        .set_recurring_status(id, user_id, status)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    if updated {
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((
+            axum::http::StatusCode::NOT_FOUND,
+            "Recurring order not found".to_string(),
+        ))
+    }
+}
+
+/// POST /api/v1/orders/recurring/{id}/pause — set status to `paused`.
+pub async fn pause_recurring_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    set_recurring_status_handler(&state, id, user.user_id, RecurringStatus::Paused).await
+}
+
+/// POST /api/v1/orders/recurring/{id}/resume — set status to `active`.
+pub async fn resume_recurring_order(
+    role: ServiceRole,
+    user: UserContext,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    set_recurring_status_handler(&state, id, user.user_id, RecurringStatus::Active).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn order(side: OrderSide, price: i64) -> TradingOrder {
+        TradingOrder {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            order_type: OrderType::Limit,
+            side,
+            energy_amount: Decimal::new(100, 0),
+            price_per_kwh: Decimal::new(price, 2),
+            filled_amount: Decimal::ZERO,
+            status: OrderStatus::Pending,
+            expires_at: None,
+            created_at: None,
+            filled_at: None,
+            epoch_id: None,
+            zone_id: Some(1),
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: None,
+            order_index: None,
+            session_token: None,
+            blockchain_status: None,
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+            time_in_force: TimeInForce::Gtc,
+        }
+    }
+
+    fn price_alert(status: AlertStatus, note: Option<&str>) -> PriceAlert {
+        PriceAlert {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            target_price: Decimal::new(125, 1), // 12.5
+            condition: AlertCondition::Above,
+            status,
+            triggered_at: None,
+            triggered_price: None,
+            repeat: false,
+            note: note.map(str::to_string),
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn price_alert_active_maps_symbol_and_decimal() {
+        let r = build_price_alert_response(&price_alert(AlertStatus::Active, Some("GRID")));
+        assert_eq!(r.symbol, "GRID"); // note -> symbol
+        assert_eq!(r.target_price, "12.5");
+        assert_eq!(r.condition, "above");
+        assert!(r.is_active);
+    }
+
+    #[test]
+    fn price_alert_triggered_inactive_empty_symbol() {
+        let r = build_price_alert_response(&price_alert(AlertStatus::Triggered, None));
+        assert_eq!(r.symbol, ""); // null note -> ""
+        assert!(!r.is_active);
+    }
+
+    fn recurring(status: RecurringStatus) -> RecurringOrder {
+        RecurringOrder {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            side: OrderSide::Buy,
+            energy_amount: Decimal::new(1050, 2), // 10.50
+            max_price_per_kwh: Some(Decimal::new(20, 2)), // 0.20
+            min_price_per_kwh: None,
+            interval_type: IntervalType::Daily,
+            interval_value: 2,
+            next_execution_at: Utc::now(),
+            last_executed_at: None,
+            status,
+            total_executions: 0,
+            max_executions: Some(5),
+            name: Some("dca".to_string()),
+            description: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn recurring_response_maps_decimals_and_enums() {
+        let r = build_recurring_response(&recurring(RecurringStatus::Active));
+        assert_eq!(r.side, "buy");
+        assert_eq!(r.energy_amount, "10.50"); // decimal preserved as string
+        assert_eq!(r.max_price_per_kwh.as_deref(), Some("0.20"));
+        assert_eq!(r.min_price_per_kwh, None);
+        assert_eq!(r.interval_type, "daily");
+        assert_eq!(r.status, "active");
+        assert_eq!(r.interval_value, 2);
+    }
+
+    #[test]
+    fn recurring_response_paused_status() {
+        let r = build_recurring_response(&recurring(RecurringStatus::Paused));
+        assert_eq!(r.status, "paused");
+    }
+
+    #[test]
+    fn matching_status_empty() {
+        let r = build_matching_status(&[], &[]);
+        assert_eq!(r.pending_buy_orders, 0);
+        assert_eq!(r.pending_sell_orders, 0);
+        assert_eq!(r.pending_matches, 0);
+        assert_eq!(r.buy_price_range.min, 0.0);
+        assert_eq!(r.sell_price_range.max, 0.0);
+        assert!(!r.can_match);
+        assert_eq!(r.match_reason, "no orders");
+    }
+
+    #[test]
+    fn matching_status_buys_only() {
+        let r = build_matching_status(&[order(OrderSide::Buy, 500)], &[]);
+        assert_eq!(r.pending_buy_orders, 1);
+        assert_eq!(r.pending_sell_orders, 0);
+        assert!(!r.can_match);
+        assert_eq!(r.pending_matches, 0);
+        assert_eq!(r.match_reason, "no sell liquidity");
+    }
+
+    #[test]
+    fn matching_status_sells_only() {
+        let r = build_matching_status(&[], &[order(OrderSide::Sell, 400)]);
+        assert_eq!(r.pending_sell_orders, 1);
+        assert!(!r.can_match);
+        assert_eq!(r.match_reason, "no buy liquidity");
+    }
+
+    #[test]
+    fn matching_status_crossing() {
+        // buy_max 500 >= sell_min 400 → crossing
+        let buys = vec![order(OrderSide::Buy, 450), order(OrderSide::Buy, 500)];
+        let sells = vec![order(OrderSide::Sell, 400), order(OrderSide::Sell, 600)];
+        let r = build_matching_status(&buys, &sells);
+        assert!(r.can_match);
+        assert!(r.pending_matches > 0);
+        assert_eq!(r.buy_price_range.min, 4.5);
+        assert_eq!(r.buy_price_range.max, 5.0);
+        assert_eq!(r.sell_price_range.min, 4.0);
+        assert_eq!(r.sell_price_range.max, 6.0);
+        assert_eq!(r.match_reason, "orders crossing");
+    }
+
+    #[test]
+    fn matching_status_non_crossing() {
+        // buy_max 300 < sell_min 400 → spread too wide
+        let buys = vec![order(OrderSide::Buy, 300)];
+        let sells = vec![order(OrderSide::Sell, 400)];
+        let r = build_matching_status(&buys, &sells);
+        assert!(!r.can_match);
+        assert_eq!(r.pending_matches, 0);
+        assert_eq!(r.match_reason, "spread too wide");
+    }
+
+    #[test]
+    fn matching_status_pending_matches_min_side() {
+        // 3 crossable buys, 1 crossable sell → min = 1
+        let buys = vec![
+            order(OrderSide::Buy, 500),
+            order(OrderSide::Buy, 510),
+            order(OrderSide::Buy, 520),
+        ];
+        let sells = vec![order(OrderSide::Sell, 400)];
+        let r = build_matching_status(&buys, &sells);
+        assert_eq!(r.pending_matches, 1);
+    }
+
+    fn book_entry(side: OrderSide, price: i64, amount: i64) -> OrderBookEntry {
+        OrderBookEntry {
+            order_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            side,
+            energy_amount: Decimal::new(amount, 0),
+            original_amount: Decimal::new(amount, 0),
+            price_per_kwh: Decimal::new(price, 2),
+            created_at: Utc::now(),
+            zone_id: Some(1),
+            session_token: None,
+            signature: None,
+            payload_bytes: None,
+            time_in_force: TimeInForce::Gtc,
+        }
+    }
+
+    #[test]
+    fn settlement_stats_mapping() {
+        let s = SettlementStats {
+            pending_count: 3,
+            processing_count: 1,
+            confirmed_count: 5,
+            failed_count: 2,
+            total_settled_value: Decimal::new(12550, 2),
+        };
+        let r = build_settlement_stats_response(&s);
+        assert_eq!(r.pending_count, 3);
+        assert_eq!(r.processing_count, 1);
+        assert_eq!(r.confirmed_count, 5);
+        assert_eq!(r.failed_count, 2);
+        assert_eq!(r.total_settled_value, 125.5);
+    }
+
+    #[test]
+    fn orderbook_empty() {
+        let r = build_p2p_orderbook(&[]);
+        assert!(r.asks.is_empty());
+        assert!(r.bids.is_empty());
+    }
+
+    #[test]
+    fn orderbook_split_and_sort() {
+        let entries = vec![
+            book_entry(OrderSide::Buy, 450, 10),
+            book_entry(OrderSide::Buy, 500, 5),
+            book_entry(OrderSide::Sell, 600, 8),
+            book_entry(OrderSide::Sell, 550, 3),
+        ];
+        let r = build_p2p_orderbook(&entries);
+        // bids descending by price
+        assert_eq!(r.bids[0][0], "5.00");
+        assert_eq!(r.bids[1][0], "4.50");
+        // asks ascending by price
+        assert_eq!(r.asks[0][0], "5.50");
+        assert_eq!(r.asks[1][0], "6.00");
+    }
+
+    #[test]
+    fn orderbook_aggregates_price_level() {
+        // two buys at same price → summed amount
+        let entries = vec![
+            book_entry(OrderSide::Buy, 500, 10),
+            book_entry(OrderSide::Buy, 500, 15),
+        ];
+        let r = build_p2p_orderbook(&entries);
+        assert_eq!(r.bids.len(), 1);
+        assert_eq!(r.bids[0][0], "5.00");
+        assert_eq!(r.bids[0][1], "25");
+    }
+
+    // ── Trades (Phase 3) ────────────────────────────────────────────────────
+
+    fn settlement(buyer: Uuid, seller: Uuid) -> trading_core::models::Settlement {
+        use trading_core::models::SettlementStatus;
+        trading_core::models::Settlement {
+            id: Uuid::new_v4(),
+            trade_id: None,
+            epoch_id: Uuid::nil(),
+            buyer_id: buyer,
+            seller_id: seller,
+            buy_order_id: Uuid::new_v4(),
+            sell_order_id: Uuid::new_v4(),
+            energy_amount: Decimal::new(105, 1), // 10.5
+            price: Decimal::new(12, 1),          // 1.2
+            total_amount: Decimal::new(126, 1),  // 12.6
+            fee_amount: Decimal::new(5, 2),      // 0.05
+            net_amount: Decimal::new(1255, 2),
+            status: SettlementStatus::Completed,
+            blockchain_tx: Some("sig123".to_string()),
+            created_at: Utc::now(),
+            confirmed_at: None,
+            wheeling_charge: Some(Decimal::new(2, 2)),
+            loss_factor: None,
+            loss_cost: Some(Decimal::new(1, 2)),
+            effective_energy: Some(Decimal::new(104, 1)),
+            buyer_zone_id: Some(1),
+            seller_zone_id: Some(2),
+            buyer_session_token: None,
+            seller_session_token: None,
+            erc_certificate_id: None,
+            erc_transfer_tx: None,
+            retry_count: 0,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn trade_record_role_buyer() {
+        let me = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let r = build_trade_record(&settlement(me, other), me);
+        assert_eq!(r.role, "buyer");
+        assert_eq!(r.counterparty_id, other);
+        assert_eq!(r.quantity, "10.5");
+        assert_eq!(r.price, "1.2");
+        assert_eq!(r.total_value, "12.6");
+        assert_eq!(r.status, "completed");
+        assert_eq!(r.transaction_hash.as_deref(), Some("sig123"));
+    }
+
+    #[test]
+    fn trade_record_role_seller() {
+        let me = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let r = build_trade_record(&settlement(other, me), me);
+        assert_eq!(r.role, "seller");
+        assert_eq!(r.counterparty_id, other);
+    }
+
+    #[test]
+    fn trade_record_null_optionals_zero() {
+        let me = Uuid::new_v4();
+        let mut s = settlement(me, Uuid::new_v4());
+        s.wheeling_charge = None;
+        s.loss_cost = None;
+        s.effective_energy = None;
+        let r = build_trade_record(&s, me);
+        assert_eq!(r.wheeling_charge, "0");
+        assert_eq!(r.loss_cost, "0");
+        assert_eq!(r.effective_energy, "0");
+    }
+
+    #[test]
+    fn trades_response_dual_totals() {
+        let me = Uuid::new_v4();
+        let resp = build_trades_response(&[settlement(me, Uuid::new_v4())], 7, me);
+        assert_eq!(resp.trades.len(), 1);
+        assert_eq!(resp.total, 7);
+        assert_eq!(resp.total_count, 7);
+    }
+
+    #[test]
+    fn csv_field_escapes() {
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_field("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn csv_has_header_and_row() {
+        let me = Uuid::new_v4();
+        let rec = build_trade_record(&settlement(me, Uuid::new_v4()), me);
+        let csv = trades_to_csv(&[rec]);
+        let mut lines = csv.lines();
+        assert!(lines.next().unwrap().starts_with("id,executed_at,role,"));
+        let row = lines.next().unwrap();
+        assert!(row.contains("buyer"));
+        assert!(row.contains("12.6"));
+        // exactly header + 1 data row
+        assert_eq!(csv.lines().count(), 2);
+    }
 }

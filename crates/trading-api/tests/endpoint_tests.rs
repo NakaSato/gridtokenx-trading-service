@@ -33,6 +33,8 @@ struct MockSystem {
     pub futures_positions: Mutex<Vec<FuturesPosition>>,
     pub carbon_balances: Mutex<std::collections::HashMap<Uuid, Decimal>>,
     pub published_events: Mutex<Vec<Event>>,
+    pub price_alerts: Mutex<Vec<PriceAlert>>,
+    pub recurring: Mutex<Vec<RecurringOrder>>,
 }
 
 #[async_trait]
@@ -58,11 +60,34 @@ impl OrderRepository for MockSystem {
     async fn get_orders_by_user(&self, user_id: Uuid, _limit: i64, _offset: i64) -> TraitResult<Vec<TradingOrder>> {
         Ok(self.orders.lock().unwrap().iter().filter(|o| o.user_id == user_id).cloned().collect())
     }
-    async fn get_active_orders_by_zone(&self, _zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> { Ok(vec![]) }
+    async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> {
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| is_active(o.status) && o.zone_id == Some(zone_id))
+            .map(to_book_entry)
+            .collect())
+    }
+    async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| is_active(o.status))
+            .map(to_book_entry)
+            .collect())
+    }
     async fn update_order_status(&self, _id: Uuid, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
     async fn update_filled_amount(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
-    async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> { Ok(vec![]) }
-    async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> { Ok(vec![]) }
+    async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+        Ok(self.orders.lock().unwrap().iter().filter(|o| is_active(o.status) && o.side == OrderSide::Buy).cloned().collect())
+    }
+    async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+        Ok(self.orders.lock().unwrap().iter().filter(|o| is_active(o.status) && o.side == OrderSide::Sell).cloned().collect())
+    }
     async fn cancel_order(&self, _id: Uuid, _user_id: Uuid) -> TraitResult<bool> { Ok(true) }
     async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> { Ok(vec![]) }
 }
@@ -79,6 +104,38 @@ impl SettlementRepository for MockSystem {
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { Ok(Uuid::nil()) }
     async fn insert_match(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>) -> TraitResult<()> { Ok(()) }
     async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
+    async fn list_settlements_for_user(&self, user_id: Uuid, limit: i64, offset: i64) -> TraitResult<(Vec<Settlement>, i64)> {
+        let s = self.settlements.lock().unwrap();
+        let mut matched: Vec<Settlement> = s
+            .iter()
+            .filter(|x| x.buyer_id == user_id || x.seller_id == user_id)
+            .cloned()
+            .collect();
+        matched.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let total = matched.len() as i64;
+        let page = matched
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok((page, total))
+    }
+    async fn get_settlement_stats(&self) -> TraitResult<trading_core::models::SettlementStats> {
+        let s = self.settlements.lock().unwrap();
+        let count = |st: SettlementStatus| s.iter().filter(|x| x.status == st).count() as i64;
+        let total_settled_value = s
+            .iter()
+            .filter(|x| x.status == SettlementStatus::Completed)
+            .map(|x| x.total_amount)
+            .sum();
+        Ok(trading_core::models::SettlementStats {
+            pending_count: count(SettlementStatus::Pending),
+            processing_count: count(SettlementStatus::Processing),
+            confirmed_count: count(SettlementStatus::Completed),
+            failed_count: count(SettlementStatus::Failed),
+            total_settled_value,
+        })
+    }
     async fn update_settlement_status(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>) -> TraitResult<()> { Ok(()) }
 }
 
@@ -189,6 +246,134 @@ impl VppRepository for MockSystem {
     async fn update_cluster_metrics(&self, _c: &str, _s: f64, _soc: f64, _fu: f64, _fd: f64) -> TraitResult<()> { Ok(()) }
 }
 
+#[async_trait]
+impl PriceAlertRepository for MockSystem {
+    async fn create_price_alert(&self, input: NewPriceAlert) -> TraitResult<PriceAlert> {
+        let alert = PriceAlert {
+            id: Uuid::new_v4(),
+            user_id: input.user_id,
+            target_price: input.target_price,
+            condition: input.condition,
+            status: AlertStatus::Active,
+            triggered_at: None,
+            triggered_price: None,
+            repeat: false,
+            note: input.note,
+            created_at: chrono::Utc::now(),
+            updated_at: Some(chrono::Utc::now()),
+        };
+        self.price_alerts.lock().unwrap().push(alert.clone());
+        Ok(alert)
+    }
+    async fn list_price_alerts_for_user(&self, user_id: Uuid) -> TraitResult<Vec<PriceAlert>> {
+        let mut rows: Vec<PriceAlert> = self
+            .price_alerts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.user_id == user_id)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(rows)
+    }
+    async fn delete_price_alert(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool> {
+        let mut alerts = self.price_alerts.lock().unwrap();
+        let before = alerts.len();
+        alerts.retain(|a| !(a.id == id && a.user_id == user_id));
+        Ok(alerts.len() < before)
+    }
+}
+
+#[async_trait]
+impl RecurringOrderRepository for MockSystem {
+    async fn get_due_recurring_orders(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> TraitResult<Vec<RecurringOrder>> {
+        Ok(vec![])
+    }
+    async fn update_after_execution(
+        &self,
+        _id: Uuid,
+        _next_execution: chrono::DateTime<chrono::Utc>,
+        _total_executions: i32,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn create_recurring_order(&self, input: NewRecurringOrder) -> TraitResult<RecurringOrder> {
+        let order = RecurringOrder {
+            id: Uuid::new_v4(),
+            user_id: input.user_id,
+            side: input.side,
+            energy_amount: input.energy_amount,
+            max_price_per_kwh: input.max_price_per_kwh,
+            min_price_per_kwh: input.min_price_per_kwh,
+            interval_type: input.interval_type,
+            interval_value: input.interval_value,
+            next_execution_at: input.next_execution_at,
+            last_executed_at: None,
+            status: RecurringStatus::Active,
+            total_executions: 0,
+            max_executions: input.max_executions,
+            name: input.name,
+            description: input.description,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        self.recurring.lock().unwrap().push(order.clone());
+        Ok(order)
+    }
+    async fn list_recurring_orders_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<RecurringOrder>> {
+        let mut rows: Vec<RecurringOrder> = self
+            .recurring
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(rows)
+    }
+    async fn get_recurring_order(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> TraitResult<Option<RecurringOrder>> {
+        Ok(self
+            .recurring
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|o| o.id == id && o.user_id == user_id)
+            .cloned())
+    }
+    async fn delete_recurring_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool> {
+        let mut rows = self.recurring.lock().unwrap();
+        let before = rows.len();
+        rows.retain(|o| !(o.id == id && o.user_id == user_id));
+        Ok(rows.len() < before)
+    }
+    async fn set_recurring_status(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        status: RecurringStatus,
+    ) -> TraitResult<bool> {
+        let mut rows = self.recurring.lock().unwrap();
+        if let Some(o) = rows.iter_mut().find(|o| o.id == id && o.user_id == user_id) {
+            o.status = status;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
 struct TopologyStub;
 impl trading_engine::engine::TopologySnapshot for TopologyStub {
     fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool { true }
@@ -196,9 +381,112 @@ impl trading_engine::engine::TopologySnapshot for TopologyStub {
     fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice { FastPrice::from_raw(1000000) }
 }
 
+// ── Mock helpers / factories ──────────────────────────────────────────────────
+
+fn is_active(s: OrderStatus) -> bool {
+    matches!(
+        s,
+        OrderStatus::Pending | OrderStatus::Active | OrderStatus::PartiallyFilled
+    )
+}
+
+fn to_book_entry(o: &TradingOrder) -> OrderBookEntry {
+    OrderBookEntry {
+        order_id: o.id,
+        user_id: o.user_id,
+        side: o.side,
+        energy_amount: o.energy_amount - o.filled_amount,
+        original_amount: o.energy_amount,
+        price_per_kwh: o.price_per_kwh,
+        created_at: o.created_at.unwrap_or_else(chrono::Utc::now),
+        zone_id: o.zone_id,
+        session_token: o.session_token.clone(),
+        signature: None,
+        payload_bytes: None,
+        time_in_force: o.time_in_force,
+    }
+}
+
+fn mk_order(side: OrderSide, price: i64, amount: i64) -> TradingOrder {
+    TradingOrder {
+        id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        order_type: OrderType::Limit,
+        side,
+        energy_amount: Decimal::new(amount, 0),
+        price_per_kwh: Decimal::new(price, 2),
+        filled_amount: Decimal::ZERO,
+        status: OrderStatus::Pending,
+        expires_at: None,
+        created_at: Some(chrono::Utc::now()),
+        filled_at: None,
+        epoch_id: None,
+        zone_id: Some(1),
+        meter_id: None,
+        refund_tx_signature: None,
+        order_pda: None,
+        order_index: None,
+        session_token: None,
+        blockchain_status: None,
+        blockchain_tx_hash: None,
+        blockchain_error: None,
+        retry_count: 0,
+        time_in_force: TimeInForce::Gtc,
+    }
+}
+
+fn mk_settlement(status: SettlementStatus, total: i64) -> Settlement {
+    Settlement {
+        id: Uuid::new_v4(),
+        trade_id: None,
+        epoch_id: Uuid::nil(),
+        buyer_id: Uuid::new_v4(),
+        seller_id: Uuid::new_v4(),
+        buy_order_id: Uuid::new_v4(),
+        sell_order_id: Uuid::new_v4(),
+        energy_amount: Decimal::new(total, 0),
+        price: Decimal::ONE,
+        total_amount: Decimal::new(total, 0),
+        fee_amount: Decimal::ZERO,
+        net_amount: Decimal::new(total, 0),
+        status,
+        blockchain_tx: None,
+        created_at: chrono::Utc::now(),
+        confirmed_at: None,
+        wheeling_charge: None,
+        loss_factor: None,
+        loss_cost: None,
+        effective_energy: None,
+        buyer_zone_id: Some(1),
+        seller_zone_id: Some(1),
+        buyer_session_token: None,
+        seller_session_token: None,
+        erc_certificate_id: None,
+        erc_transfer_tx: None,
+        retry_count: 0,
+        error_message: None,
+    }
+}
+
+async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let res = request(app, "GET", uri, Uuid::new_v4(), Body::empty()).await;
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, json)
+}
+
 // ── Test Setup ──────────────────────────────────────────────────────────────
 
 fn setup_test_state(oracle_pub_key: String) -> AppState {
+    setup_test_state_with_mock(oracle_pub_key).0
+}
+
+fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSystem>) {
     let mock = Arc::new(MockSystem::default());
     let config_json = json!({
         "environment": "test",
@@ -275,13 +563,15 @@ fn setup_test_state(oracle_pub_key: String) -> AppState {
         Arc::new(trading_logic::forecasting::ForecastingService::new()),
     ));
 
-    AppState {
+    let state = AppState {
         config: config_arc,
         order_repo: mock.clone(),
         settlement_repo: mock.clone(),
         futures_repo: mock.clone(),
         carbon_repo: mock.clone(),
         analytics_repo: mock.clone(),
+        price_alert_repo: mock.clone(),
+        recurring_repo: mock.clone(),
         events: mock.clone(),
         blockchain: mock.clone(),
         identity: mock.clone(),
@@ -289,7 +579,8 @@ fn setup_test_state(oracle_pub_key: String) -> AppState {
         matcher,
         settlement,
         vpp,
-    }
+    };
+    (state, mock)
 }
 
 async fn request(
@@ -464,4 +755,520 @@ async fn test_all_endpoints() {
     // 22. Health
     let res = app.clone().oneshot(Request::builder().method("GET").uri("/health").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+// ── Phase 1 + 2 Markets endpoints (HTTP integration) ──────────────────────────
+
+fn test_oracle_key() -> String {
+    let signing_key = SigningKey::from_bytes(&[0u8; 32]);
+    bs58::encode(signing_key.verifying_key().to_bytes()).into_string()
+}
+
+#[tokio::test]
+async fn test_markets_config_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/config").await;
+    assert_eq!(status, StatusCode::OK);
+    // all 6 contract fields present
+    for k in [
+        "base_price_thb_kwh",
+        "grid_import_price_thb_kwh",
+        "grid_export_price_thb_kwh",
+        "transaction_fee_bps",
+        "min_price_per_kwh",
+        "max_price_per_kwh",
+    ] {
+        assert!(body.get(k).is_some(), "missing field {k}");
+    }
+    // defaults
+    assert_eq!(body["base_price_thb_kwh"], 4.5);
+    assert_eq!(body["transaction_fee_bps"], 50);
+    assert_eq!(body["max_price_per_kwh"], 20.0);
+}
+
+#[tokio::test]
+async fn test_p2p_market_prices_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/p2p/market-prices").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["loss_allocation_model"], "proportional");
+    assert_eq!(body["wheeling_charges"]["intra_zone"], 0.0);
+    assert_eq!(body["wheeling_charges"]["cross_zone"], 0.02);
+    assert_eq!(body["loss_factors"]["intra_zone"], 1.01);
+    assert_eq!(body["loss_factors"]["cross_zone"], 1.03);
+}
+
+#[tokio::test]
+async fn test_matching_status_empty_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/matching-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending_buy_orders"], 0);
+    assert_eq!(body["pending_sell_orders"], 0);
+    assert_eq!(body["can_match"], false);
+    assert_eq!(body["match_reason"], "no orders");
+}
+
+#[tokio::test]
+async fn test_matching_status_crossing_endpoint() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    {
+        let mut o = mock.orders.lock().unwrap();
+        o.push(mk_order(OrderSide::Buy, 500, 10)); // buy max 5.00
+        o.push(mk_order(OrderSide::Sell, 400, 8)); // sell min 4.00 → crosses
+    }
+    let app = build_router(state);
+    let (status, body) = get_json(app, "/api/v1/markets/matching-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending_buy_orders"], 1);
+    assert_eq!(body["pending_sell_orders"], 1);
+    assert_eq!(body["can_match"], true);
+    assert_eq!(body["pending_matches"], 1);
+    assert_eq!(body["match_reason"], "orders crossing");
+}
+
+#[tokio::test]
+async fn test_settlement_stats_empty_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/settlement-stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending_count"], 0);
+    assert_eq!(body["processing_count"], 0);
+    assert_eq!(body["confirmed_count"], 0);
+    assert_eq!(body["failed_count"], 0);
+    assert_eq!(body["total_settled_value"], 0.0);
+}
+
+#[tokio::test]
+async fn test_settlement_stats_endpoint() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    {
+        let mut s = mock.settlements.lock().unwrap();
+        s.push(mk_settlement(SettlementStatus::Pending, 5));
+        s.push(mk_settlement(SettlementStatus::Pending, 5));
+        s.push(mk_settlement(SettlementStatus::Processing, 7));
+        s.push(mk_settlement(SettlementStatus::Completed, 10));
+        s.push(mk_settlement(SettlementStatus::Completed, 20));
+        s.push(mk_settlement(SettlementStatus::Completed, 30));
+        s.push(mk_settlement(SettlementStatus::Failed, 9));
+    }
+    let app = build_router(state);
+    let (status, body) = get_json(app, "/api/v1/markets/settlement-stats").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending_count"], 2);
+    assert_eq!(body["processing_count"], 1);
+    assert_eq!(body["confirmed_count"], 3); // Completed → confirmed
+    assert_eq!(body["failed_count"], 1);
+    assert_eq!(body["total_settled_value"], 60.0); // sum of completed only
+}
+
+#[tokio::test]
+async fn test_orderbook_empty_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/orderbook").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["asks"].as_array().unwrap().len(), 0);
+    assert_eq!(body["bids"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_orderbook_endpoint() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    {
+        let mut o = mock.orders.lock().unwrap();
+        o.push(mk_order(OrderSide::Buy, 450, 10));
+        o.push(mk_order(OrderSide::Buy, 500, 5));
+        o.push(mk_order(OrderSide::Buy, 500, 15)); // same level → aggregates with above
+        o.push(mk_order(OrderSide::Sell, 600, 8));
+        o.push(mk_order(OrderSide::Sell, 550, 3));
+    }
+    let app = build_router(state);
+    let (status, body) = get_json(app, "/api/v1/markets/orderbook").await;
+    assert_eq!(status, StatusCode::OK);
+    let bids = body["bids"].as_array().unwrap();
+    let asks = body["asks"].as_array().unwrap();
+    // bids descending: 5.00 (aggregated 20) then 4.50 (10)
+    assert_eq!(bids[0][0], "5.00");
+    assert_eq!(bids[0][1], "20");
+    assert_eq!(bids[1][0], "4.50");
+    // asks ascending: 5.50 then 6.00
+    assert_eq!(asks[0][0], "5.50");
+    assert_eq!(asks[1][0], "6.00");
+}
+
+// ── Trades (Phase 3) ──────────────────────────────────────────────────────────
+
+async fn get_json_as(
+    app: axum::Router,
+    uri: &str,
+    user_id: Uuid,
+) -> (StatusCode, serde_json::Value) {
+    let res = request(app, "GET", uri, user_id, Body::empty()).await;
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, json)
+}
+
+fn mk_settlement_between(
+    buyer: Uuid,
+    seller: Uuid,
+    status: SettlementStatus,
+    total: i64,
+) -> Settlement {
+    let mut s = mk_settlement(status, total);
+    s.buyer_id = buyer;
+    s.seller_id = seller;
+    s
+}
+
+#[tokio::test]
+async fn test_trades_empty_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/trades").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["trades"].as_array().unwrap().len(), 0);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["total_count"], 0);
+}
+
+#[tokio::test]
+async fn test_trades_user_scoped_and_role() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let me = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    {
+        let mut s = mock.settlements.lock().unwrap();
+        s.push(mk_settlement_between(me, other, SettlementStatus::Completed, 10)); // me=buyer
+        s.push(mk_settlement_between(other, me, SettlementStatus::Completed, 20)); // me=seller
+        s.push(mk_settlement_between(other, other, SettlementStatus::Completed, 30)); // not mine
+    }
+    let app = build_router(state);
+    let (status, body) = get_json_as(app, "/api/v1/trades", me).await;
+    assert_eq!(status, StatusCode::OK);
+    let trades = body["trades"].as_array().unwrap();
+    assert_eq!(trades.len(), 2); // only mine
+    assert_eq!(body["total"], 2);
+    assert_eq!(body["total_count"], 2);
+    // every row carries a role relative to me + counterparty = other
+    for t in trades {
+        let role = t["role"].as_str().unwrap();
+        assert!(role == "buyer" || role == "seller");
+        assert_eq!(t["counterparty_id"].as_str().unwrap(), other.to_string());
+    }
+}
+
+#[tokio::test]
+async fn test_trades_pagination() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let me = Uuid::new_v4();
+    {
+        let mut s = mock.settlements.lock().unwrap();
+        for i in 0..5 {
+            s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, i));
+        }
+    }
+    let app = build_router(state);
+    let (status, body) = get_json_as(app, "/api/v1/trades?limit=2&offset=1", me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["trades"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"], 5); // total ignores paging
+    assert_eq!(body["total_count"], 5);
+}
+
+#[tokio::test]
+async fn test_trades_export_csv() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let me = Uuid::new_v4();
+    {
+        let mut s = mock.settlements.lock().unwrap();
+        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 10));
+        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 20));
+    }
+    let app = build_router(state);
+    let res = request(app, "GET", "/api/v1/trades/export", me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
+    let cd = res.headers().get("content-disposition").unwrap().to_str().unwrap().to_string();
+    assert!(ct.starts_with("text/csv"));
+    assert!(cd.contains("trades.csv"));
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let csv = String::from_utf8(bytes.to_vec()).unwrap();
+    let lines: Vec<&str> = csv.lines().collect();
+    assert!(lines[0].starts_with("id,executed_at,role,"));
+    assert_eq!(lines.len(), 3); // header + 2 rows
+}
+
+#[tokio::test]
+async fn test_trades_export_json_format() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let me = Uuid::new_v4();
+    {
+        let mut s = mock.settlements.lock().unwrap();
+        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 10));
+    }
+    let app = build_router(state);
+    let (status, body) = get_json_as(app, "/api/v1/trades/export?format=json", me).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["role"], "buyer");
+}
+
+// ── Price alerts (Phase 4) ──────────────────────────────────────────────────
+
+async fn post_json_as(
+    app: axum::Router,
+    uri: &str,
+    user_id: Uuid,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let res = request(app, "POST", uri, user_id, Body::from(body.to_string())).await;
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_price_alert_create_maps_symbol_and_active() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    let (status, body) = post_json_as(
+        app,
+        "/api/v1/price-alerts",
+        me,
+        json!({ "symbol": "GRID", "target_price": "12.50", "condition": "above" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["symbol"], "GRID"); // symbol round-trips via note
+    assert_eq!(body["target_price"], "12.50"); // decimal preserved as sent
+    assert_eq!(body["condition"], "above");
+    assert_eq!(body["is_active"], true);
+    assert_eq!(body["user_id"].as_str().unwrap(), me.to_string());
+}
+
+#[tokio::test]
+async fn test_price_alert_create_then_list_newest_first() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    for (sym, cond) in [("A", "above"), ("B", "below")] {
+        let (s, _) = post_json_as(
+            app.clone(),
+            "/api/v1/price-alerts",
+            me,
+            json!({ "symbol": sym, "target_price": "1.0", "condition": cond }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let (status, body) = get_json_as(app, "/api/v1/price-alerts", me).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["symbol"], "B"); // newest first
+    assert_eq!(arr[1]["symbol"], "A");
+}
+
+#[tokio::test]
+async fn test_price_alert_list_user_scoped() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let (s, _) = post_json_as(app.clone(), "/api/v1/price-alerts", other,
+        json!({ "symbol": "X", "target_price": "1.0", "condition": "above" })).await;
+    assert_eq!(s, StatusCode::OK);
+    let (status, body) = get_json_as(app, "/api/v1/price-alerts", me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0); // other's alert not visible
+}
+
+#[tokio::test]
+async fn test_price_alert_delete_roundtrip() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let (_, created) = post_json_as(app.clone(), "/api/v1/price-alerts", me,
+        json!({ "symbol": "GRID", "target_price": "2.0", "condition": "below" })).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let res = request(app.clone(), "DELETE", &format!("/api/v1/price-alerts/{id}"), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (status, body) = get_json_as(app, "/api/v1/price-alerts", me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0); // gone
+}
+
+#[tokio::test]
+async fn test_price_alert_delete_foreign_404() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    let res = request(app, "DELETE", &format!("/api/v1/price-alerts/{}", Uuid::new_v4()), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_price_alert_bad_condition_400() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    // 400 body is plain text, not JSON — use raw request and assert status only.
+    let res = request(app, "POST", "/api/v1/price-alerts", me,
+        Body::from(json!({ "symbol": "GRID", "target_price": "1.0", "condition": "sideways" }).to_string())).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Recurring orders (Phase 5) ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_recurring_create_maps_fields() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    let (status, body) = post_json_as(
+        app,
+        "/api/v1/orders/recurring",
+        me,
+        json!({
+            "side": "buy",
+            "energy_amount": "10.50",
+            "max_price_per_kwh": "0.20",
+            "interval_type": "daily",
+            "interval_value": 2,
+            "max_executions": 5,
+            "name": "dca"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["side"], "buy");
+    assert_eq!(body["energy_amount"], "10.50"); // decimal preserved as string
+    assert_eq!(body["max_price_per_kwh"], "0.20");
+    assert_eq!(body["interval_type"], "daily");
+    assert_eq!(body["interval_value"], 2);
+    assert_eq!(body["status"], "active"); // new orders start active
+    assert_eq!(body["user_id"].as_str().unwrap(), me.to_string());
+    // next_execution_at is set (non-null)
+    assert!(body["next_execution_at"].is_string());
+}
+
+#[tokio::test]
+async fn test_recurring_create_then_list_newest_first() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    for name in ["first", "second"] {
+        let (s, _) = post_json_as(
+            app.clone(),
+            "/api/v1/orders/recurring",
+            me,
+            json!({ "side": "sell", "energy_amount": "1.0", "interval_type": "hourly", "name": name }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let (status, body) = get_json_as(app, "/api/v1/orders/recurring", me).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["name"], "second"); // newest first
+    assert_eq!(arr[1]["name"], "first");
+}
+
+#[tokio::test]
+async fn test_recurring_list_user_scoped() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let (s, _) = post_json_as(app.clone(), "/api/v1/orders/recurring", other,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    assert_eq!(s, StatusCode::OK);
+    let (status, body) = get_json_as(app, "/api/v1/orders/recurring", me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0); // other's order not visible
+}
+
+#[tokio::test]
+async fn test_recurring_get_roundtrip_and_foreign_404() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
+        json!({ "side": "buy", "energy_amount": "3.0", "interval_type": "weekly" })).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, body) = get_json_as(app.clone(), &format!("/api/v1/orders/recurring/{id}"), me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"].as_str().unwrap(), id);
+
+    // foreign user cannot read it
+    let other = Uuid::new_v4();
+    let res = request(app, "GET", &format!("/api/v1/orders/recurring/{id}"), other, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_recurring_pause_resume_flips_status() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let res = request(app.clone(), "POST", &format!("/api/v1/orders/recurring/{id}/pause"), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (_, body) = get_json_as(app.clone(), &format!("/api/v1/orders/recurring/{id}"), me).await;
+    assert_eq!(body["status"], "paused");
+
+    let res = request(app.clone(), "POST", &format!("/api/v1/orders/recurring/{id}/resume"), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let (_, body) = get_json_as(app, &format!("/api/v1/orders/recurring/{id}"), me).await;
+    assert_eq!(body["status"], "active");
+}
+
+#[tokio::test]
+async fn test_recurring_delete_roundtrip() {
+    let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let me = Uuid::new_v4();
+    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let res = request(app.clone(), "DELETE", &format!("/api/v1/orders/recurring/{id}"), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (status, body) = get_json_as(app, "/api/v1/orders/recurring", me).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0); // gone
+}
+
+#[tokio::test]
+async fn test_recurring_pause_foreign_404() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    let res = request(app, "POST", &format!("/api/v1/orders/recurring/{}/pause", Uuid::new_v4()), me, Body::empty()).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_recurring_bad_interval_400() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+    // 400 body is plain text — raw request, status-only assert.
+    let res = request(app, "POST", "/api/v1/orders/recurring", me,
+        Body::from(json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "yearly" }).to_string())).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }

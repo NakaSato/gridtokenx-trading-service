@@ -249,6 +249,54 @@ pub enum RecurringStatus {
     Cancelled,
 }
 
+// ── Price Alert Enums ────────────────────────────────────────────────────────
+
+/// Direction that triggers a price alert.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
+)]
+#[sqlx(type_name = "alert_condition", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum AlertCondition {
+    Above,
+    Below,
+    Crosses,
+}
+
+/// Lifecycle state of a price alert.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+    Display,
+    EnumString,
+)]
+#[sqlx(type_name = "alert_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum AlertStatus {
+    Active,
+    Triggered,
+    Cancelled,
+}
+
 // ── Epoch Enums ──────────────────────────────────────────────────────────────
 
 #[derive(

@@ -105,4 +105,92 @@ impl RecurringOrderRepository for PostgresRecurringOrderRepository {
         .await?;
         Ok(())
     }
+
+    async fn create_recurring_order(
+        &self,
+        input: trading_core::models::NewRecurringOrder,
+    ) -> TraitResult<RecurringOrder> {
+        let row = sqlx::query_as::<_, RecurringOrderDb>(
+            r#"
+            INSERT INTO recurring_orders
+                (user_id, side, energy_amount, max_price_per_kwh, min_price_per_kwh,
+                 interval_type, interval_value, next_execution_at, max_executions, name, description)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING *
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.side)
+        .bind(input.energy_amount)
+        .bind(input.max_price_per_kwh)
+        .bind(input.min_price_per_kwh)
+        .bind(input.interval_type)
+        .bind(input.interval_value)
+        .bind(input.next_execution_at)
+        .bind(input.max_executions)
+        .bind(input.name)
+        .bind(input.description)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.into())
+    }
+
+    async fn list_recurring_orders_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<RecurringOrder>> {
+        let orders = sqlx::query_as::<_, RecurringOrderDb>(
+            "SELECT * FROM recurring_orders WHERE user_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(orders.into_iter().map(Into::into).collect())
+    }
+
+    async fn get_recurring_order(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> TraitResult<Option<RecurringOrder>> {
+        let order = sqlx::query_as::<_, RecurringOrderDb>(
+            "SELECT * FROM recurring_orders WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(order.map(Into::into))
+    }
+
+    async fn delete_recurring_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool> {
+        let result = sqlx::query("DELETE FROM recurring_orders WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_recurring_status(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        status: RecurringStatus,
+    ) -> TraitResult<bool> {
+        let result = sqlx::query(
+            "UPDATE recurring_orders SET status = $3, updated_at = NOW() WHERE id = $1 AND user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }

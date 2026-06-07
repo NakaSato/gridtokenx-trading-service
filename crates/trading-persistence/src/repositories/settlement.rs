@@ -6,8 +6,17 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
-use trading_core::models::{OrderMatch, Settlement, SettlementStatus};
+use trading_core::models::{OrderMatch, Settlement, SettlementStats, SettlementStatus};
 use trading_core::traits::{SettlementRepository, TraitResult};
+
+#[derive(Debug, Clone, FromRow)]
+struct SettlementStatsRow {
+    pending: i64,
+    processing: i64,
+    confirmed: i64,
+    failed: i64,
+    total_settled_value: Decimal,
+}
 
 #[derive(Debug, Clone, FromRow)]
 pub struct SettlementDb {
@@ -192,6 +201,60 @@ impl SettlementRepository for PostgresSettlementRepository {
         .await?;
 
         Ok(settlements.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_settlements_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> TraitResult<(Vec<Settlement>, i64)> {
+        let rows = sqlx::query_as::<_, SettlementDb>(
+            r#"
+            SELECT * FROM settlements
+            WHERE buyer_id = $1 OR seller_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM settlements WHERE buyer_id = $1 OR seller_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok((rows.into_iter().map(Into::into).collect(), total))
+    }
+
+    async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> {
+        let row = sqlx::query_as::<_, SettlementStatsRow>(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'pending')    AS pending,
+                COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+                COUNT(*) FILTER (WHERE status = 'completed')  AS confirmed,
+                COUNT(*) FILTER (WHERE status = 'failed')     AS failed,
+                COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) AS total_settled_value
+            FROM settlements
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(SettlementStats {
+            pending_count: row.pending,
+            processing_count: row.processing,
+            confirmed_count: row.confirmed,
+            failed_count: row.failed,
+            total_settled_value: row.total_settled_value,
+        })
     }
 
     async fn update_settlement_status(

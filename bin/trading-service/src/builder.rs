@@ -7,7 +7,8 @@ use trading_infra::cache::CacheService;
 use trading_logic::{GridAwareTopology, MatcherService, SettlementService};
 use trading_persistence::repositories::{
     PostgresAnalyticsRepository, PostgresCarbonRepository, PostgresFuturesRepository,
-    PostgresOrderRepository, PostgresSettlementRepository,
+    PostgresOrderRepository, PostgresPriceAlertRepository, PostgresRecurringOrderRepository,
+    PostgresSettlementRepository,
 };
 use uuid::Uuid;
 
@@ -20,6 +21,8 @@ pub struct Infrastructure {
     pub futures_repo: Arc<dyn FuturesRepository>,
     pub carbon_repo: Arc<dyn CarbonRepository>,
     pub analytics_repo: Arc<dyn AnalyticsRepository>,
+    pub price_alert_repo: Arc<dyn PriceAlertRepository>,
+    pub recurring_repo: Arc<dyn RecurringOrderRepository>,
     pub vpp_repo: Arc<dyn VppRepository>,
     pub blockchain: Arc<dyn BlockchainGateway>,
     pub identity: Arc<dyn IdentityGateway>,
@@ -57,6 +60,8 @@ impl ServiceBuilder {
         let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
         let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
+        let price_alert_repo = Arc::new(PostgresPriceAlertRepository::new(db_pool.clone()));
+        let recurring_repo = Arc::new(PostgresRecurringOrderRepository::new(db_pool.clone()));
         let vpp_repo = Arc::new(trading_persistence::repositories::PostgresVppRepository::new(db_pool.clone()));
 
         // IAM identity gateway. NOTE: trading does not call IAM at request time
@@ -133,6 +138,8 @@ impl ServiceBuilder {
             futures_repo,
             carbon_repo,
             analytics_repo,
+            price_alert_repo,
+            recurring_repo,
             vpp_repo: vpp_repo.clone(),
             blockchain: blockchain.clone(),
             identity: identity.clone(),

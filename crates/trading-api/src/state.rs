@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use trading_core::traits::{
     AnalyticsRepository, AuditLog, BlockchainGateway, CarbonRepository, EventPublisher,
-    FuturesRepository, IdentityGateway, OrderRepository, SettlementRepository,
+    FuturesRepository, IdentityGateway, OrderRepository, PriceAlertRepository,
+    RecurringOrderRepository, SettlementRepository,
 };
 use trading_logic::{MatcherService, SettlementService};
 
@@ -13,6 +14,8 @@ pub struct AppState {
     pub futures_repo: Arc<dyn FuturesRepository>,
     pub carbon_repo: Arc<dyn CarbonRepository>,
     pub analytics_repo: Arc<dyn AnalyticsRepository>,
+    pub price_alert_repo: Arc<dyn PriceAlertRepository>,
+    pub recurring_repo: Arc<dyn RecurringOrderRepository>,
     pub events: Arc<dyn EventPublisher>,
     pub blockchain: Arc<dyn BlockchainGateway>,
     pub identity: Arc<dyn IdentityGateway>,

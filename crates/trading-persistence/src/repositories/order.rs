@@ -238,6 +238,35 @@ impl OrderRepository for PostgresOrderRepository {
             .collect())
     }
 
+    async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
+        let orders = sqlx::query_as::<_, TradingOrderDb>(
+            r#"
+            SELECT * FROM trading_orders
+            WHERE status IN ('pending', 'active', 'partially_filled')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(orders
+            .into_iter()
+            .map(|o| OrderBookEntry {
+                order_id: o.id,
+                user_id: o.user_id,
+                side: o.side,
+                energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
+                original_amount: o.energy_amount,
+                price_per_kwh: o.price_per_kwh,
+                created_at: o.created_at.unwrap_or_else(Utc::now),
+                zone_id: o.zone_id,
+                session_token: o.session_token,
+                signature: None,
+                payload_bytes: None,
+                time_in_force: o.time_in_force,
+            })
+            .collect())
+    }
+
     async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()> {
         sqlx::query("UPDATE trading_orders SET status = $1, updated_at = NOW() WHERE id = $2")
             .bind(status)

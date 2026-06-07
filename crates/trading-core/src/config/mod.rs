@@ -4,6 +4,7 @@ pub mod tokenization;
 pub use tokenization::{ConfigError, TokenizationConfig, ValidationError};
 
 use anyhow::Result;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::env;
 use tracing::info;
@@ -22,6 +23,9 @@ pub struct Config {
     pub log_level: String,
     pub tokenization: TokenizationConfig,
     pub solana_programs: SolanaProgramsConfig,
+    /// P2P energy market pricing parameters (env-configurable).
+    #[serde(default)]
+    pub market: MarketConfig,
     pub encryption_secret: String,
     pub iam_service_url: String,
     pub internal_api_key: String,
@@ -60,6 +64,101 @@ impl Default for SolanaProgramsConfig {
             governance_program_id: "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ".to_string(),
             trading_market_id: "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string(),
         }
+    }
+}
+
+/// P2P energy market pricing parameters.
+///
+/// Defaults reflect THB/kWh retail energy pricing; cross-zone wheeling/loss
+/// defaults mirror the matcher's `GridAwareTopology` (wheeling 0.02, loss
+/// 1.01 intra / 1.03 cross — `trading-logic/src/energy.rs`). Override any value
+/// via the corresponding `MARKET_*` env var.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketConfig {
+    pub base_price_thb_kwh: Decimal,
+    pub grid_import_price_thb_kwh: Decimal,
+    pub grid_export_price_thb_kwh: Decimal,
+    pub transaction_fee_bps: u32,
+    pub min_price_per_kwh: Decimal,
+    pub max_price_per_kwh: Decimal,
+    pub loss_allocation_model: String,
+    pub intra_zone_wheeling_charge: Decimal,
+    pub cross_zone_wheeling_charge: Decimal,
+    pub intra_zone_loss_factor: Decimal,
+    pub cross_zone_loss_factor: Decimal,
+}
+
+impl Default for MarketConfig {
+    fn default() -> Self {
+        Self {
+            base_price_thb_kwh: Decimal::new(450, 2),
+            grid_import_price_thb_kwh: Decimal::new(500, 2),
+            grid_export_price_thb_kwh: Decimal::new(220, 2),
+            transaction_fee_bps: 50,
+            min_price_per_kwh: Decimal::new(50, 2),
+            max_price_per_kwh: Decimal::new(2000, 2),
+            loss_allocation_model: "proportional".to_string(),
+            intra_zone_wheeling_charge: Decimal::new(0, 2),
+            cross_zone_wheeling_charge: Decimal::new(2, 2),
+            intra_zone_loss_factor: Decimal::new(101, 2),
+            cross_zone_loss_factor: Decimal::new(103, 2),
+        }
+    }
+}
+
+fn env_dec(key: &str, default: Decimal) -> Result<Decimal> {
+    match env::var(key) {
+        Ok(v) => v
+            .parse::<Decimal>()
+            .map_err(|e| anyhow::anyhow!("invalid decimal for {key}: {e}")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn env_u32(key: &str, default: u32) -> Result<u32> {
+    match env::var(key) {
+        Ok(v) => v
+            .parse::<u32>()
+            .map_err(|e| anyhow::anyhow!("invalid u32 for {key}: {e}")),
+        Err(_) => Ok(default),
+    }
+}
+
+impl MarketConfig {
+    pub fn from_env() -> Result<Self> {
+        let d = MarketConfig::default();
+        Ok(MarketConfig {
+            base_price_thb_kwh: env_dec("MARKET_BASE_PRICE_THB_KWH", d.base_price_thb_kwh)?,
+            grid_import_price_thb_kwh: env_dec(
+                "MARKET_GRID_IMPORT_PRICE_THB_KWH",
+                d.grid_import_price_thb_kwh,
+            )?,
+            grid_export_price_thb_kwh: env_dec(
+                "MARKET_GRID_EXPORT_PRICE_THB_KWH",
+                d.grid_export_price_thb_kwh,
+            )?,
+            transaction_fee_bps: env_u32("MARKET_TRANSACTION_FEE_BPS", d.transaction_fee_bps)?,
+            min_price_per_kwh: env_dec("MARKET_MIN_PRICE_PER_KWH", d.min_price_per_kwh)?,
+            max_price_per_kwh: env_dec("MARKET_MAX_PRICE_PER_KWH", d.max_price_per_kwh)?,
+            loss_allocation_model: env::var("MARKET_LOSS_ALLOCATION_MODEL")
+                .unwrap_or(d.loss_allocation_model),
+            intra_zone_wheeling_charge: env_dec(
+                "MARKET_INTRA_ZONE_WHEELING_CHARGE",
+                d.intra_zone_wheeling_charge,
+            )?,
+            cross_zone_wheeling_charge: env_dec(
+                "MARKET_CROSS_ZONE_WHEELING_CHARGE",
+                d.cross_zone_wheeling_charge,
+            )?,
+            intra_zone_loss_factor: env_dec(
+                "MARKET_INTRA_ZONE_LOSS_FACTOR",
+                d.intra_zone_loss_factor,
+            )?,
+            cross_zone_loss_factor: env_dec(
+                "MARKET_CROSS_ZONE_LOSS_FACTOR",
+                d.cross_zone_loss_factor,
+            )?,
+        })
     }
 }
 
@@ -121,6 +220,7 @@ impl Config {
                 trading_market_id: env::var("SOLANA_TRADING_MARKET_ID")
                     .unwrap_or_else(|_| "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string()),
             },
+            market: MarketConfig::from_env()?,
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_GRPC_URL")
                 .or_else(|_| env::var("IAM_SERVICE_URL"))
@@ -144,5 +244,21 @@ impl Config {
             oracle_bridge_public_key: env::var("ORACLE_BRIDGE_PUBLIC_KEY")
                 .unwrap_or_else(|_| "45S9aX7vNq9Ea9qVb8J5G7W9z9P9z9P9z9P9z9P9z9P9".to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn market_config_default_invariants() {
+        let m = MarketConfig::default();
+        assert!(m.min_price_per_kwh < m.max_price_per_kwh);
+        assert_eq!(m.intra_zone_wheeling_charge, Decimal::new(0, 2));
+        assert_eq!(m.cross_zone_wheeling_charge, Decimal::new(2, 2));
+        assert_eq!(m.intra_zone_loss_factor, Decimal::new(101, 2));
+        assert_eq!(m.cross_zone_loss_factor, Decimal::new(103, 2));
+        assert_eq!(m.loss_allocation_model, "proportional");
     }
 }

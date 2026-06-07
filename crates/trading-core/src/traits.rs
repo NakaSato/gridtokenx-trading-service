@@ -13,7 +13,8 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::events::Event;
 use crate::models::{
-    ConditionalOrder, OrderBookEntry, OrderMatch, RecurringOrder, Settlement, TradingOrder,
+    ConditionalOrder, OrderBookEntry, OrderMatch, RecurringOrder, Settlement, SettlementStats,
+    TradingOrder,
 };
 use crate::types::OrderStatus;
 
@@ -59,6 +60,9 @@ pub trait OrderRepository: Send + Sync {
 
     /// Get active orders for a specific zone.
     async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>>;
+
+    /// All active orders across every zone (P2P aggregate order book).
+    async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>>;
 
     /// Update order status.
     async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()>;
@@ -112,6 +116,19 @@ pub trait SettlementRepository: Send + Sync {
     /// Get pending settlements for batch processing.
     async fn get_pending_settlements(&self, limit: i64) -> TraitResult<Vec<Settlement>>;
 
+    /// List settlements where the user is buyer or seller (trade history),
+    /// newest first. Returns the page plus the total matching count for
+    /// pagination.
+    async fn list_settlements_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> TraitResult<(Vec<Settlement>, i64)>;
+
+    /// Aggregate settlement counts by status + total settled value.
+    async fn get_settlement_stats(&self) -> TraitResult<SettlementStats>;
+
     /// Update settlement status.
     async fn update_settlement_status(
         &self,
@@ -148,6 +165,59 @@ pub trait RecurringOrderRepository: Send + Sync {
         next_execution: DateTime<Utc>,
         total_executions: i32,
     ) -> TraitResult<()>;
+
+    /// Insert a new recurring order (status defaults to `active`) and return the
+    /// stored row. `next_execution_at` is computed by the caller.
+    async fn create_recurring_order(
+        &self,
+        input: crate::models::NewRecurringOrder,
+    ) -> TraitResult<RecurringOrder>;
+
+    /// List a user's recurring orders, newest first.
+    async fn list_recurring_orders_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<RecurringOrder>>;
+
+    /// Fetch one recurring order scoped to its owner. `None` if missing/foreign.
+    async fn get_recurring_order(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+    ) -> TraitResult<Option<RecurringOrder>>;
+
+    /// Delete a recurring order scoped to its owner. Returns `true` if a row was
+    /// removed (foreign/missing id yields `false`, not an error).
+    async fn delete_recurring_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool>;
+
+    /// Set the status of a recurring order scoped to its owner (pause/resume).
+    /// Returns `true` if a row was updated.
+    async fn set_recurring_status(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        status: crate::types::RecurringStatus,
+    ) -> TraitResult<bool>;
+}
+
+/// Price alert persistence (table `price_alerts`).
+#[async_trait]
+pub trait PriceAlertRepository: Send + Sync {
+    /// Insert a new alert (status defaults to `active`) and return the stored row.
+    async fn create_price_alert(
+        &self,
+        input: crate::models::NewPriceAlert,
+    ) -> TraitResult<crate::models::PriceAlert>;
+
+    /// List a user's alerts, newest first.
+    async fn list_price_alerts_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> TraitResult<Vec<crate::models::PriceAlert>>;
+
+    /// Delete an alert scoped to its owner. Returns `true` if a row was removed
+    /// (so a foreign/missing id yields `false`, not an error).
+    async fn delete_price_alert(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool>;
 }
 
 /// Futures persistence operations.

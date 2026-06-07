@@ -12,8 +12,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::types::{
-    EpochStatus, IntervalType, OrderSide, OrderStatus, OrderType, RecurringStatus, TimeInForce,
-    TriggerStatus, TriggerType,
+    AlertCondition, AlertStatus, EpochStatus, IntervalType, OrderSide, OrderStatus, OrderType,
+    RecurringStatus, TimeInForce, TriggerStatus, TriggerType,
 };
 
 // ── Core Order Models ────────────────────────────────────────────────────────
@@ -257,6 +257,56 @@ pub struct RecurringOrder {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Create-input for a recurring order. `next_execution_at` is computed at
+/// insert time from `interval_type`/`interval_value` (see `next_execution_at`
+/// in `trading_core::recurring`).
+#[derive(Debug, Clone)]
+pub struct NewRecurringOrder {
+    pub user_id: Uuid,
+    pub side: OrderSide,
+    pub energy_amount: Decimal,
+    pub max_price_per_kwh: Option<Decimal>,
+    pub min_price_per_kwh: Option<Decimal>,
+    pub interval_type: IntervalType,
+    pub interval_value: i32,
+    pub next_execution_at: DateTime<Utc>,
+    pub max_executions: Option<i32>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+// ── Price Alert Models ───────────────────────────────────────────────────────
+
+/// A user-defined price alert (table `price_alerts`). The energy market has no
+/// per-symbol order books, so the frontend `symbol` is stored in `note` rather
+/// than a dedicated column (see BACKEND_GAP_PLAN.md §"Contract mismatches").
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PriceAlert {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    #[schema(value_type = String)]
+    pub target_price: Decimal,
+    pub condition: AlertCondition,
+    pub status: AlertStatus,
+    pub triggered_at: Option<DateTime<Utc>>,
+    #[schema(value_type = String)]
+    pub triggered_price: Option<Decimal>,
+    pub repeat: bool,
+    /// Holds the frontend `symbol` label; no `symbol` column exists.
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Input for creating a price alert. `note` carries the frontend `symbol`.
+#[derive(Debug, Clone)]
+pub struct NewPriceAlert {
+    pub user_id: Uuid,
+    pub target_price: Decimal,
+    pub condition: AlertCondition,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct UpdateRecurringOrderRequest {
     #[schema(value_type = String)]
@@ -372,6 +422,18 @@ pub struct Settlement {
     pub erc_transfer_tx: Option<String>,
     pub retry_count: i32,
     pub error_message: Option<String>,
+}
+
+/// Aggregate settlement counts by status + total settled value.
+/// `confirmed_count` maps to the DB `completed` status.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SettlementStats {
+    pub pending_count: i64,
+    pub processing_count: i64,
+    pub confirmed_count: i64,
+    pub failed_count: i64,
+    #[schema(value_type = String)]
+    pub total_settled_value: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

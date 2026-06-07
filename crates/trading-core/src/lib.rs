@@ -18,5 +18,6 @@ pub mod events;
 pub mod fast_price;
 pub mod models;
 pub mod numeric;
+pub mod recurring;
 pub mod traits;
 pub mod types;

@@ -103,6 +103,65 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/stats",
             axum::routing::get(crate::rest::get_market_stats),
         )
+        // Markets (read-only)
+        .route(
+            "/api/v1/markets/config",
+            axum::routing::get(crate::rest::get_market_config),
+        )
+        .route(
+            "/api/v1/markets/p2p/market-prices",
+            axum::routing::get(crate::rest::get_p2p_market_prices),
+        )
+        .route(
+            "/api/v1/markets/matching-status",
+            axum::routing::get(crate::rest::get_matching_status),
+        )
+        .route(
+            "/api/v1/markets/settlement-stats",
+            axum::routing::get(crate::rest::get_settlement_stats),
+        )
+        .route(
+            "/api/v1/markets/orderbook",
+            axum::routing::get(crate::rest::get_p2p_orderbook),
+        )
+        // Trades — history (JSON) + export (CSV)
+        .route(
+            "/api/v1/trades",
+            axum::routing::get(crate::rest::get_trades),
+        )
+        .route(
+            "/api/v1/trades/export",
+            axum::routing::get(crate::rest::export_trades),
+        )
+        // Price alerts — CRUD
+        .route(
+            "/api/v1/price-alerts",
+            axum::routing::post(crate::rest::create_price_alert)
+                .get(crate::rest::list_price_alerts),
+        )
+        .route(
+            "/api/v1/price-alerts/{id}",
+            axum::routing::delete(crate::rest::delete_price_alert),
+        )
+        // Recurring orders — CRUD + pause/resume
+        .route(
+            "/api/v1/orders/recurring",
+            axum::routing::post(crate::rest::create_recurring_order)
+                .get(crate::rest::list_recurring_orders),
+        )
+        .route(
+            "/api/v1/orders/recurring/{id}",
+            axum::routing::get(crate::rest::get_recurring_order)
+                .delete(crate::rest::delete_recurring_order),
+        )
+        .route(
+            "/api/v1/orders/recurring/{id}/pause",
+            axum::routing::post(crate::rest::pause_recurring_order),
+        )
+        .route(
+            "/api/v1/orders/recurring/{id}/resume",
+            axum::routing::post(crate::rest::resume_recurring_order),
+        )
         // Futures
         .nest(
             "/api/v1/futures",
