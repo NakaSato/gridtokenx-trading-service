@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use trading_core::events::Event;
 use trading_core::models::{OrderBookEntry, TradingOrder};
 use trading_core::traits::{OrderRepository, TraitResult};
 use trading_core::types::{
@@ -120,6 +121,60 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(order.epoch_id)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    async fn insert_order_with_event(
+        &self,
+        order: &TradingOrder,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Order row + outbox row committed in one transaction: the event can
+        // never be lost relative to the state change. Mirrors the inserts in
+        // `insert_order` and `PostgresOutboxRepository::insert_event`.
+        let payload = serde_json::to_value(event).map_err(|e| {
+            trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))
+        })?;
+
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO trading_orders (
+                id, user_id, order_type, side, energy_amount, price_per_kwh,
+                status, time_in_force, zone_id, meter_id, session_token,
+                order_pda, order_index, blockchain_tx_hash, blockchain_status,
+                epoch_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            "#,
+        )
+        .bind(order.id)
+        .bind(order.user_id)
+        .bind(order.order_type)
+        .bind(order.side)
+        .bind(order.energy_amount)
+        .bind(order.price_per_kwh)
+        .bind(order.status)
+        .bind(order.time_in_force)
+        .bind(order.zone_id)
+        .bind(order.meter_id)
+        .bind(&order.session_token)
+        .bind(&order.order_pda)
+        .bind(order.order_index)
+        .bind(&order.blockchain_tx_hash)
+        .bind(&order.blockchain_status)
+        .bind(order.epoch_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)")
+            .bind(event.outbox_event_type())
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
 
         Ok(())
     }

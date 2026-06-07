@@ -110,16 +110,9 @@ impl TradingService for TradingGrpcService {
             time_in_force: TimeInForce::Gtc,
         };
 
-        self.state
-            .order_repo
-            .insert_order(&order)
-            .await
-            .map_err(|e| {
-                error!("Database error: {}", e);
-                ConnectError::new(ErrorCode::Internal, "Failed to insert order")
-            })?;
-
-        // 3. Publish Event for Event Sourcing
+        // Insert the order and its OrderCreated event in one transaction so the
+        // event can never be lost relative to the state change (the outbox row
+        // is written atomically with the order; OutboxWorker relays it later).
         let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
             id: order.id,
             user_id: order.user_id,
@@ -132,11 +125,14 @@ impl TradingService for TradingGrpcService {
             created_at: order.created_at,
         });
 
-        if let Err(e) = self.state.events.publish(event).await {
-            error!("Failed to publish OrderCreated event: {}", e);
-            // We don't fail the request if event publishing fails, but we log it.
-            // In a strict event-sourcing system, we might want to fail or use a transactional outbox.
-        }
+        self.state
+            .order_repo
+            .insert_order_with_event(&order, &event)
+            .await
+            .map_err(|e| {
+                error!("Database error: {}", e);
+                ConnectError::new(ErrorCode::Internal, "Failed to insert order")
+            })?;
 
         let mut res = TradingResponse::default();
         res.success = true;

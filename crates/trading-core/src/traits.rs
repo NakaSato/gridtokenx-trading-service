@@ -28,6 +28,17 @@ pub trait OrderRepository: Send + Sync {
     /// Insert a new order into the database.
     async fn insert_order(&self, order: &TradingOrder) -> TraitResult<()>;
 
+    /// Atomically insert an order and its domain event into the outbox in a
+    /// single transaction. Use this on the order-placement path so the event
+    /// can never be lost relative to the state change (the separate
+    /// `insert_order` + `EventPublisher::publish` calls are two transactions
+    /// and are NOT atomic — a crash between them drops the event).
+    async fn insert_order_with_event(
+        &self,
+        order: &TradingOrder,
+        event: &Event,
+    ) -> TraitResult<()>;
+
     /// Return the id of the current active market epoch, creating one if none
     /// is open. Orders must be stamped with this on placement: `order_matches`
     /// and `settlements` both have a NOT NULL FK to `market_epochs(id)`, so a

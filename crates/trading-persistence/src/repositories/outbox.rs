@@ -22,21 +22,7 @@ impl PostgresOutboxRepository {
 #[async_trait]
 impl OutboxRepository for PostgresOutboxRepository {
     async fn insert_event(&self, event: &Event) -> TraitResult<()> {
-        let event_type = match event {
-            Event::OrderMatched(_) => "OrderMatched",
-            Event::SettlementRequested(_) => "SettlementRequested",
-            Event::OrderUpdate { .. } => "OrderUpdate",
-            Event::PeakPriceUpdate { .. } => "PeakPriceUpdate",
-            Event::TriggerExecution { .. } => "TriggerExecution",
-            Event::OrderCreated(_) => "OrderCreated",
-            Event::ErcIssued(_) => "ErcIssued",
-            Event::SettlementProcessed(_) => "SettlementProcessed",
-            Event::UserRegistered(_) => "UserRegistered",
-            Event::UserOnboarded(_) => "UserOnboarded",
-            Event::UserWalletLinked(_) => "UserWalletLinked",
-            Event::OracleReading(_) => "OracleReading",
-            Event::VppDispatched(_) => "VppDispatched",
-        };
+        let event_type = event.outbox_event_type();
 
         let payload = serde_json::to_value(event).map_err(|e| {
             trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))

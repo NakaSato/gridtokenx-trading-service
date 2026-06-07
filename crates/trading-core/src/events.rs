@@ -40,6 +40,29 @@ pub enum Event {
     VppDispatched(VppDispatchedPayload),
 }
 
+impl Event {
+    /// Stable string tag written to the `event_type` column of the outbox
+    /// table (and used for downstream topic routing). Keep in sync with the
+    /// `Event` variants — the persistence and outbox layers rely on it.
+    pub fn outbox_event_type(&self) -> &'static str {
+        match self {
+            Event::OrderMatched(_) => "OrderMatched",
+            Event::SettlementRequested(_) => "SettlementRequested",
+            Event::OrderUpdate { .. } => "OrderUpdate",
+            Event::PeakPriceUpdate { .. } => "PeakPriceUpdate",
+            Event::TriggerExecution { .. } => "TriggerExecution",
+            Event::OrderCreated(_) => "OrderCreated",
+            Event::ErcIssued(_) => "ErcIssued",
+            Event::SettlementProcessed(_) => "SettlementProcessed",
+            Event::UserRegistered(_) => "UserRegistered",
+            Event::UserOnboarded(_) => "UserOnboarded",
+            Event::UserWalletLinked(_) => "UserWalletLinked",
+            Event::OracleReading(_) => "OracleReading",
+            Event::VppDispatched(_) => "VppDispatched",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VppDispatchedPayload {
     pub cluster_id: String,

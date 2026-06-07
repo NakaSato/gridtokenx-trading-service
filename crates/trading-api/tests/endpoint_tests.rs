@@ -39,6 +39,14 @@ impl OrderRepository for MockSystem {
         self.orders.lock().unwrap().push(order.clone());
         Ok(())
     }
+    async fn insert_order_with_event(
+        &self,
+        order: &TradingOrder,
+        _event: &trading_core::events::Event,
+    ) -> TraitResult<()> {
+        self.orders.lock().unwrap().push(order.clone());
+        Ok(())
+    }
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
         Ok(Uuid::nil())
     }
