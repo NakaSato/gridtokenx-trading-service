@@ -222,14 +222,10 @@ pub async fn submit_order(
             })?,
     );
 
-    state.order_repo.insert_order(&order).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
-
-    // Publish Event for Event Sourcing
+    // Insert the order and its OrderCreated event in one transaction so the
+    // event can never be lost relative to the state change (the outbox row is
+    // written atomically with the order; OutboxWorker relays it later). Mirrors
+    // the ConnectRPC submit path in handlers.rs.
     let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
         id: order.id,
         user_id: order.user_id,
@@ -242,9 +238,16 @@ pub async fn submit_order(
         created_at: order.created_at,
     });
 
-    if let Err(e) = state.events.publish(event).await {
-        error!("Failed to publish OrderCreated event: {}", e);
-    }
+    state
+        .order_repo
+        .insert_order_with_event(&order, &event)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
 
     Ok(Json(SubmitOrderResponse {
         id: order.id,
