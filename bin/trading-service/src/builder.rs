@@ -59,6 +59,14 @@ impl ServiceBuilder {
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
         let vpp_repo = Arc::new(trading_persistence::repositories::PostgresVppRepository::new(db_pool.clone()));
 
+        // IAM identity gateway. NOTE: trading does not call IAM at request time
+        // — auth is header-based, injected by the APISIX gateway (see
+        // trading-api `auth.rs`). This gateway exists only to satisfy the
+        // BlockchainService custodial-signing seam below, and its sole method
+        // (`sign_message`) is intentionally inert (IAM's SignMessage RPC was
+        // removed; signing moved to Chain Bridge `chain.tx.submit`). Kept wired
+        // so the seam is ready when the on-chain create_order gains a
+        // non-signing owner account; remove if that path is abandoned.
         let identity: Arc<dyn IdentityGateway> = Arc::new(
             trading_infra::identity::IamIdentityGateway::new(
                 &config.iam_service_url,
