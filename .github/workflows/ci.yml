@@ -1,0 +1,65 @@
+name: ci
+
+# Per-service CI for the trading-service workspace. Runs on PRs and pushes that
+# touch Rust sources or the manifests. The hard gates match the workspace lint
+# policy in Cargo.toml ([workspace.lints]: unsafe_code/unwrap_used = deny,
+# pedantic = warn) — so the clippy gate is `--all-targets` WITHOUT `-D warnings`
+# (promoting the ~90 advisory pedantic warnings to errors is not the policy).
+#
+# DB-backed integration tests under */tests/ need a live Postgres and run in the
+# superproject E2E suite, not here; this job runs the unit/lib/bin tests only.
+
+on:
+  push:
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format (advisory)
+        # Repo has pre-existing fmt drift; advisory until a tree-wide `cargo fmt`
+        # lands. Promote to a hard gate once the working tree is fmt-clean.
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny-tier gate, all targets)
+        # No `-D warnings`: workspace policy is pedantic = warn. This fails only
+        # on the deny-tier lints (unsafe_code, unwrap_used, correctness), and
+        # `--all-targets` covers test code so test-only unwraps can't slip in.
+        run: cargo clippy --all-targets
+
+      - name: Build
+        # No `--locked`: Cargo.lock is gitignored by repo policy (.gitignore),
+        # so deps resolve fresh. Commit the lock and add --locked for fully
+        # reproducible CI builds.
+        run: cargo build
+
+      - name: Unit tests (no DB)
+        # `--lib --bins` skips the */tests/ integration suites that need Postgres.
+        run: cargo test --lib --bins
