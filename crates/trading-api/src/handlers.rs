@@ -443,7 +443,7 @@ impl TradingService for TradingGrpcService {
             request.energy_generated_kwh,
             request.energy_consumed_kwh,
             &request.signature,
-            &self.state.settlement.oracle_bridge_public_key,
+            &self.state.settlement.aggregator_bridge_public_key,
         )
         .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e))?;
 
@@ -517,7 +517,7 @@ impl TradingService for TradingGrpcService {
                 req.energy_generated_kwh,
                 req.energy_consumed_kwh,
                 &req.signature,
-                &self.state.settlement.oracle_bridge_public_key,
+                &self.state.settlement.aggregator_bridge_public_key,
             )
             .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e))?;
 

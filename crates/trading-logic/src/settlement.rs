@@ -15,7 +15,7 @@ pub struct SettlementService {
     audit: Arc<dyn AuditLog>,
     platform_user_id: Uuid,
     oracle_feed_in_tariff: rust_decimal::Decimal,
-    pub oracle_bridge_public_key: String,
+    pub aggregator_bridge_public_key: String,
 }
 
 impl SettlementService {
@@ -26,7 +26,7 @@ impl SettlementService {
         audit: Arc<dyn AuditLog>,
         platform_user_id: Uuid,
         oracle_feed_in_tariff: rust_decimal::Decimal,
-        oracle_bridge_public_key: String,
+        aggregator_bridge_public_key: String,
     ) -> Self {
         Self {
             repo,
@@ -35,7 +35,7 @@ impl SettlementService {
             audit,
             platform_user_id,
             oracle_feed_in_tariff,
-            oracle_bridge_public_key,
+            aggregator_bridge_public_key,
         }
     }
 

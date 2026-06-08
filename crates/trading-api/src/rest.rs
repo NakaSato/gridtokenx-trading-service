@@ -814,7 +814,7 @@ pub async fn settle_generation_mint(
     );
 
     // 1. Verify Signature (Oracle Bridge Public Key)
-    let public_key_str = &state.settlement.oracle_bridge_public_key;
+    let public_key_str = &state.settlement.aggregator_bridge_public_key;
     let public_key_bytes = bs58::decode(public_key_str).into_vec().map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -924,7 +924,7 @@ pub async fn batch_settle_generation_mint(
     // 1. Verify and prepare all requests
     for r in req.requests {
         // Verification logic (reused from single settlement)
-        let public_key_str = &state.settlement.oracle_bridge_public_key;
+        let public_key_str = &state.settlement.aggregator_bridge_public_key;
         let public_key_bytes = bs58::decode(public_key_str).into_vec().map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

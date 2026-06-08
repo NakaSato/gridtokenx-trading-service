@@ -558,7 +558,7 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         "role": "api",
         "platform_user_id": Uuid::nil(),
         "oracle_feed_in_tariff": "0.10",
-        "oracle_bridge_public_key": oracle_pub_key
+        "aggregator_bridge_public_key": oracle_pub_key
     });
 
     let config: trading_core::config::Config = serde_json::from_value(config_json).unwrap();
