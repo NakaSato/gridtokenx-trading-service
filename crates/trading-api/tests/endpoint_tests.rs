@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use ed25519_dalek::{SigningKey, Signer};
+use ed25519_dalek::SigningKey;
 use gridtokenx_blockchain_core::auth::{GATEWAY_SECRET_HEADER, INTERNAL_ROLE_HEADER};
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -578,7 +578,6 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         mock.clone(),
         Uuid::nil(),
         Decimal::new(45, 1),
-        oracle_pub_key,
     ));
 
     let vpp = Arc::new(trading_logic::vpp::VppService::new(
@@ -743,41 +742,7 @@ async fn test_all_endpoints() {
     }).to_string())).await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    // 20. Settlement Mint
-    let amount = Decimal::new(100, 0);
-    let start_time = 1700000000;
-    let end_time = 1700003600;
-    let meter_serial = "METER-001";
-    let message = format!("{}:{}:{}:{}:{}", user_id, meter_serial, amount, start_time, end_time);
-    let signature = signing_key.sign(message.as_bytes());
-    let signature_str = bs58::encode(signature.to_bytes()).into_string();
-
-    let res = request(app.clone(), "POST", "/api/v1/settlement/mint", user_id, Body::from(json!({
-        "user_id": user_id,
-        "meter_serial": meter_serial,
-        "energy_generated_kwh": amount,
-        "start_time": start_time,
-        "end_time": end_time,
-        "signature": signature_str
-    }).to_string())).await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // 21. Batch Settlement Mint
-    let res = request(app.clone(), "POST", "/api/v1/settlement/generation-mint/batch", user_id, Body::from(json!({
-        "requests": [
-            {
-                "user_id": user_id,
-                "meter_serial": meter_serial,
-                "energy_generated_kwh": amount,
-                "start_time": start_time,
-                "end_time": end_time,
-                "signature": signature_str
-            }
-        ]
-    }).to_string())).await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // 22. Health
+    // 20. Health
     let res = app.clone().oneshot(Request::builder().method("GET").uri("/health").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }

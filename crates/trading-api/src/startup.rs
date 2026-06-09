@@ -84,10 +84,6 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
         )
         .route(
-            "/api/v1/orders/",
-            axum::routing::post(crate::rest::submit_order).get(crate::rest::list_orders),
-        )
-        .route(
             "/api/v1/orders/{id}",
             axum::routing::get(crate::rest::get_order_by_id).delete(crate::rest::cancel_order),
         )
@@ -229,19 +225,6 @@ pub fn build_router(state: AppState) -> Router {
                     "/transfers",
                     axum::routing::post(crate::rest::transfer_carbon_credits),
                 ),
-        )
-        // Settlement
-        .route(
-            "/api/v1/settlement/mint",
-            axum::routing::post(crate::rest::settle_generation_mint),
-        )
-        .route(
-            "/api/v1/settlement/generation-mint",
-            axum::routing::post(crate::rest::settle_generation_mint),
-        )
-        .route(
-            "/api/v1/settlement/generation-mint/batch",
-            axum::routing::post(crate::rest::batch_settle_generation_mint),
         )
         .route("/health", axum::routing::get(health_check))
         .route("/health/ready", axum::routing::get(health_check))

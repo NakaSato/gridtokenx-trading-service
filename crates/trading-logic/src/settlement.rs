@@ -15,7 +15,6 @@ pub struct SettlementService {
     audit: Arc<dyn AuditLog>,
     platform_user_id: Uuid,
     oracle_feed_in_tariff: rust_decimal::Decimal,
-    pub aggregator_bridge_public_key: String,
 }
 
 impl SettlementService {
@@ -26,7 +25,6 @@ impl SettlementService {
         audit: Arc<dyn AuditLog>,
         platform_user_id: Uuid,
         oracle_feed_in_tariff: rust_decimal::Decimal,
-        aggregator_bridge_public_key: String,
     ) -> Self {
         Self {
             repo,
@@ -35,7 +33,6 @@ impl SettlementService {
             audit,
             platform_user_id,
             oracle_feed_in_tariff,
-            aggregator_bridge_public_key,
         }
     }
 
@@ -346,46 +343,6 @@ impl SettlementService {
         info!("Settlement {} created for surplus energy", settlement.id);
 
         Ok(())
-    }
-
-    /// Execute a generation mint for verified oracle data.
-    pub async fn execute_generation_mint(
-        &self,
-        user_id: Uuid,
-        amount_kwh: Decimal,
-        timestamp: i64,
-    ) -> TraitResult<String> {
-        info!(
-            "Executing Generation Mint for user: {} ({} kWh)",
-            user_id, amount_kwh
-        );
-
-        // 1. Resolve primary wallet
-        let wallet = self
-            .blockchain
-            .get_user_wallet(user_id)
-            .await?
-            .ok_or_else(|| {
-                ApiError::NotFound(format!("Primary wallet not found for user {}", user_id))
-            })?;
-
-        // 2. Execute on blockchain
-        let tx_sig = self
-            .blockchain
-            .execute_generation_mint(&wallet, amount_kwh, timestamp)
-            .await?;
-
-        // 3. Audit log
-        let _ = self
-            .audit
-            .log_action(
-                user_id,
-                "generation_mint",
-                &format!("Minted {} energy tokens (Tx: {})", amount_kwh, tx_sig),
-            )
-            .await;
-
-        Ok(tx_sig)
     }
 
     /// Execute multiple settlements on-chain in a single batched transaction.

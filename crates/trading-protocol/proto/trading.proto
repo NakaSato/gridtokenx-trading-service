@@ -35,10 +35,6 @@ service TradingService {
   rpc GetSettlementStats (google.protobuf.Empty) returns (SettlementStatsResponse);
   rpc GetTokenBalance(GetTokenBalanceRequest) returns (TokenBalanceResponse);
 
-  // Oracle Bridge Settlement (Generation Mint)
-  rpc SettleGenerationMint (SettleGenerationMintRequest) returns (SettleGenerationMintResponse);
-  rpc BatchSettleGenerationMint (BatchSettleGenerationMintRequest) returns (BatchSettleGenerationMintResponse);
-
   // Conditional Orders
   rpc CreateConditionalOrder(CreateConditionalOrderRequest) returns (TradingResponse);
   rpc ListConditionalOrders(ListConditionalOrdersRequest) returns (ListConditionalOrdersResponse);
@@ -409,41 +405,6 @@ message PauseRecurringOrderRequest {
 message ResumeRecurringOrderRequest {
   string order_id = 1;
   string user_id = 2;
-}
-
-// =============================================================================
-// Oracle Bridge Settlement (Generation Mint)
-// =============================================================================
-
-message SettleGenerationMintRequest {
-  string meter_id = 1;
-  string meter_serial = 2;
-  string user_id = 3;
-  string start_time = 4;  // ISO-8601
-  string end_time = 5;    // ISO-8601
-  double energy_generated_kwh = 6;
-  double energy_consumed_kwh = 7;
-  uint64 reading_count = 8;
-  string signature = 9;   // Ed25519 Oracle Bridge signature
-}
-
-message SettleGenerationMintResponse {
-  string tx_signature = 1;
-  string meter_serial = 2;
-  double amount_minted = 3;
-  string status = 4;
-}
-
-message BatchSettleGenerationMintRequest {
-  repeated SettleGenerationMintRequest requests = 1;
-}
-
-message BatchSettleGenerationMintResponse {
-  bool success = 1;
-  string message = 2;
-  string tx_signature = 3;
-  uint64 slot = 4;
-  repeated string meter_serials = 5;
 }
 
 // =============================================================================

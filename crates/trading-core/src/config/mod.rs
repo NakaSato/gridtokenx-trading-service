@@ -41,7 +41,6 @@ pub struct Config {
     pub platform_user_id: uuid::Uuid,
     /// Feed-in tariff price per kWh for oracle settlements
     pub oracle_feed_in_tariff: rust_decimal::Decimal,
-    pub aggregator_bridge_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,8 +240,6 @@ impl Config {
             oracle_feed_in_tariff: env::var("ORACLE_FEED_IN_TARIFF")
                 .unwrap_or_else(|_| "0.10".to_string())
                 .parse()?,
-            aggregator_bridge_public_key: env::var("AGGREGATOR_BRIDGE_PUBLIC_KEY")
-                .unwrap_or_else(|_| "45S9aX7vNq9Ea9qVb8J5G7W9z9P9z9P9z9P9z9P9z9P9".to_string()),
         })
     }
 }
