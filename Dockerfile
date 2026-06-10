@@ -26,6 +26,7 @@ WORKDIR /app
 COPY gridtokenx-trading-service/ gridtokenx-trading-service/
 COPY gridtokenx-blockchain-core/ gridtokenx-blockchain-core/
 COPY gridtokenx-iam-service/ gridtokenx-iam-service/
+COPY gridtokenx-telemetry/ gridtokenx-telemetry/
 
 WORKDIR /app/gridtokenx-trading-service
 
