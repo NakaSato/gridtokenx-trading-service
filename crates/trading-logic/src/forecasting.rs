@@ -2,11 +2,11 @@ use chrono::{Timelike, Utc};
 use trading_core::traits::TraitResult;
 
 /// AI/Forecasting Service for Load and Generation prediction.
-/// 
-/// In a production environment, this service would wrap a Machine Learning 
-/// model (e.g., LSTM, XGBoost) served via ONNX or a dedicated Python microservice.
+///
+/// In a production environment, this service would wrap a Machine Learning
+/// model served via a dedicated microservice.
 pub struct ForecastingService {
-    // Placeholder for ML model session (e.g., onnxruntime::Session)
+    // Placeholder for ML model session
 }
 
 impl ForecastingService {
