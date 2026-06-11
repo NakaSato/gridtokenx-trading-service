@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::info;
 use trading_core::events::Event;
-use trading_core::traits::{EventPublisher, SettlementRepository};
+use trading_core::traits::EventPublisher;
 
 use crate::settlement::SettlementService;
 

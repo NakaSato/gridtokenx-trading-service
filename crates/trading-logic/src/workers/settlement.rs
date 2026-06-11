@@ -1,7 +1,7 @@
 use crate::settlement::SettlementService;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, Interval};
+use tokio::time::interval;
 use tracing::{error, info};
 
 pub struct SettlementWorker {

@@ -584,7 +584,6 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         mock.clone(),
         mock.clone(),
         mock.clone(),
-        Arc::new(trading_logic::forecasting::ForecastingService::new()),
     ));
 
     let state = AppState {

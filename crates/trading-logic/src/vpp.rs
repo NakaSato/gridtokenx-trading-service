@@ -11,7 +11,6 @@ pub struct VppService {
     repo: Arc<dyn VppRepository>,
     audit: Arc<dyn AuditLog>,
     events: Arc<dyn EventPublisher>,
-    forecaster: Arc<crate::forecasting::ForecastingService>,
 }
 
 impl VppService {
@@ -19,9 +18,8 @@ impl VppService {
         repo: Arc<dyn VppRepository>,
         audit: Arc<dyn AuditLog>,
         events: Arc<dyn EventPublisher>,
-        forecaster: Arc<crate::forecasting::ForecastingService>,
     ) -> Self {
-        Self { repo, audit, events, forecaster }
+        Self { repo, audit, events }
     }
 
     /// Get cluster status with aggregated real-time metrics.

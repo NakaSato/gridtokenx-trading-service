@@ -1,5 +1,4 @@
 use chrono::Utc;
-use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use trading_core::error::ApiError;

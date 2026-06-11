@@ -54,7 +54,6 @@ impl ServiceBuilder {
         let redis_url = &config.redis_url;
         let kafka_brokers = &config.kafka_bootstrap_servers;
         let chain_bridge_url = &config.chain_bridge_url;
-        let encryption_secret = &config.encryption_secret;
 
         let order_repo = Arc::new(PostgresOrderRepository::new(db_pool.clone()));
         let settlement_repo = Arc::new(PostgresSettlementRepository::new(db_pool.clone()));
@@ -168,13 +167,10 @@ impl ServiceBuilder {
             Arc::new(GridAwareTopology::new()),
         ));
 
-        let forecaster = Arc::new(trading_logic::forecasting::ForecastingService::new());
-
         let vpp_service = Arc::new(trading_logic::vpp::VppService::new(
             vpp_repo.clone(),
             audit.clone(),
             events.clone(),
-            forecaster,
         ));
 
         // Initialize Oracle Consumer

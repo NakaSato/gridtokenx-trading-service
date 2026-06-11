@@ -1,19 +1,12 @@
-use parking_lot::RwLock;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use trading_engine::engine::TopologySnapshot;
 
 /// Grid-Aware Topology that enforces island microgrid constraints.
-pub struct GridAwareTopology {
-    /// Track committed flow per island (MW) for the current cycle
-    committed_island_flow: RwLock<HashMap<i32, Decimal>>,
-}
+pub struct GridAwareTopology;
 
 impl GridAwareTopology {
     pub fn new() -> Self {
-        Self {
-            committed_island_flow: RwLock::new(HashMap::new()),
-        }
+        Self
     }
 }
 
