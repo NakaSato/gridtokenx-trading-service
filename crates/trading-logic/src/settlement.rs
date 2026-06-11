@@ -3,14 +3,13 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use trading_core::error::ApiError;
 use trading_core::models::{Settlement, SettlementStatus};
-use trading_core::traits::{AuditLog, BlockchainGateway, EventPublisher, SettlementRepository, TraitResult};
+use trading_core::traits::{AuditLog, BlockchainGateway, SettlementRepository, TraitResult};
 use uuid::Uuid;
 
 /// Service for orchestrating the settlement lifecycle
 pub struct SettlementService {
     repo: Arc<dyn SettlementRepository>,
     blockchain: Arc<dyn BlockchainGateway>,
-    events: Arc<dyn EventPublisher>,
     audit: Arc<dyn AuditLog>,
     platform_user_id: Uuid,
     oracle_feed_in_tariff: rust_decimal::Decimal,
@@ -20,7 +19,6 @@ impl SettlementService {
     pub fn new(
         repo: Arc<dyn SettlementRepository>,
         blockchain: Arc<dyn BlockchainGateway>,
-        events: Arc<dyn EventPublisher>,
         audit: Arc<dyn AuditLog>,
         platform_user_id: Uuid,
         oracle_feed_in_tariff: rust_decimal::Decimal,
@@ -28,7 +26,6 @@ impl SettlementService {
         Self {
             repo,
             blockchain,
-            events,
             audit,
             platform_user_id,
             oracle_feed_in_tariff,
@@ -79,17 +76,8 @@ impl SettlementService {
                     settlement_id, tx_result.signature
                 );
 
-                // 4. Update status to Completed
-                self.repo
-                    .update_settlement_status(
-                        settlement_id,
-                        &SettlementStatus::Completed.to_string(),
-                        Some(&tx_result.signature),
-                        None,
-                    )
-                    .await?;
-
-                // 5. Publish SettlementProcessed Event
+                // 4. Update status to Completed and write the
+                // SettlementProcessed event to the outbox in one transaction.
                 let processed_event = trading_core::events::Event::SettlementProcessed(
                     trading_core::events::SettlementProcessedPayload {
                         settlement_id,
@@ -98,7 +86,15 @@ impl SettlementService {
                         timestamp: Utc::now(),
                     },
                 );
-                let _ = self.events.publish(processed_event).await;
+                self.repo
+                    .update_settlement_status_with_event(
+                        settlement_id,
+                        &SettlementStatus::Completed.to_string(),
+                        Some(&tx_result.signature),
+                        None,
+                        &processed_event,
+                    )
+                    .await?;
 
                 // 6. Audit log
                 let _ = self
@@ -206,17 +202,9 @@ impl SettlementService {
                         tx_result.settlement_id, tx_result.signature
                     );
 
-                    // Update status to Completed
-                    self.repo
-                        .update_settlement_status(
-                            tx_result.settlement_id,
-                            &SettlementStatus::Completed.to_string(),
-                            Some(&tx_result.signature),
-                            None,
-                        )
-                        .await?;
-                    
-                    // Publish SettlementProcessed Event
+                    // Update status to Completed and write the
+                    // SettlementProcessed event to the outbox in one
+                    // transaction.
                     let processed_event = trading_core::events::Event::SettlementProcessed(
                         trading_core::events::SettlementProcessedPayload {
                             settlement_id: tx_result.settlement_id,
@@ -225,7 +213,15 @@ impl SettlementService {
                             timestamp: Utc::now(),
                         },
                     );
-                    let _ = self.events.publish(processed_event).await;
+                    self.repo
+                        .update_settlement_status_with_event(
+                            tx_result.settlement_id,
+                            &SettlementStatus::Completed.to_string(),
+                            Some(&tx_result.signature),
+                            None,
+                            &processed_event,
+                        )
+                        .await?;
 
                     success_count += 1;
                 }
@@ -333,11 +329,12 @@ impl SettlementService {
             error_message: None,
         };
 
-        self.repo.insert_settlement(&settlement).await?;
-
-        // Publish SettlementRequested Event
+        // Settlement row + SettlementRequested event committed in one
+        // transaction so the event cannot be lost relative to the insert.
         let requested_event = trading_core::events::Event::SettlementRequested(settlement.clone());
-        let _ = self.events.publish(requested_event).await;
+        self.repo
+            .insert_settlement_with_event(&settlement, &requested_event)
+            .await?;
 
         info!("Settlement {} created for surplus energy", settlement.id);
 

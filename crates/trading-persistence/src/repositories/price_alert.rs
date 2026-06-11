@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use trading_core::events::Event;
 use trading_core::models::{NewPriceAlert, PriceAlert};
 use trading_core::traits::{PriceAlertRepository, TraitResult};
 use trading_core::types::{AlertCondition, AlertStatus};
@@ -102,18 +103,40 @@ impl PriceAlertRepository for PostgresPriceAlertRepository {
         // One-shot alerts move to `triggered`; repeating alerts stay `active`
         // so a later cycle can fire them again. `triggered_at`/`triggered_price`
         // always record the most recent firing.
-        sqlx::query(
-            r#"UPDATE price_alerts
-               SET triggered_at = NOW(),
-                   triggered_price = $2,
-                   status = CASE WHEN repeat THEN status ELSE 'triggered'::alert_status END,
-                   updated_at = NOW()
-               WHERE id = $1"#,
-        )
-        .bind(id)
-        .bind(triggered_price)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query(MARK_TRIGGERED_SQL)
+            .bind(id)
+            .bind(triggered_price)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_triggered_with_event(
+        &self,
+        id: Uuid,
+        triggered_price: Decimal,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Firing record + outbox row committed in one transaction: the event
+        // can never be lost relative to the state change.
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(MARK_TRIGGERED_SQL)
+            .bind(id)
+            .bind(triggered_price)
+            .execute(&mut *tx)
+            .await?;
+
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
+
+        tx.commit().await?;
         Ok(())
     }
 }
+
+const MARK_TRIGGERED_SQL: &str = r#"UPDATE price_alerts
+   SET triggered_at = NOW(),
+       triggered_price = $2,
+       status = CASE WHEN repeat THEN status ELSE 'triggered'::alert_status END,
+       updated_at = NOW()
+   WHERE id = $1"#;

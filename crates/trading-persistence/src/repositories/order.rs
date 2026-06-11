@@ -133,10 +133,6 @@ impl OrderRepository for PostgresOrderRepository {
         // Order row + outbox row committed in one transaction: the event can
         // never be lost relative to the state change. Mirrors the inserts in
         // `insert_order` and `PostgresOutboxRepository::insert_event`.
-        let payload = serde_json::to_value(event).map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))
-        })?;
-
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
@@ -168,11 +164,7 @@ impl OrderRepository for PostgresOrderRepository {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)")
-            .bind(event.outbox_event_type())
-            .bind(payload)
-            .execute(&mut *tx)
-            .await?;
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
 
         tx.commit().await?;
 
@@ -290,6 +282,32 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn update_filled_amount_with_event(
+        &self,
+        id: Uuid,
+        filled_amount: Decimal,
+        status: OrderStatus,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Fill update + outbox row committed in one transaction (see
+        // `insert_order_with_event`).
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "UPDATE trading_orders SET filled_amount = $1, status = $2, filled_at = CASE WHEN $2 = 'filled' THEN NOW() ELSE filled_at END WHERE id = $3"
+        )
+        .bind(filled_amount)
+        .bind(status)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
+
+        tx.commit().await?;
         Ok(())
     }
 

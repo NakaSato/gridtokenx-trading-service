@@ -75,6 +75,17 @@ pub trait OrderRepository: Send + Sync {
         status: OrderStatus,
     ) -> TraitResult<()>;
 
+    /// Atomically update an order's fill state and write its domain event to
+    /// the outbox in a single transaction, so the event can never be lost
+    /// relative to the state change (see `insert_order_with_event`).
+    async fn update_filled_amount_with_event(
+        &self,
+        id: Uuid,
+        filled_amount: Decimal,
+        status: OrderStatus,
+        event: &Event,
+    ) -> TraitResult<()>;
+
     /// Get all active buy orders.
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>>;
 
@@ -94,6 +105,15 @@ pub trait SettlementRepository: Send + Sync {
     /// Insert a new settlement.
     async fn insert_settlement(&self, settlement: &Settlement) -> TraitResult<()>;
 
+    /// Atomically insert a settlement and write its domain event to the outbox
+    /// in a single transaction, so the event can never be lost relative to the
+    /// state change.
+    async fn insert_settlement_with_event(
+        &self,
+        settlement: &Settlement,
+        event: &Event,
+    ) -> TraitResult<()>;
+
     /// Resolve the current market epoch (creating one if none is open) so a
     /// settlement built outside the matching engine — e.g. generation-mint or
     /// the settlement engine — can reference a real `market_epochs` row instead
@@ -108,6 +128,17 @@ pub trait SettlementRepository: Send + Sync {
         m: &OrderMatch,
         settlement_id: Option<Uuid>,
         zone_id: Option<i32>,
+    ) -> TraitResult<()>;
+
+    /// Atomically insert an order-match ledger row and write its domain event
+    /// to the outbox in a single transaction, so the event can never be lost
+    /// relative to the state change.
+    async fn insert_match_with_event(
+        &self,
+        m: &OrderMatch,
+        settlement_id: Option<Uuid>,
+        zone_id: Option<i32>,
+        event: &Event,
     ) -> TraitResult<()>;
 
     /// Get a settlement by ID.
@@ -136,6 +167,18 @@ pub trait SettlementRepository: Send + Sync {
         status: &str,
         tx_hash: Option<&str>,
         error: Option<&str>,
+    ) -> TraitResult<()>;
+
+    /// Atomically update a settlement's status and write its domain event to
+    /// the outbox in a single transaction, so the event can never be lost
+    /// relative to the state change.
+    async fn update_settlement_status_with_event(
+        &self,
+        id: Uuid,
+        status: &str,
+        tx_hash: Option<&str>,
+        error: Option<&str>,
+        event: &Event,
     ) -> TraitResult<()>;
 }
 
@@ -227,6 +270,16 @@ pub trait PriceAlertRepository: Send + Sync {
     /// `triggered_price`; a one-shot alert (`repeat = false`) moves to
     /// `triggered`, a repeating one stays `active` so it can fire again.
     async fn mark_triggered(&self, id: Uuid, triggered_price: Decimal) -> TraitResult<()>;
+
+    /// Atomically record an alert firing and write its domain event to the
+    /// outbox in a single transaction, so the event can never be lost relative
+    /// to the state change.
+    async fn mark_triggered_with_event(
+        &self,
+        id: Uuid,
+        triggered_price: Decimal,
+        event: &Event,
+    ) -> TraitResult<()>;
 }
 
 /// Futures persistence operations.

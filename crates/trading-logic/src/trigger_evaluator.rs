@@ -15,7 +15,7 @@ use rust_decimal_macros::dec;
 use tracing::{info, warn};
 
 use trading_core::events::{Event, PriceAlertTriggeredPayload};
-use trading_core::traits::{EventPublisher, OrderRepository, PriceAlertRepository, TraitResult};
+use trading_core::traits::{OrderRepository, PriceAlertRepository, TraitResult};
 use trading_core::types::{AlertCondition, OrderSide};
 
 /// Half-width of the band (as a fraction of target) within which a `Crosses`
@@ -28,19 +28,16 @@ const CROSS_BAND: Decimal = dec!(0.001); // 0.1%
 pub struct TriggerEvaluator {
     alert_repo: Arc<dyn PriceAlertRepository>,
     order_repo: Arc<dyn OrderRepository>,
-    events: Arc<dyn EventPublisher>,
 }
 
 impl TriggerEvaluator {
     pub fn new(
         alert_repo: Arc<dyn PriceAlertRepository>,
         order_repo: Arc<dyn OrderRepository>,
-        events: Arc<dyn EventPublisher>,
     ) -> Self {
         Self {
             alert_repo,
             order_repo,
-            events,
         }
     }
 
@@ -59,11 +56,9 @@ impl TriggerEvaluator {
                 continue;
             }
 
-            if let Err(e) = self.alert_repo.mark_triggered(alert.id, price).await {
-                warn!(alert_id = %alert.id, error = %e, "Failed to mark price alert triggered; skipping");
-                continue;
-            }
-
+            // Firing record + PriceAlertTriggered event committed in one
+            // transaction so the notification cannot be lost relative to the
+            // state change.
             let event = Event::PriceAlertTriggered(PriceAlertTriggeredPayload {
                 alert_id: alert.id,
                 user_id: alert.user_id,
@@ -72,7 +67,14 @@ impl TriggerEvaluator {
                 condition: alert.condition.to_string(),
                 triggered_at: Utc::now(),
             });
-            let _ = self.events.publish(event).await;
+            if let Err(e) = self
+                .alert_repo
+                .mark_triggered_with_event(alert.id, price, &event)
+                .await
+            {
+                warn!(alert_id = %alert.id, error = %e, "Failed to mark price alert triggered; skipping");
+                continue;
+            }
             fired += 1;
         }
 

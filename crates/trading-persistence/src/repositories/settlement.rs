@@ -6,8 +6,86 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
+use trading_core::events::Event;
 use trading_core::models::{OrderMatch, Settlement, SettlementStats, SettlementStatus};
 use trading_core::traits::{SettlementRepository, TraitResult};
+
+/// Bind every settlement column onto an INSERT query — shared by the plain and
+/// transactional insert paths so the column list cannot drift between them.
+fn bind_settlement<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    s: &'q Settlement,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    query
+        .bind(s.id)
+        .bind(s.epoch_id)
+        .bind(s.buyer_id)
+        .bind(s.seller_id)
+        .bind(s.buy_order_id)
+        .bind(s.sell_order_id)
+        .bind(s.energy_amount)
+        .bind(s.price)
+        .bind(s.total_amount)
+        .bind(s.fee_amount)
+        .bind(s.wheeling_charge)
+        .bind(s.loss_factor)
+        .bind(s.loss_cost)
+        .bind(s.effective_energy)
+        .bind(s.buyer_zone_id)
+        .bind(s.seller_zone_id)
+        .bind(s.net_amount)
+        .bind(s.status.to_string())
+        .bind(&s.buyer_session_token)
+        .bind(&s.seller_session_token)
+        .bind(&s.blockchain_tx)
+        .bind(s.created_at)
+        .bind(s.confirmed_at)
+        .bind(&s.erc_certificate_id)
+        .bind(&s.erc_transfer_tx)
+}
+
+const INSERT_SETTLEMENT_SQL: &str = r#"
+    INSERT INTO settlements (
+        id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
+        energy_amount, price_per_kwh, total_amount, fee_amount,
+        wheeling_charge, loss_factor, loss_cost, effective_energy,
+        buyer_zone_id, seller_zone_id, net_amount, status,
+        buyer_session_token, seller_session_token, transaction_hash,
+        created_at, processed_at, erc_certificate_id, erc_transfer_tx
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+"#;
+
+const INSERT_MATCH_SQL: &str = r#"
+    INSERT INTO order_matches (
+        id, epoch_id, buy_order_id, sell_order_id,
+        matched_amount, match_price, match_time, status,
+        settlement_id, zone_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+"#;
+
+/// Bind every order-match column — shared by the plain and transactional
+/// insert paths.
+fn bind_match<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    m: &'q OrderMatch,
+    settlement_id: Option<Uuid>,
+    zone_id: Option<i32>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    query
+        .bind(m.id)
+        .bind(m.epoch_id)
+        .bind(m.buy_order_id)
+        .bind(m.sell_order_id)
+        .bind(m.matched_amount)
+        .bind(m.match_price)
+        .bind(m.match_time)
+        .bind(&m.status)
+        .bind(settlement_id)
+        .bind(zone_id)
+}
+
+const UPDATE_SETTLEMENT_STATUS_SQL: &str =
+    "UPDATE settlements SET status = $1, blockchain_tx_hash = $2, error_message = $3, updated_at = NOW() WHERE id = $4";
 
 #[derive(Debug, Clone, FromRow)]
 struct SettlementStatsRow {
@@ -105,45 +183,29 @@ impl PostgresSettlementRepository {
 #[async_trait]
 impl SettlementRepository for PostgresSettlementRepository {
     async fn insert_settlement(&self, s: &Settlement) -> TraitResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO settlements (
-                id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
-                energy_amount, price_per_kwh, total_amount, fee_amount,
-                wheeling_charge, loss_factor, loss_cost, effective_energy,
-                buyer_zone_id, seller_zone_id, net_amount, status,
-                buyer_session_token, seller_session_token, transaction_hash,
-                created_at, processed_at, erc_certificate_id, erc_transfer_tx
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
-            "#,
-        )
-        .bind(s.id)
-        .bind(s.epoch_id)
-        .bind(s.buyer_id)
-        .bind(s.seller_id)
-        .bind(s.buy_order_id)
-        .bind(s.sell_order_id)
-        .bind(s.energy_amount)
-        .bind(s.price)
-        .bind(s.total_amount)
-        .bind(s.fee_amount)
-        .bind(s.wheeling_charge)
-        .bind(s.loss_factor)
-        .bind(s.loss_cost)
-        .bind(s.effective_energy)
-        .bind(s.buyer_zone_id)
-        .bind(s.seller_zone_id)
-        .bind(s.net_amount)
-        .bind(s.status.to_string())
-        .bind(&s.buyer_session_token)
-        .bind(&s.seller_session_token)
-        .bind(&s.blockchain_tx)
-        .bind(s.created_at)
-        .bind(s.confirmed_at)
-        .bind(&s.erc_certificate_id)
-        .bind(&s.erc_transfer_tx)
-        .execute(&self.pool)
-        .await?;
+        bind_settlement(sqlx::query(INSERT_SETTLEMENT_SQL), s)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn insert_settlement_with_event(
+        &self,
+        s: &Settlement,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Settlement row + outbox row committed in one transaction: the event
+        // can never be lost relative to the state change.
+        let mut tx = self.pool.begin().await?;
+
+        bind_settlement(sqlx::query(INSERT_SETTLEMENT_SQL), s)
+            .execute(&mut *tx)
+            .await?;
+
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
+
+        tx.commit().await?;
 
         Ok(())
     }
@@ -158,27 +220,31 @@ impl SettlementRepository for PostgresSettlementRepository {
         settlement_id: Option<Uuid>,
         zone_id: Option<i32>,
     ) -> TraitResult<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO order_matches (
-                id, epoch_id, buy_order_id, sell_order_id,
-                matched_amount, match_price, match_time, status,
-                settlement_id, zone_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            "#,
-        )
-        .bind(m.id)
-        .bind(m.epoch_id)
-        .bind(m.buy_order_id)
-        .bind(m.sell_order_id)
-        .bind(m.matched_amount)
-        .bind(m.match_price)
-        .bind(m.match_time)
-        .bind(&m.status)
-        .bind(settlement_id)
-        .bind(zone_id)
-        .execute(&self.pool)
-        .await?;
+        bind_match(sqlx::query(INSERT_MATCH_SQL), m, settlement_id, zone_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn insert_match_with_event(
+        &self,
+        m: &OrderMatch,
+        settlement_id: Option<Uuid>,
+        zone_id: Option<i32>,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Match-ledger row + outbox row committed in one transaction: the
+        // event can never be lost relative to the state change.
+        let mut tx = self.pool.begin().await?;
+
+        bind_match(sqlx::query(INSERT_MATCH_SQL), m, settlement_id, zone_id)
+            .execute(&mut *tx)
+            .await?;
+
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
+
+        tx.commit().await?;
 
         Ok(())
     }
@@ -264,15 +330,39 @@ impl SettlementRepository for PostgresSettlementRepository {
         tx_hash: Option<&str>,
         error: Option<&str>,
     ) -> TraitResult<()> {
-        sqlx::query(
-            "UPDATE settlements SET status = $1, blockchain_tx_hash = $2, error_message = $3, updated_at = NOW() WHERE id = $4"
-        )
-        .bind(status)
-        .bind(tx_hash)
-        .bind(error)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query(UPDATE_SETTLEMENT_STATUS_SQL)
+            .bind(status)
+            .bind(tx_hash)
+            .bind(error)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_settlement_status_with_event(
+        &self,
+        id: Uuid,
+        status: &str,
+        tx_hash: Option<&str>,
+        error: Option<&str>,
+        event: &Event,
+    ) -> TraitResult<()> {
+        // Status update + outbox row committed in one transaction: the event
+        // can never be lost relative to the state change.
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(UPDATE_SETTLEMENT_STATUS_SQL)
+            .bind(status)
+            .bind(tx_hash)
+            .bind(error)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
+
+        tx.commit().await?;
         Ok(())
     }
 }

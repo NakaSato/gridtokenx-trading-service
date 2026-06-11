@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::info;
 use trading_core::fast_price::FastPrice;
-use trading_core::traits::{EventPublisher, OrderRepository, SettlementRepository, TraitResult};
+use trading_core::traits::{OrderRepository, SettlementRepository, TraitResult};
 use trading_engine::engine::{MatchingEngine, TopologySnapshot};
 use trading_engine::types::FastOrder;
 use uuid::Uuid;
@@ -12,7 +12,6 @@ use uuid::Uuid;
 pub struct MatcherService {
     order_repo: Arc<dyn OrderRepository>,
     settlement_repo: Arc<dyn SettlementRepository>,
-    events: Arc<dyn EventPublisher>,
     topology: Arc<dyn TopologySnapshot>,
 }
 
@@ -20,13 +19,11 @@ impl MatcherService {
     pub fn new(
         order_repo: Arc<dyn OrderRepository>,
         settlement_repo: Arc<dyn SettlementRepository>,
-        events: Arc<dyn EventPublisher>,
         topology: Arc<dyn TopologySnapshot>,
     ) -> Self {
         Self {
             order_repo,
             settlement_repo,
-            events,
             topology,
         }
     }
@@ -212,31 +209,11 @@ impl MatcherService {
                 }
             };
 
-            // Persist the order-match ledger row (order_matches). Links to the
-            // settlement when it persisted (NULL otherwise). Tagged with the buyer's
-            // zone for sharded analytics.
-            if let Err(e) = self
-                .settlement_repo
-                .insert_match(
-                    &trading_core::models::OrderMatch {
-                        id: match_id,
-                        epoch_id: m.epoch_id,
-                        buy_order_id: m.buy_order_id,
-                        sell_order_id: m.sell_order_id,
-                        matched_amount: m.match_amount,
-                        match_price: m.match_price,
-                        match_time: Utc::now(),
-                        status: "pending".to_string(),
-                    },
-                    settlement_link,
-                    m.buyer_zone_id,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist order_matches row");
-            }
-
-            // Publish OrderMatched Event
+            // Persist the order-match ledger row (order_matches) and its
+            // OrderMatched outbox event in one transaction: the event exists
+            // iff the ledger row does. Links to the settlement when it
+            // persisted (NULL otherwise). Tagged with the buyer's zone for
+            // sharded analytics.
             let matched_event = trading_core::events::Event::OrderMatched(trading_core::events::OrderMatchedPayload {
                 match_id,
                 epoch_id: m.epoch_id,
@@ -249,7 +226,27 @@ impl MatcherService {
                 timestamp: Utc::now(),
                 zone_id: m.buyer_zone_id,
             });
-            let _ = self.events.publish(matched_event).await;
+            if let Err(e) = self
+                .settlement_repo
+                .insert_match_with_event(
+                    &trading_core::models::OrderMatch {
+                        id: match_id,
+                        epoch_id: m.epoch_id,
+                        buy_order_id: m.buy_order_id,
+                        sell_order_id: m.sell_order_id,
+                        matched_amount: m.match_amount,
+                        match_price: m.match_price,
+                        match_time: Utc::now(),
+                        status: "pending".to_string(),
+                    },
+                    settlement_link,
+                    m.buyer_zone_id,
+                    &matched_event,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist order_matches row");
+            }
         }
 
         // Apply aggregated order updates (Batching logic for OrderRepository)
@@ -267,18 +264,17 @@ impl MatcherService {
                 OrderStatus::PartiallyFilled
             };
 
-            self.order_repo
-                .update_filled_amount(order_id, cumulative, status)
-                .await?;
-
-            // Publish OrderUpdate Event for UI/Real-time updates
+            // Fill update + OrderUpdate event (UI/real-time) committed in one
+            // transaction so the event cannot be lost relative to the fill.
             let update_event = trading_core::events::Event::OrderUpdate {
                 id: order_id,
                 filled_amount: cumulative,
                 status: status.to_string(),
                 zone_id,
             };
-            let _ = self.events.publish(update_event).await;
+            self.order_repo
+                .update_filled_amount_with_event(order_id, cumulative, status, &update_event)
+                .await?;
         }
 
         Ok(matches.len())

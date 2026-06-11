@@ -154,7 +154,6 @@ impl ServiceBuilder {
         let settlement_service = Arc::new(SettlementService::new(
             settlement_repo.clone(),
             blockchain.clone(),
-            events.clone(),
             audit.clone(),
             config.platform_user_id,
             config.oracle_feed_in_tariff,
@@ -163,7 +162,6 @@ impl ServiceBuilder {
         let matcher_service = Arc::new(MatcherService::new(
             order_repo.clone(),
             settlement_repo.clone(),
-            events.clone(),
             Arc::new(GridAwareTopology::new()),
         ));
 
@@ -191,7 +189,6 @@ impl ServiceBuilder {
         let trigger_evaluator = Arc::new(trading_logic::TriggerEvaluator::new(
             price_alert_repo.clone(),
             order_repo.clone(),
-            events.clone(),
         ));
 
         let services = AppServices {

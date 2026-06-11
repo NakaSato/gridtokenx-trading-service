@@ -9,6 +9,26 @@ use trading_core::events::Event;
 use trading_core::models::{OutboxEvent, OutboxStatus};
 use trading_core::traits::{OutboxRepository, TraitResult};
 
+/// Insert `event` into `outbox_events` inside an existing transaction. Lets a
+/// repository commit a state change and its domain event atomically — the
+/// outbox row becomes visible only if the surrounding transaction commits.
+pub(crate) async fn insert_event_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event: &Event,
+) -> TraitResult<()> {
+    let payload = serde_json::to_value(event).map_err(|e| {
+        trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))
+    })?;
+
+    sqlx::query("INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)")
+        .bind(event.outbox_event_type())
+        .bind(payload)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
 pub struct PostgresOutboxRepository {
     pool: PgPool,
 }

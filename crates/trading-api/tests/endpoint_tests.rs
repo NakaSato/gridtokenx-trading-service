@@ -82,6 +82,7 @@ impl OrderRepository for MockSystem {
     }
     async fn update_order_status(&self, _id: Uuid, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
     async fn update_filled_amount(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
+    async fn update_filled_amount_with_event(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus, _event: &Event) -> TraitResult<()> { Ok(()) }
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
         Ok(self.orders.lock().unwrap().iter().filter(|o| is_active(o.status) && o.side == OrderSide::Buy).cloned().collect())
     }
@@ -98,11 +99,16 @@ impl SettlementRepository for MockSystem {
         self.settlements.lock().unwrap().push(settlement.clone());
         Ok(())
     }
+    async fn insert_settlement_with_event(&self, settlement: &Settlement, _event: &Event) -> TraitResult<()> {
+        self.settlements.lock().unwrap().push(settlement.clone());
+        Ok(())
+    }
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {
         Ok(self.settlements.lock().unwrap().iter().find(|s| s.id == id).cloned())
     }
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { Ok(Uuid::nil()) }
     async fn insert_match(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>) -> TraitResult<()> { Ok(()) }
+    async fn insert_match_with_event(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>, _event: &Event) -> TraitResult<()> { Ok(()) }
     async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
     async fn list_settlements_for_user(&self, user_id: Uuid, limit: i64, offset: i64) -> TraitResult<(Vec<Settlement>, i64)> {
         let s = self.settlements.lock().unwrap();
@@ -137,6 +143,7 @@ impl SettlementRepository for MockSystem {
         })
     }
     async fn update_settlement_status(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>) -> TraitResult<()> { Ok(()) }
+    async fn update_settlement_status_with_event(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>, _event: &Event) -> TraitResult<()> { Ok(()) }
 }
 
 #[async_trait]
@@ -307,6 +314,14 @@ impl PriceAlertRepository for MockSystem {
             }
         }
         Ok(())
+    }
+    async fn mark_triggered_with_event(
+        &self,
+        id: Uuid,
+        triggered_price: rust_decimal::Decimal,
+        _event: &Event,
+    ) -> TraitResult<()> {
+        self.mark_triggered(id, triggered_price).await
     }
 }
 
@@ -567,12 +582,10 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
     let matcher = Arc::new(trading_logic::MatcherService::new(
         mock.clone(),
         mock.clone(),
-        mock.clone(),
         Arc::new(TopologyStub),
     ));
 
     let settlement = Arc::new(trading_logic::SettlementService::new(
-        mock.clone(),
         mock.clone(),
         mock.clone(),
         mock.clone(),
