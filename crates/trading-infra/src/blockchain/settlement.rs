@@ -406,6 +406,7 @@ impl BlockchainSettlementProvider {
                 user_ata,
                 *user_wallet,
                 platform_authority.pubkey(),
+                None, // rec_validator: none registered on-chain yet
                 amount_atomic,
             )
             .map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;
@@ -489,6 +490,7 @@ impl BlockchainSettlementProvider {
                     user_ata,
                     user_wallet,
                     platform_authority.pubkey(),
+                    None, // rec_validator: none registered on-chain yet
                     amount_atomic,
                 )
                 .map_err(|e| ApiError::Internal(format!("Failed to build mint instruction: {}", e)))?;

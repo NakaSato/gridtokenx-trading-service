@@ -54,13 +54,17 @@ pub struct SolanaProgramsConfig {
 }
 
 impl Default for SolanaProgramsConfig {
+    /// Defaults MUST match `gridtokenx-blockchain-core`'s `SolanaProgramsConfig::default()`
+    /// (the Anchor.toml deployed ids) — the Chain Bridge PolicyEngine allowlist is derived
+    /// from that crate, so a divergent fallback here gets every settlement rejected as
+    /// "Unauthorized program ID" whenever the SOLANA_*_PROGRAM_ID env vars are unset.
     fn default() -> Self {
         Self {
-            registry_program_id: "5xdQsDuGa1AaLVnddGhevvf2bngCvSob4dAepETS7oaJ".to_string(),
-            oracle_program_id: "D5MCbSHxhxZTRFyUMdTHcQvjzwjx5Lb8jg9PQ2LTja8S".to_string(),
-            energy_token_program_id: "EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe".to_string(),
-            trading_program_id: "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd".to_string(),
-            governance_program_id: "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ".to_string(),
+            registry_program_id: "FcSd5x4X1nzJMKLZC4tMZXnQ1ipLrGsEfeoH8N4mvJX7".to_string(),
+            oracle_program_id: "64Vgos61STZ8pW9NnHi2iGtXMTQr7NqBoMorK6Zg8RJU".to_string(),
+            energy_token_program_id: "6FZKcVKCLFSNLMxypFJGU4K14xUBnxNW9VAuKGhmqjGX".to_string(),
+            trading_program_id: "CnWDEUhTvSixeLSyViWgAnnu9YouBAYVGcrrFm1s9WcX".to_string(),
+            governance_program_id: "FokVuBSPXP11aeL7VZWd8n8aVAhWqVpyPZETToSxdvTS".to_string(),
             trading_market_id: "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string(),
         }
     }
@@ -205,19 +209,24 @@ impl Config {
                 .parse()?,
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
             tokenization: TokenizationConfig::from_env()?,
-            solana_programs: SolanaProgramsConfig {
-                registry_program_id: env::var("SOLANA_REGISTRY_PROGRAM_ID")
-                    .unwrap_or_else(|_| "5xdQsDuGa1AaLVnddGhevvf2bngCvSob4dAepETS7oaJ".to_string()),
-                oracle_program_id: env::var("SOLANA_ORACLE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "D5MCbSHxhxZTRFyUMdTHcQvjzwjx5Lb8jg9PQ2LTja8S".to_string()),
-                energy_token_program_id: env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
-                    .unwrap_or_else(|_| "EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe".to_string()),
-                trading_program_id: env::var("SOLANA_TRADING_PROGRAM_ID")
-                    .unwrap_or_else(|_| "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd".to_string()),
-                governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
-                    .unwrap_or_else(|_| "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ".to_string()),
-                trading_market_id: env::var("SOLANA_TRADING_MARKET_ID")
-                    .unwrap_or_else(|_| "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string()),
+            // Fallbacks delegate to Default so the deployed-id source of truth lives
+            // in exactly one place (and stays aligned with blockchain-core's defaults).
+            solana_programs: {
+                let d = SolanaProgramsConfig::default();
+                SolanaProgramsConfig {
+                    registry_program_id: env::var("SOLANA_REGISTRY_PROGRAM_ID")
+                        .unwrap_or(d.registry_program_id),
+                    oracle_program_id: env::var("SOLANA_ORACLE_PROGRAM_ID")
+                        .unwrap_or(d.oracle_program_id),
+                    energy_token_program_id: env::var("SOLANA_ENERGY_TOKEN_PROGRAM_ID")
+                        .unwrap_or(d.energy_token_program_id),
+                    trading_program_id: env::var("SOLANA_TRADING_PROGRAM_ID")
+                        .unwrap_or(d.trading_program_id),
+                    governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
+                        .unwrap_or(d.governance_program_id),
+                    trading_market_id: env::var("SOLANA_TRADING_MARKET_ID")
+                        .unwrap_or(d.trading_market_id),
+                }
             },
             market: MarketConfig::from_env()?,
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
