@@ -67,12 +67,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supply_sync_worker.run().await;
     });
 
-    let oracle_consumer = services.oracle_consumer.clone();
-    tokio::spawn(async move {
-        if let Err(e) = oracle_consumer.run().await {
-            error!("Oracle consumer failed: {}", e);
-        }
-    });
+    // Oracle consumer drives trading's own generation-mint (path B). Skip it
+    // when issuance is owned elsewhere (Aggregator Bridge) to avoid minting the
+    // same metered generation twice across services.
+    if config.oracle_mint_enabled {
+        let oracle_consumer = services.oracle_consumer.clone();
+        tokio::spawn(async move {
+            if let Err(e) = oracle_consumer.run().await {
+                error!("Oracle consumer failed: {}", e);
+            }
+        });
+    } else {
+        tracing::warn!(
+            "ORACLE_MINT_ENABLED=false: oracle consumer not started; trading will not mint generation (issuance owned by Aggregator Bridge)"
+        );
+    }
 
     // Recurring-order evaluator: place due recurring orders (Phase 6).
     let recurring_worker = trading_logic::RecurringEvaluatorWorker::new(

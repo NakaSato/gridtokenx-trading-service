@@ -90,6 +90,14 @@ impl BlockchainGateway for BlockchainService {
 
         if settlement.trade_id.is_none() {
             // Oracle Surplus Settlement (Minting model)
+            if !self.oracle_mint_enabled {
+                // Issuance owned elsewhere (e.g. Aggregator Bridge). Refuse to
+                // mint rather than silently confirm — keeps the row pending and
+                // prevents cross-service double mint.
+                return Err(trading_core::error::ApiError::Internal(
+                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); issuance owned by Aggregator Bridge".to_string(),
+                ));
+            }
             info!(
                 "Surplus detected: Executing generation mint for user {}",
                 settlement.seller_id
@@ -154,6 +162,14 @@ impl BlockchainGateway for BlockchainService {
 
         // 1. Process Oracle Settlements in batches
         if !oracle_settlements.is_empty() {
+            if !self.oracle_mint_enabled {
+                // Issuance owned elsewhere; refuse to mint so the same metered
+                // generation isn't minted by both trading and the issuer.
+                return Err(trading_core::error::ApiError::Internal(format!(
+                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); {} surplus settlement(s) left pending",
+                    oracle_settlements.len()
+                )));
+            }
             let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
             
             let mut mint_inputs = Vec::new();

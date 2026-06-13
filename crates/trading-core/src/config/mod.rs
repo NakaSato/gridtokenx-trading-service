@@ -41,6 +41,10 @@ pub struct Config {
     pub platform_user_id: uuid::Uuid,
     /// Feed-in tariff price per kWh for oracle settlements
     pub oracle_feed_in_tariff: rust_decimal::Decimal,
+    /// Enable trading's own oracle-driven generation mint (path B). Set false
+    /// once issuance is owned by the Aggregator Bridge, otherwise the same
+    /// metered generation is minted twice (cross-service double mint).
+    pub oracle_mint_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +253,10 @@ impl Config {
             oracle_feed_in_tariff: env::var("ORACLE_FEED_IN_TARIFF")
                 .unwrap_or_else(|_| "0.10".to_string())
                 .parse()?,
+            oracle_mint_enabled: env::var("ORACLE_MINT_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .unwrap_or(true),
         })
     }
 }
