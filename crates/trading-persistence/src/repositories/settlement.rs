@@ -18,6 +18,7 @@ fn bind_settlement<'q>(
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     query
         .bind(s.id)
+        .bind(s.trade_id)
         .bind(s.epoch_id)
         .bind(s.buyer_id)
         .bind(s.seller_id)
@@ -46,13 +47,13 @@ fn bind_settlement<'q>(
 
 const INSERT_SETTLEMENT_SQL: &str = r#"
     INSERT INTO settlements (
-        id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
+        id, trade_id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
         energy_amount, price_per_kwh, total_amount, fee_amount,
         wheeling_charge, loss_factor, loss_cost, effective_energy,
         buyer_zone_id, seller_zone_id, net_amount, status,
         buyer_session_token, seller_session_token, transaction_hash,
         created_at, processed_at, erc_certificate_id, erc_transfer_tx
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 "#;
 
 const INSERT_MATCH_SQL: &str = r#"
@@ -99,6 +100,7 @@ struct SettlementStatsRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct SettlementDb {
     pub id: Uuid,
+    pub trade_id: Option<Uuid>,
     pub epoch_id: Uuid,
     pub buyer_id: Uuid,
     pub seller_id: Uuid,
@@ -139,7 +141,7 @@ impl From<SettlementDb> for Settlement {
 
         Self {
             id: db.id,
-            trade_id: None,
+            trade_id: db.trade_id,
             epoch_id: db.epoch_id,
             buyer_id: db.buyer_id,
             seller_id: db.seller_id,
