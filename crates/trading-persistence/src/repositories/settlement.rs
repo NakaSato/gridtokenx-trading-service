@@ -85,7 +85,7 @@ fn bind_match<'q>(
 }
 
 const UPDATE_SETTLEMENT_STATUS_SQL: &str =
-    "UPDATE settlements SET status = $1, blockchain_tx_hash = $2, error_message = $3, updated_at = NOW() WHERE id = $4";
+    "UPDATE settlements SET status = $1, transaction_hash = $2, error_message = $3, updated_at = NOW() WHERE id = $4";
 
 #[derive(Debug, Clone, FromRow)]
 struct SettlementStatsRow {
