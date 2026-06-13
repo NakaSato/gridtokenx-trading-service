@@ -1,7 +1,6 @@
 use chrono::Utc;
 use std::sync::Arc;
 use tracing::{error, info, warn};
-use trading_core::error::ApiError;
 use trading_core::models::{Settlement, SettlementStatus};
 use trading_core::traits::{AuditLog, BlockchainGateway, SettlementRepository, TraitResult};
 use uuid::Uuid;
@@ -36,213 +35,25 @@ impl SettlementService {
         self.platform_user_id
     }
 
-    /// Process a pending settlement on-chain
-    pub async fn process_settlement(&self, settlement_id: Uuid) -> TraitResult<()> {
-        info!("Processing settlement: {}", settlement_id);
-
-        // 1. Fetch settlement from DB
-        let settlement = self
-            .repo
-            .get_settlement(settlement_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("Settlement {} not found", settlement_id)))?;
-
-        if settlement.status != SettlementStatus::Pending {
-            warn!(
-                "Settlement {} is already in status: {:?}",
-                settlement_id, settlement.status
-            );
-            return Ok(());
-        }
-
-        // 2. Update status to Processing
-        self.repo
-            .update_settlement_status(
-                settlement_id,
-                &SettlementStatus::Processing.to_string(),
-                None,
-                None,
-            )
-            .await?;
-
-        // 3. Execute on blockchain
-        let result: TraitResult<trading_core::models::SettlementTransaction> =
-            self.blockchain.execute_settlement(&settlement).await;
-
-        match result {
-            Ok(tx_result) => {
-                info!(
-                    "Settlement {} successful on-chain: {}",
-                    settlement_id, tx_result.signature
-                );
-
-                // 4. Update status to Completed and write the
-                // SettlementProcessed event to the outbox in one transaction.
-                let processed_event = trading_core::events::Event::SettlementProcessed(
-                    trading_core::events::SettlementProcessedPayload {
-                        settlement_id,
-                        tx_signature: tx_result.signature.clone(),
-                        status: SettlementStatus::Completed.to_string(),
-                        timestamp: Utc::now(),
-                    },
-                );
-                self.repo
-                    .update_settlement_status_with_event(
-                        settlement_id,
-                        &SettlementStatus::Completed.to_string(),
-                        Some(&tx_result.signature),
-                        None,
-                        &processed_event,
-                    )
-                    .await?;
-
-                // 6. Audit log
-                let _ = self
-                    .audit
-                    .log_action(
-                        settlement.buyer_id,
-                        "settlement_completed",
-                        &format!(
-                            "Settlement {} completed on-chain with signature {}",
-                            settlement_id, tx_result.signature
-                        ),
-                    )
-                    .await;
-
-                // 6. If Oracle settlement (no trade_id), trigger ERC issuance
-                if settlement.trade_id.is_none() {
-                    info!(
-                        "Oracle settlement detected for {}. Triggering ERC issuance.",
-                        settlement_id
-                    );
-
-                    // Meter ID resolution: In a real system we'd have this in the settlement record.
-                    // For now, we'll use a placeholder or lookup.
-                    // Let's assume meter_id is part of the settlement metadata eventually.
-                    let meter_id = "METER-SN-PROSUMER-1";
-
-                    match self
-                        .blockchain
-                        .issue_erc(settlement.seller_id, meter_id, settlement.energy_amount)
-                        .await
-                    {
-                        Ok(erc_sig) => {
-                            info!("ERC issued for settlement {}: {}", settlement_id, erc_sig);
-                            // We could update the settlement record with erc_certificate_id here
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to issue ERC for settlement {}: {}",
-                                settlement_id, e
-                            );
-                        }
-                    }
-                }
-
-                Ok(())
-            }
-            Err(e) => {
-                error!("Settlement {} failed on-chain: {}", settlement_id, e);
-
-                // 4. Update status to Failed
-                self.repo
-                    .update_settlement_status(
-                        settlement_id,
-                        &SettlementStatus::Failed.to_string(),
-                        None,
-                        Some(&e.to_string()),
-                    )
-                    .await?;
-
-                // 5. Audit log
-                let _ = self
-                    .audit
-                    .log_action(
-                        settlement.buyer_id,
-                        "settlement_failed",
-                        &format!("Settlement {} failed on-chain: {}", settlement_id, e),
-                    )
-                    .await;
-
-                Err(e)
-            }
-        }
-    }
-
-    /// Process all pending settlements (Batch)
+    /// Process all pending settlements (Batch). Run by the settlement worker.
     pub async fn process_pending_settlements(&self, limit: i64) -> TraitResult<usize> {
         let pending = self.repo.get_pending_settlements(limit).await?;
-        let count = pending.len();
-
-        if count == 0 {
+        if pending.is_empty() {
             return Ok(0);
         }
 
-        info!("Found {} pending settlements to process in batch", count);
-
-        // 1. Mark all as Processing
-        for settlement in &pending {
-            self.repo
-                .update_settlement_status(
-                    settlement.id,
-                    &SettlementStatus::Processing.to_string(),
-                    None,
-                    None,
-                )
-                .await?;
+        // Atomically claim Pending -> Processing before minting. A concurrent
+        // RPC batch call (or a second worker tick) claiming the same rows
+        // receives a disjoint subset, so no settlement is ever minted twice.
+        let ids: Vec<Uuid> = pending.iter().map(|s| s.id).collect();
+        let claimed = self.repo.claim_settlements_for_processing(&ids).await?;
+        if claimed.is_empty() {
+            return Ok(0);
         }
 
-        // 2. Execute batched blockchain transaction
-        match self.blockchain.execute_batched_settlements(pending.clone()).await {
-            Ok(tx_results) => {
-                let mut success_count = 0;
-                for tx_result in tx_results {
-                    info!(
-                        "Settlement {} successful on-chain: {}",
-                        tx_result.settlement_id, tx_result.signature
-                    );
-
-                    // Update status to Completed and write the
-                    // SettlementProcessed event to the outbox in one
-                    // transaction.
-                    let processed_event = trading_core::events::Event::SettlementProcessed(
-                        trading_core::events::SettlementProcessedPayload {
-                            settlement_id: tx_result.settlement_id,
-                            tx_signature: tx_result.signature.clone(),
-                            status: SettlementStatus::Completed.to_string(),
-                            timestamp: Utc::now(),
-                        },
-                    );
-                    self.repo
-                        .update_settlement_status_with_event(
-                            tx_result.settlement_id,
-                            &SettlementStatus::Completed.to_string(),
-                            Some(&tx_result.signature),
-                            None,
-                            &processed_event,
-                        )
-                        .await?;
-
-                    success_count += 1;
-                }
-                Ok(success_count)
-            }
-            Err(e) => {
-                error!("Batch settlement failed: {}", e);
-                // Mark all as Failed or revert to Pending for retry
-                for settlement in pending {
-                    let _ = self.repo
-                        .update_settlement_status(
-                            settlement.id,
-                            &SettlementStatus::Failed.to_string(),
-                            None,
-                            Some(&e.to_string()),
-                        )
-                        .await;
-                }
-                Err(e)
-            }
-        }
+        info!("Claimed {} settlements for batch processing", claimed.len());
+        let results = self.settle_claimed(claimed).await?;
+        Ok(results.len())
     }
 
     /// Process a normalized oracle reading and create a settlement if surplus is detected
@@ -341,7 +152,9 @@ impl SettlementService {
         Ok(())
     }
 
-    /// Execute multiple settlements on-chain in a single batched transaction.
+    /// Execute a specific set of settlements on-chain (RPC entrypoint).
+    /// Atomically claims each so it cannot also be minted by the settlement
+    /// worker; already-claimed rows are silently skipped.
     pub async fn execute_batched_settlements(
         &self,
         settlements: Vec<Settlement>,
@@ -350,7 +163,124 @@ impl SettlementService {
             return Ok(Vec::new());
         }
 
-        // 1. Execute on blockchain
-        self.blockchain.execute_batched_settlements(settlements).await
+        let ids: Vec<Uuid> = settlements.iter().map(|s| s.id).collect();
+        let claimed = self.repo.claim_settlements_for_processing(&ids).await?;
+        if claimed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.settle_claimed(claimed).await
+    }
+
+    /// Mint + finalize an already-claimed (status = `processing`) batch.
+    ///
+    /// On success each settlement is marked `Completed` (with its
+    /// `SettlementProcessed` outbox event), audited, and — for direct oracle
+    /// settlements (no `trade_id`) — has its ERC issued. On blockchain failure
+    /// the whole claimed batch is marked `Failed` and the error surfaced.
+    async fn settle_claimed(
+        &self,
+        claimed: Vec<Settlement>,
+    ) -> TraitResult<Vec<trading_core::models::SettlementTransaction>> {
+        use std::collections::HashMap;
+        let by_id: HashMap<Uuid, Settlement> =
+            claimed.iter().cloned().map(|s| (s.id, s)).collect();
+
+        match self
+            .blockchain
+            .execute_batched_settlements(claimed.clone())
+            .await
+        {
+            Ok(tx_results) => {
+                for tx_result in &tx_results {
+                    info!(
+                        "Settlement {} successful on-chain: {}",
+                        tx_result.settlement_id, tx_result.signature
+                    );
+
+                    // Mark Completed + SettlementProcessed outbox event in one
+                    // transaction so the event cannot be lost vs. the status.
+                    let processed_event = trading_core::events::Event::SettlementProcessed(
+                        trading_core::events::SettlementProcessedPayload {
+                            settlement_id: tx_result.settlement_id,
+                            tx_signature: tx_result.signature.clone(),
+                            status: SettlementStatus::Completed.to_string(),
+                            timestamp: Utc::now(),
+                        },
+                    );
+                    self.repo
+                        .update_settlement_status_with_event(
+                            tx_result.settlement_id,
+                            &SettlementStatus::Completed.to_string(),
+                            Some(&tx_result.signature),
+                            None,
+                            &processed_event,
+                        )
+                        .await?;
+
+                    if let Some(settlement) = by_id.get(&tx_result.settlement_id) {
+                        let _ = self
+                            .audit
+                            .log_action(
+                                settlement.buyer_id,
+                                "settlement_completed",
+                                &format!(
+                                    "Settlement {} completed on-chain with signature {}",
+                                    settlement.id, tx_result.signature
+                                ),
+                            )
+                            .await;
+
+                        // ERC issuance for direct oracle settlements (no trade_id).
+                        if settlement.trade_id.is_none() {
+                            // Meter id is not yet carried on the settlement record;
+                            // use the known prosumer meter until it is threaded through.
+                            let meter_id = "METER-SN-PROSUMER-1";
+                            match self
+                                .blockchain
+                                .issue_erc(settlement.seller_id, meter_id, settlement.energy_amount)
+                                .await
+                            {
+                                Ok(erc_sig) => info!(
+                                    "ERC issued for settlement {}: {}",
+                                    settlement.id, erc_sig
+                                ),
+                                Err(e) => error!(
+                                    "Failed to issue ERC for settlement {}: {}",
+                                    settlement.id, e
+                                ),
+                            }
+                        }
+                    }
+                }
+                Ok(tx_results)
+            }
+            Err(e) => {
+                error!("Batch settlement failed: {}", e);
+                // Mark the whole claimed batch Failed so it is not stranded in
+                // `processing`; the worker can retry once it is back to a
+                // retryable state.
+                for settlement in &claimed {
+                    let _ = self
+                        .repo
+                        .update_settlement_status(
+                            settlement.id,
+                            &SettlementStatus::Failed.to_string(),
+                            None,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                    let _ = self
+                        .audit
+                        .log_action(
+                            settlement.buyer_id,
+                            "settlement_failed",
+                            &format!("Settlement {} failed on-chain: {}", settlement.id, e),
+                        )
+                        .await;
+                }
+                Err(e)
+            }
+        }
     }
 }

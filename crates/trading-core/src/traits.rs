@@ -147,6 +147,15 @@ pub trait SettlementRepository: Send + Sync {
     /// Get pending settlements for batch processing.
     async fn get_pending_settlements(&self, limit: i64) -> TraitResult<Vec<Settlement>>;
 
+    /// Atomically claim settlements for processing: flip `pending` → `processing`
+    /// for the given ids in a single statement and return only the rows actually
+    /// claimed. Concurrent callers (settlement worker vs. RPC) each receive a
+    /// disjoint subset, so a settlement can be minted at most once.
+    async fn claim_settlements_for_processing(
+        &self,
+        ids: &[Uuid],
+    ) -> TraitResult<Vec<Settlement>>;
+
     /// List settlements where the user is buyer or seller (trade history),
     /// newest first. Returns the page plus the total matching count for
     /// pagination.

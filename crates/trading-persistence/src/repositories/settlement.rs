@@ -269,6 +269,29 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(settlements.into_iter().map(Into::into).collect())
     }
 
+    async fn claim_settlements_for_processing(
+        &self,
+        ids: &[Uuid],
+    ) -> TraitResult<Vec<Settlement>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Single-statement compare-and-set: only rows still `pending` flip to
+        // `processing` and are returned. A concurrent claimer sees them already
+        // `processing` and gets nothing back, so the same settlement can never
+        // be minted twice.
+        let claimed = sqlx::query_as::<_, SettlementDb>(
+            "UPDATE settlements SET status = 'processing', updated_at = NOW() \
+             WHERE id = ANY($1) AND status = 'pending' RETURNING *",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(claimed.into_iter().map(Into::into).collect())
+    }
+
     async fn list_settlements_for_user(
         &self,
         user_id: Uuid,
