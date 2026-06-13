@@ -111,6 +111,8 @@ impl SettlementRepository for MockSystem {
     async fn insert_match_with_event(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>, _event: &Event) -> TraitResult<()> { Ok(()) }
     async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
     async fn claim_settlements_for_processing(&self, _ids: &[Uuid]) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
+    async fn reset_settlements_for_retry(&self, _ids: &[Uuid], _max_retries: i32, _error: Option<&str>) -> TraitResult<u64> { Ok(0) }
+    async fn reclaim_stale_processing(&self, _stale_after_secs: i64, _max_retries: i32) -> TraitResult<u64> { Ok(0) }
     async fn list_settlements_for_user(&self, user_id: Uuid, limit: i64, offset: i64) -> TraitResult<(Vec<Settlement>, i64)> {
         let s = self.settlements.lock().unwrap();
         let mut matched: Vec<Settlement> = s

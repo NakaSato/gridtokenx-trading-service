@@ -29,6 +29,14 @@ impl SettlementWorker {
         loop {
             ticker.tick().await;
 
+            // Recover settlements orphaned in `processing` (crash / partial
+            // failure between claim and finalize) before claiming new work.
+            match self.service.reclaim_stale_settlements().await {
+                Ok(n) if n > 0 => info!("Reclaimed {} stale processing settlement(s)", n),
+                Ok(_) => {}
+                Err(e) => error!("Error reclaiming stale settlements: {}", e),
+            }
+
             match self
                 .service
                 .process_pending_settlements(self.batch_limit)

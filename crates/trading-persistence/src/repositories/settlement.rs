@@ -292,6 +292,62 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(claimed.into_iter().map(Into::into).collect())
     }
 
+    async fn reset_settlements_for_retry(
+        &self,
+        ids: &[Uuid],
+        max_retries: i32,
+        error: Option<&str>,
+    ) -> TraitResult<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Bump retry_count; rows that have now exhausted their budget become
+        // terminal `permanently_failed`, the rest go back to `pending` so the
+        // worker/claim path (which select only `pending`) retries them. Guarded
+        // on `status = 'processing'` so a row already finalized elsewhere is
+        // untouched.
+        let result = sqlx::query(
+            "UPDATE settlements \
+             SET retry_count = retry_count + 1, \
+                 error_message = $2, \
+                 status = CASE WHEN retry_count + 1 >= $3 THEN 'permanently_failed' ELSE 'pending' END, \
+                 updated_at = NOW() \
+             WHERE id = ANY($1) AND status = 'processing'",
+        )
+        .bind(ids)
+        .bind(error)
+        .bind(max_retries)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
+    async fn reclaim_stale_processing(
+        &self,
+        stale_after_secs: i64,
+        max_retries: i32,
+    ) -> TraitResult<u64> {
+        // Same retry accounting as reset_settlements_for_retry, but selects rows
+        // by staleness instead of id — recovers settlements orphaned in
+        // `processing` by a crash or partial failure between claim and finalize.
+        let result = sqlx::query(
+            "UPDATE settlements \
+             SET retry_count = retry_count + 1, \
+                 status = CASE WHEN retry_count + 1 >= $2 THEN 'permanently_failed' ELSE 'pending' END, \
+                 updated_at = NOW() \
+             WHERE status = 'processing' \
+               AND updated_at < NOW() - make_interval(secs => $1::double precision)",
+        )
+        .bind(stale_after_secs as f64)
+        .bind(max_retries)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     async fn list_settlements_for_user(
         &self,
         user_id: Uuid,

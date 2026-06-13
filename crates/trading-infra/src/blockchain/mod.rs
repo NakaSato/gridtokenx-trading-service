@@ -92,8 +92,9 @@ impl BlockchainGateway for BlockchainService {
             // Oracle Surplus Settlement (Minting model)
             if !self.oracle_mint_enabled {
                 // Issuance owned elsewhere (e.g. Aggregator Bridge). Refuse to
-                // mint rather than silently confirm — keeps the row pending and
-                // prevents cross-service double mint.
+                // mint rather than silently confirm; the caller releases the
+                // claimed row for retry (it is never minted here), preventing
+                // cross-service double mint.
                 return Err(trading_core::error::ApiError::Internal(
                     "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); issuance owned by Aggregator Bridge".to_string(),
                 ));
@@ -166,7 +167,7 @@ impl BlockchainGateway for BlockchainService {
                 // Issuance owned elsewhere; refuse to mint so the same metered
                 // generation isn't minted by both trading and the issuer.
                 return Err(trading_core::error::ApiError::Internal(format!(
-                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); {} surplus settlement(s) left pending",
+                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); {} surplus settlement(s) not minted (caller releases them for retry)",
                     oracle_settlements.len()
                 )));
             }

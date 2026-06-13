@@ -253,10 +253,21 @@ impl Config {
             oracle_feed_in_tariff: env::var("ORACLE_FEED_IN_TARIFF")
                 .unwrap_or_else(|_| "0.10".to_string())
                 .parse()?,
-            oracle_mint_enabled: env::var("ORACLE_MINT_ENABLED")
-                .unwrap_or_else(|_| "true".to_string())
-                .parse()
-                .unwrap_or(true),
+            // Fail closed + loud: a malformed value (e.g. `0`, `no`, `False`)
+            // must never silently re-enable minting, since the flag exists to
+            // prevent cross-service double mint. Unset keeps the legacy default.
+            oracle_mint_enabled: match env::var("ORACLE_MINT_ENABLED") {
+                Err(_) => true,
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => true,
+                    "false" | "0" | "no" | "off" => false,
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "ORACLE_MINT_ENABLED must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
+                        ))
+                    }
+                },
+            },
         })
     }
 }

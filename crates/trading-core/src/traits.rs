@@ -156,6 +156,28 @@ pub trait SettlementRepository: Send + Sync {
         ids: &[Uuid],
     ) -> TraitResult<Vec<Settlement>>;
 
+    /// Release claimed settlements back to a retryable state after a failed (or
+    /// skipped) mint: increment `retry_count` and set status to `pending`, or to
+    /// `permanently_failed` once `retry_count` reaches `max_retries`. Returns the
+    /// number of rows moved to `permanently_failed`. Only touches rows currently
+    /// `processing`, so it cannot disturb a row another worker has finalized.
+    async fn reset_settlements_for_retry(
+        &self,
+        ids: &[Uuid],
+        max_retries: i32,
+        error: Option<&str>,
+    ) -> TraitResult<u64>;
+
+    /// Reclaim settlements stuck in `processing` longer than `stale_after_secs`
+    /// (crash / partial failure between claim and finalize): move them back to a
+    /// retryable state via the same retry accounting as
+    /// [`reset_settlements_for_retry`]. Returns the number of rows reclaimed.
+    async fn reclaim_stale_processing(
+        &self,
+        stale_after_secs: i64,
+        max_retries: i32,
+    ) -> TraitResult<u64>;
+
     /// List settlements where the user is buyer or seller (trade history),
     /// newest first. Returns the page plus the total matching count for
     /// pagination.
