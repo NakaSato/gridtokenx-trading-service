@@ -90,7 +90,8 @@ impl ServiceBuilder {
             )
             .await?
             .with_identity_gateway(identity.clone())
-            .with_oracle_mint_enabled(config.oracle_mint_enabled),
+            .with_oracle_mint_enabled(config.oracle_mint_enabled)
+            .with_trade_settlement_enabled(config.trade_settlement_enabled),
         );
 
         let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);

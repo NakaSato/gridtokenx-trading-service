@@ -18,6 +18,9 @@ pub struct BlockchainService {
     /// When false, the oracle/surplus generation-mint path (path B) is disabled
     /// so trading no longer mints metered generation (issuance owned elsewhere).
     pub oracle_mint_enabled: bool,
+    /// When false, on-chain atomic-swap settlement of matching-engine trades is
+    /// disabled (trade settlements are left for retry, never sent on-chain).
+    pub trade_settlement_enabled: bool,
 }
 
 impl std::fmt::Debug for BlockchainService {
@@ -66,6 +69,7 @@ impl BlockchainService {
             db,
             identity_gateway: None,
             oracle_mint_enabled: true,
+            trade_settlement_enabled: false,
         })
     }
 
@@ -79,6 +83,34 @@ impl BlockchainService {
     pub fn with_oracle_mint_enabled(mut self, enabled: bool) -> Self {
         self.oracle_mint_enabled = enabled;
         self
+    }
+
+    /// Enable/disable on-chain atomic-swap settlement of matching-engine trades.
+    pub fn with_trade_settlement_enabled(mut self, enabled: bool) -> Self {
+        self.trade_settlement_enabled = enabled;
+        self
+    }
+
+    /// Resolve a trading order's on-chain PDA from its database id. Returns
+    /// `None` when the order does not exist or has no on-chain PDA recorded
+    /// (e.g. an order that never reached the chain).
+    pub async fn get_order_pda(&self, order_id: &uuid::Uuid) -> Result<Option<Pubkey>> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
+
+        let pda: Option<String> =
+            sqlx::query_scalar::<_, Option<String>>("SELECT order_pda FROM trading_orders WHERE id = $1")
+                .bind(order_id)
+                .fetch_optional(db)
+                .await?
+                .flatten();
+
+        match pda {
+            Some(p) => Ok(Some(Self::parse_pubkey(&p)?)),
+            None => Ok(None),
+        }
     }
 
     /// Load the authority keypair from the environment/config

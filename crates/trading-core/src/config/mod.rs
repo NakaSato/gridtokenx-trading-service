@@ -45,6 +45,10 @@ pub struct Config {
     /// once issuance is owned by the Aggregator Bridge, otherwise the same
     /// metered generation is minted twice (cross-service double mint).
     pub oracle_mint_enabled: bool,
+    /// Enable on-chain atomic-swap settlement of matching-engine trades. Off by
+    /// default: the swap path sends real energy↔currency transfers and must be
+    /// validated against a live validator/simnet before being enabled.
+    pub trade_settlement_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +268,20 @@ impl Config {
                     other => {
                         return Err(anyhow::anyhow!(
                             "ORACLE_MINT_ENABLED must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
+                        ))
+                    }
+                },
+            },
+            // Off by default (unset = disabled): the swap path moves real funds
+            // and must be E2E-validated before enabling. Malformed value aborts.
+            trade_settlement_enabled: match env::var("TRADE_SETTLEMENT_ENABLED") {
+                Err(_) => false,
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => true,
+                    "false" | "0" | "no" | "off" => false,
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "TRADE_SETTLEMENT_ENABLED must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
                         ))
                     }
                 },

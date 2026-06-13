@@ -211,10 +211,75 @@ impl BlockchainGateway for BlockchainService {
             }
         }
 
-        // 2. Process Trade Settlements (Placeholder)
+        // 2. Process Trade Settlements (on-chain atomic energy↔currency swap).
         if !trade_settlements.is_empty() {
-             warn!("Batch settlement for matching engine trades not yet implemented");
-             // Handle or error
+            if !self.trade_settlement_enabled {
+                // Disabled until the swap path is validated against a live
+                // validator. Leave these unminted so the caller releases them
+                // for retry rather than dropping them silently.
+                warn!(
+                    "TRADE_SETTLEMENT_ENABLED=false: {} trade settlement(s) left for retry",
+                    trade_settlements.len()
+                );
+            } else {
+                let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
+
+                // Resolve on-chain order PDAs + party wallets. A settlement
+                // missing any of them is skipped (not added to inputs) so it is
+                // left for retry instead of failing the whole batch.
+                let mut inputs = Vec::new();
+                for settlement in &trade_settlements {
+                    let buy_pda = match self.get_order_pda(&settlement.buy_order_id).await {
+                        Ok(Some(p)) => p,
+                        _ => {
+                            warn!(
+                                "Settlement {}: buy order {} has no on-chain PDA; skipping",
+                                settlement.id, settlement.buy_order_id
+                            );
+                            continue;
+                        }
+                    };
+                    let sell_pda = match self.get_order_pda(&settlement.sell_order_id).await {
+                        Ok(Some(p)) => p,
+                        _ => {
+                            warn!(
+                                "Settlement {}: sell order {} has no on-chain PDA; skipping",
+                                settlement.id, settlement.sell_order_id
+                            );
+                            continue;
+                        }
+                    };
+                    let buyer_pubkey = match self.get_user_primary_wallet(&settlement.buyer_id).await
+                    {
+                        Ok(Some(p)) => p,
+                        _ => {
+                            warn!(
+                                "Settlement {}: buyer {} has no primary wallet; skipping",
+                                settlement.id, settlement.buyer_id
+                            );
+                            continue;
+                        }
+                    };
+                    let seller_pubkey =
+                        match self.get_user_primary_wallet(&settlement.seller_id).await {
+                            Ok(Some(p)) => p,
+                            _ => {
+                                warn!(
+                                    "Settlement {}: seller {} has no primary wallet; skipping",
+                                    settlement.id, settlement.seller_id
+                                );
+                                continue;
+                            }
+                        };
+
+                    inputs.push((settlement, buy_pda, sell_pda, buyer_pubkey, seller_pubkey));
+                }
+
+                if !inputs.is_empty() {
+                    let trade_results = provider.execute_batched_settlements(inputs, 0).await?;
+                    results.extend(trade_results);
+                }
+            }
         }
 
         Ok(results)

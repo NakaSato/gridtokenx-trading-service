@@ -3,7 +3,6 @@ use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
 use std::sync::Arc;
-use tracing::info;
 
 use crate::blockchain::BlockchainService;
 use trading_core::error::ApiError;
@@ -47,7 +46,6 @@ impl BlockchainSettlementProvider {
             .get_mint_pda()
             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
-        info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // ATAs
@@ -65,21 +63,14 @@ impl BlockchainSettlementProvider {
             .calculate_ata_address(buyer_pubkey, &energy_mint)?;
 
         // Collectors
-        let fee_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG FEE_COL: '{}'", s);
-            s
-        })?;
-        let wheeling_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG WHEEL_COL: '{}'", s);
-            s
-        })?;
-        let loss_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG LOSS_COL: '{}'", s);
-            s
-        })?;
+        let fee_collector =
+            BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
+        let wheeling_collector = BlockchainService::parse_pubkey(
+            &std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
+        let loss_collector = BlockchainService::parse_pubkey(
+            &std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
 
         let fee_collector_ata = self
             .blockchain
@@ -224,25 +215,17 @@ impl BlockchainSettlementProvider {
             .get_mint_pda()
             .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
-        info!("DEBUG CURRENCY_MINT: '{}'", currency_mint_str);
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // Collectors
-        let fee_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG FEE_COL: '{}'", s);
-            s
-        })?;
-        let wheeling_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG WHEEL_COL: '{}'", s);
-            s
-        })?;
-        let loss_collector = BlockchainService::parse_pubkey(&{
-            let s = std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default();
-            info!("DEBUG LOSS_COL: '{}'", s);
-            s
-        })?;
+        let fee_collector =
+            BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
+        let wheeling_collector = BlockchainService::parse_pubkey(
+            &std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
+        let loss_collector = BlockchainService::parse_pubkey(
+            &std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
 
         let fee_collector_ata = self
             .blockchain
