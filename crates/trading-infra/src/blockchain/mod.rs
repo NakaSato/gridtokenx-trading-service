@@ -39,7 +39,7 @@ impl BlockchainGateway for BlockchainService {
                     incentive_multiplier: Decimal::from(multiplier_bps) / Decimal::from(10_000),
                     wheeling_charge: Decimal::from(wheeling_bps) / Decimal::from(10_000),
                     maintenance_mode,
-                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(chrono::Utc::now),
+                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(|| gridtokenx_telemetry::time::now()),
                 })
             }
             Err(e) => {
@@ -49,7 +49,7 @@ impl BlockchainGateway for BlockchainService {
                     incentive_multiplier: Decimal::from(1),
                     wheeling_charge: Decimal::from(0),
                     maintenance_mode: false,
-                    last_updated: chrono::Utc::now(),
+                    last_updated: gridtokenx_telemetry::time::now(),
                 })
             }
         }
@@ -125,7 +125,7 @@ impl BlockchainGateway for BlockchainService {
                 .execute_generation_mint(
                     &seller_wallet,
                     settlement.energy_amount,
-                    chrono::Utc::now().timestamp(),
+                    gridtokenx_telemetry::time::now().timestamp(),
                 )
                 .await?;
 
@@ -317,7 +317,7 @@ impl BlockchainGateway for BlockchainService {
         })?;
 
         // Format certificate ID: ERC-{meter_id}-{timestamp}
-        let cert_id = format!("ERC-{}-{}", meter_id, chrono::Utc::now().timestamp());
+        let cert_id = format!("ERC-{}-{}", meter_id, gridtokenx_telemetry::time::now().timestamp());
 
         // Convert decimal to u64 (9 decimals for GRX/ERC)
         let amount_u64 = (energy_amount * rust_decimal::Decimal::from(1_000_000_000i64))

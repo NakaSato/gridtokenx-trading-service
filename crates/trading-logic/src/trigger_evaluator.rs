@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{info, warn};
@@ -65,7 +64,7 @@ impl TriggerEvaluator {
                 target_price: alert.target_price,
                 triggered_price: price,
                 condition: alert.condition.to_string(),
-                triggered_at: Utc::now(),
+                triggered_at: gridtokenx_telemetry::time::now(),
             });
             if let Err(e) = self
                 .alert_repo

@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use chrono::Utc;
 use ipnetwork::IpNetwork;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -43,7 +42,7 @@ impl AuditLogger {
                 })
             }
         };
-        let created_at = Utc::now();
+        let created_at = gridtokenx_telemetry::time::now();
 
         // Use user_activities table (unified schema)
         sqlx::query(
@@ -83,7 +82,7 @@ impl AuditLogger {
         let mut metadata_list = Vec::with_capacity(events.len());
         let mut created_at_list = Vec::with_capacity(events.len());
 
-        let now = Utc::now();
+        let now = gridtokenx_telemetry::time::now();
 
         for event in events {
             let event_type = event.event_type();

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use trading_core::models::{Settlement, SettlementStatus};
@@ -133,7 +132,7 @@ impl SettlementService {
             net_amount: total_amount,
             status: SettlementStatus::Pending,
             blockchain_tx: None,
-            created_at: chrono::Utc::now(),
+            created_at: gridtokenx_telemetry::time::now(),
             confirmed_at: None,
             wheeling_charge: Some(rust_decimal::Decimal::ZERO),
             loss_factor: Some(rust_decimal::Decimal::ONE),
@@ -253,7 +252,7 @@ impl SettlementService {
                     settlement_id: tx_result.settlement_id,
                     tx_signature: tx_result.signature.clone(),
                     status: SettlementStatus::Completed.to_string(),
-                    timestamp: Utc::now(),
+                    timestamp: gridtokenx_telemetry::time::now(),
                 },
             );
             if let Err(e) = self

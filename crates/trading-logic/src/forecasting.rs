@@ -1,4 +1,4 @@
-use chrono::{Timelike, Utc};
+use chrono::Timelike;
 use trading_core::traits::TraitResult;
 
 /// AI/Forecasting Service for Load and Generation prediction.
@@ -20,7 +20,7 @@ impl ForecastingService {
         // Simplified statistical model based on Thai Standard Load Profile (SLP).
         // Peak is usually around 14:00 (AC load) and 19:00 (Residential).
         let mut predictions = Vec::with_capacity(24);
-        let now = Utc::now();
+        let now = gridtokenx_telemetry::time::now();
 
         for h in 0..24 {
             let hour = (now.hour() + h as u32) % 24;

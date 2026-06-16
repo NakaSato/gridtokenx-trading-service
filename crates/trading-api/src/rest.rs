@@ -5,7 +5,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -166,8 +165,8 @@ pub async fn submit_order(
         price_per_kwh: price,
         filled_amount: Decimal::ZERO,
         status: OrderStatus::Pending,
-        expires_at: Some(Utc::now() + chrono::Duration::hours(24)),
-        created_at: Some(Utc::now()),
+        expires_at: Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+        created_at: Some(gridtokenx_telemetry::time::now()),
         filled_at: None,
         epoch_id: None,
         zone_id: Some(req.zone_id),
@@ -262,7 +261,7 @@ pub async fn submit_order(
     Ok(Json(SubmitOrderResponse {
         id: order.id,
         status: "open".to_string(),
-        created_at: order.created_at.unwrap_or_else(Utc::now),
+        created_at: order.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
     }))
 }
 
@@ -350,7 +349,7 @@ pub async fn list_orders(
             energy_amount_kwh: o.energy_amount.to_string(),
             price_per_kwh: o.price_per_kwh.to_string(),
             filled_amount_kwh: o.filled_amount.to_string(),
-            created_at: o.created_at.unwrap_or_else(Utc::now),
+            created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
         })
         .collect::<Vec<_>>();
 
@@ -407,7 +406,7 @@ pub async fn get_order_by_id(
         energy_amount_kwh: order.energy_amount.to_string(),
         price_per_kwh: order.price_per_kwh.to_string(),
         filled_amount_kwh: order.filled_amount.to_string(),
-        created_at: order.created_at.unwrap_or_else(Utc::now),
+        created_at: order.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
     }))
 }
 
@@ -447,7 +446,7 @@ pub async fn create_quote(
     // Mock for now to match the redesign spec
     Ok(Json(QuoteResponse {
         quote_id: qid,
-        expires_at: Utc::now() + chrono::Duration::minutes(5),
+        expires_at: gridtokenx_telemetry::time::now() + chrono::Duration::minutes(5),
         breakdown: QuoteBreakdown {
             energy_cost: "450.00".to_string(),
             wheeling_charge: "12.50".to_string(),
@@ -479,7 +478,7 @@ pub async fn get_market_stats(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
     Ok(Json(MarketStatsResponse {
-        timestamp: Utc::now(),
+        timestamp: gridtokenx_telemetry::time::now(),
         total_volume_24h_kwh: "12500.50".to_string(),
         avg_price_24h: "4.45".to_string(),
         active_users: 156,
@@ -735,7 +734,7 @@ pub async fn get_carbon_balance(
         "total_credits": balance.to_string(),
         "available_credits": balance.to_string(),
         "retired_credits": "0.0",
-        "last_updated": Utc::now(),
+        "last_updated": gridtokenx_telemetry::time::now(),
     })))
 }
 
@@ -1535,7 +1534,7 @@ pub async fn create_recurring_order(
             "interval_value must be >= 1".to_string(),
         ));
     }
-    let next_exec = next_execution_at(Utc::now(), interval_type, interval_value);
+    let next_exec = next_execution_at(gridtokenx_telemetry::time::now(), interval_type, interval_value);
 
     let name = req.name.and_then(|s| {
         let t = s.trim().to_string();
@@ -1753,7 +1752,7 @@ mod tests {
             triggered_price: None,
             repeat: false,
             note: note.map(str::to_string),
-            created_at: Utc::now(),
+            created_at: gridtokenx_telemetry::time::now(),
             updated_at: None,
         }
     }
@@ -1784,15 +1783,15 @@ mod tests {
             min_price_per_kwh: None,
             interval_type: IntervalType::Daily,
             interval_value: 2,
-            next_execution_at: Utc::now(),
+            next_execution_at: gridtokenx_telemetry::time::now(),
             last_executed_at: None,
             status,
             total_executions: 0,
             max_executions: Some(5),
             name: Some("dca".to_string()),
             description: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: gridtokenx_telemetry::time::now(),
+            updated_at: gridtokenx_telemetry::time::now(),
         }
     }
 
@@ -1891,7 +1890,7 @@ mod tests {
             energy_amount: Decimal::new(amount, 0),
             original_amount: Decimal::new(amount, 0),
             price_per_kwh: Decimal::new(price, 2),
-            created_at: Utc::now(),
+            created_at: gridtokenx_telemetry::time::now(),
             zone_id: Some(1),
             session_token: None,
             signature: None,
@@ -1973,7 +1972,7 @@ mod tests {
             net_amount: Decimal::new(1255, 2),
             status: SettlementStatus::Completed,
             blockchain_tx: Some("sig123".to_string()),
-            created_at: Utc::now(),
+            created_at: gridtokenx_telemetry::time::now(),
             confirmed_at: None,
             wheeling_charge: Some(Decimal::new(2, 2)),
             loss_factor: None,

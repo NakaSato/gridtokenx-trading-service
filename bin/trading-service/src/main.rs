@@ -9,6 +9,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup telemetry
     trading_infra::init_telemetry("trading-service");
 
+    // External NTP server (Cloudflare primary, Google fallback) as primary wall-clock
+    // source — order/match/settlement timestamps now use agreed time, not a drifting
+    // container clock. Background poller; `time::now()` is non-blocking, degrades to OS clock.
+    trading_infra::time::init_default();
+
     // Install default crypto provider for rustls (required for rustls 0.23+)
     rustls::crypto::ring::default_provider()
         .install_default()

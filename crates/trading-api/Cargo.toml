@@ -6,6 +6,7 @@ description = "HTTP/gRPC API handlers for GridTokenX trading service"
 
 [dependencies]
 trading-core.workspace = true
+gridtokenx-telemetry.workspace = true
 trading-protocol.workspace = true
 trading-logic.workspace = true
 trading-persistence.workspace = true

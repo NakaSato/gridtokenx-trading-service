@@ -124,7 +124,7 @@ impl VppService {
             cluster_id: cluster_id.to_string(),
             target_kw,
             members_commanded: dispatches.len(),
-            timestamp: chrono::Utc::now(),
+            timestamp: gridtokenx_telemetry::time::now(),
         });
         
         if let Err(e) = self.events.publish(event).await {

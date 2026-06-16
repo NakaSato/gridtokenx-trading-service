@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -40,7 +39,7 @@ impl RecurringEvaluator {
     /// passed, then reschedule it. Returns the number of orders placed. One bad
     /// rule never aborts the cycle — it is logged and skipped.
     pub async fn run_cycle(&self) -> TraitResult<usize> {
-        let now = Utc::now();
+        let now = gridtokenx_telemetry::time::now();
         let due = self.recurring_repo.get_due_recurring_orders(now).await?;
         if due.is_empty() {
             return Ok(0);
@@ -110,8 +109,8 @@ impl RecurringEvaluator {
             price_per_kwh: price,
             filled_amount: Decimal::ZERO,
             status: OrderStatus::Pending,
-            expires_at: Some(Utc::now() + chrono::Duration::hours(24)),
-            created_at: Some(Utc::now()),
+            expires_at: Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+            created_at: Some(gridtokenx_telemetry::time::now()),
             filled_at: None,
             epoch_id: Some(epoch_id),
             zone_id: None,

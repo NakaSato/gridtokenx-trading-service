@@ -6,6 +6,7 @@ description = "Domain services and use-case orchestration for GridTokenX trading
 
 [dependencies]
 trading-core.workspace = true
+gridtokenx-telemetry.workspace = true
 trading-engine.workspace = true
 trading-persistence.workspace = true
 trading-infra.workspace = true

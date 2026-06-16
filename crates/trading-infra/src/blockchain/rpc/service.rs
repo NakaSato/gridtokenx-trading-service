@@ -654,7 +654,7 @@ impl BlockchainService {
                 &market_pubkey.to_string(),
                 price,
                 amount,
-                chrono::Utc::now().timestamp(),
+                gridtokenx_telemetry::time::now().timestamp(),
                 0,
             )?;
 

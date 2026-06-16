@@ -1,4 +1,3 @@
-use chrono::Utc;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tracing::info;
@@ -104,7 +103,7 @@ impl MatcherService {
         });
 
         // 3. Execute pure matching logic
-        let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let now_ns = gridtokenx_telemetry::time::now().timestamp_nanos_opt().unwrap_or(0);
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut fast_buys,
             &mut fast_sells,
@@ -185,7 +184,7 @@ impl MatcherService {
                     net_amount: m.total_energy_cost,
                     status: trading_core::models::SettlementStatus::Pending,
                     blockchain_tx: None,
-                    created_at: Utc::now(),
+                    created_at: gridtokenx_telemetry::time::now(),
                     confirmed_at: None,
                     wheeling_charge: Some(m.wheeling_charge),
                     loss_factor: Some(m.loss_factor),
@@ -223,7 +222,7 @@ impl MatcherService {
                 price: m.match_price,
                 buyer_id: m.buyer_id,
                 seller_id: m.seller_id,
-                timestamp: Utc::now(),
+                timestamp: gridtokenx_telemetry::time::now(),
                 zone_id: m.buyer_zone_id,
             });
             if let Err(e) = self
@@ -236,7 +235,7 @@ impl MatcherService {
                         sell_order_id: m.sell_order_id,
                         matched_amount: m.match_amount,
                         match_price: m.match_price,
-                        match_time: Utc::now(),
+                        match_time: gridtokenx_telemetry::time::now(),
                         status: "pending".to_string(),
                     },
                     settlement_link,

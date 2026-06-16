@@ -220,7 +220,7 @@ impl OrderRepository for PostgresOrderRepository {
                 energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
                 original_amount: o.energy_amount,
                 price_per_kwh: o.price_per_kwh,
-                created_at: o.created_at.unwrap_or_else(Utc::now),
+                created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
                 zone_id: o.zone_id,
                 session_token: o.session_token,
                 signature: None, // Logic for signatures will be handled in logic crate
@@ -249,7 +249,7 @@ impl OrderRepository for PostgresOrderRepository {
                 energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
                 original_amount: o.energy_amount,
                 price_per_kwh: o.price_per_kwh,
-                created_at: o.created_at.unwrap_or_else(Utc::now),
+                created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
                 zone_id: o.zone_id,
                 session_token: o.session_token,
                 signature: None,

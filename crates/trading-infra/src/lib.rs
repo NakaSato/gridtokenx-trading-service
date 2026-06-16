@@ -16,4 +16,4 @@ pub use blockchain::BlockchainService;
 pub use cache::CacheService;
 pub use events::{EventBus, KafkaEventBus};
 pub use identity::IamIdentityGateway;
-pub use telemetry::init_telemetry;
+pub use telemetry::{init_telemetry, time};

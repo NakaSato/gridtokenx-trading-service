@@ -1,5 +1,4 @@
 use buffa::view::OwnedView;
-use chrono::Utc;
 use connectrpc::{ConnectError, Context, ErrorCode};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -85,8 +84,8 @@ impl TradingService for TradingGrpcService {
             price_per_kwh: price,
             filled_amount: Decimal::ZERO,
             status: OrderStatus::Pending,
-            expires_at: Some(Utc::now() + chrono::Duration::hours(24)),
-            created_at: Some(Utc::now()),
+            expires_at: Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+            created_at: Some(gridtokenx_telemetry::time::now()),
             filled_at: None,
             epoch_id: Some(epoch_id),
             zone_id: request.zone_id,
