@@ -425,12 +425,6 @@ pub trait BlockchainGateway: Send + Sync {
     /// Get on-chain zone configuration (multiplier, etc).
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<crate::models::ZoneConfig>;
 
-    /// Execute a settlement on-chain.
-    async fn execute_settlement(
-        &self,
-        settlement: &crate::models::Settlement,
-    ) -> TraitResult<crate::models::SettlementTransaction>;
-
     /// Execute multiple settlements in a single batched transaction.
     async fn execute_batched_settlements(
         &self,
@@ -443,14 +437,6 @@ pub trait BlockchainGateway: Send + Sync {
         user_id: Uuid,
         meter_id: &str,
         energy_amount: Decimal,
-    ) -> TraitResult<String>;
-
-    /// Execute on-chain generation mint.
-    async fn execute_generation_mint(
-        &self,
-        user_wallet: &str,
-        energy_amount: Decimal,
-        timestamp: i64,
     ) -> TraitResult<String>;
 
     /// Sync total supply from SPL Mint to TokenInfo PDA.

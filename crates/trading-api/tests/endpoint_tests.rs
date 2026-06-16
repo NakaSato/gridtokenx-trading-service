@@ -203,17 +203,8 @@ impl BlockchainGateway for MockSystem {
             last_updated: chrono::Utc::now(),
         })
     }
-    async fn execute_settlement(&self, _s: &Settlement) -> TraitResult<SettlementTransaction> {
-        Ok(SettlementTransaction {
-            settlement_id: Uuid::new_v4(),
-            signature: "sig".to_string(),
-            slot: 1,
-            confirmation_status: "finalized".to_string(),
-        })
-    }
     async fn execute_batched_settlements(&self, _s: Vec<Settlement>) -> TraitResult<Vec<SettlementTransaction>> { Ok(vec![]) }
     async fn issue_erc(&self, _u: Uuid, _m: &str, _a: Decimal) -> TraitResult<String> { Ok("erc_sig".to_string()) }
-    async fn execute_generation_mint(&self, _w: &str, _a: Decimal, _t: i64) -> TraitResult<String> { Ok("mint_sig".to_string()) }
     async fn sync_total_supply(&self) -> TraitResult<String> { Ok("sync_sig".to_string()) }
     async fn execute_create_order(&self, _u: Uuid, _m: &str, _a: u64, _p: u64, _s: &str, _e: Option<&str>, _z: u32) -> TraitResult<(String, String, u64)> {
         Ok(("sig".to_string(), "pda".to_string(), 1))
@@ -575,7 +566,6 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         "kafka_topic_prefix": "trading",
         "role": "api",
         "platform_user_id": Uuid::nil(),
-        "oracle_feed_in_tariff": "0.10",
         "aggregator_bridge_public_key": oracle_pub_key
     });
 
@@ -593,7 +583,6 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         mock.clone(),
         mock.clone(),
         Uuid::nil(),
-        Decimal::new(45, 1),
     ));
 
     let vpp = Arc::new(trading_logic::vpp::VppService::new(

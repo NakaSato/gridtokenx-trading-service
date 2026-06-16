@@ -10,7 +10,6 @@ use trading_persistence::repositories::{
     PostgresOrderRepository, PostgresPriceAlertRepository, PostgresRecurringOrderRepository,
     PostgresSettlementRepository,
 };
-use uuid::Uuid;
 
 /// Container for all infrastructure components
 pub struct Infrastructure {
@@ -37,7 +36,6 @@ pub struct AppServices {
     pub settlement: Arc<SettlementService>,
     pub matcher: Arc<MatcherService>,
     pub vpp: Arc<trading_logic::vpp::VppService>,
-    pub oracle_consumer: Arc<trading_logic::workers::OracleConsumer>,
     pub recurring_evaluator: Arc<trading_logic::RecurringEvaluator>,
     pub trigger_evaluator: Arc<trading_logic::TriggerEvaluator>,
 }
@@ -90,7 +88,6 @@ impl ServiceBuilder {
             )
             .await?
             .with_identity_gateway(identity.clone())
-            .with_oracle_mint_enabled(config.oracle_mint_enabled)
             .with_trade_settlement_enabled(config.trade_settlement_enabled),
         );
 
@@ -158,7 +155,6 @@ impl ServiceBuilder {
             blockchain.clone(),
             audit.clone(),
             config.platform_user_id,
-            config.oracle_feed_in_tariff,
         ));
 
         let matcher_service = Arc::new(MatcherService::new(
@@ -171,14 +167,6 @@ impl ServiceBuilder {
             vpp_repo.clone(),
             audit.clone(),
             events.clone(),
-        ));
-
-        // Initialize Oracle Consumer
-        let oracle_consumer = Arc::new(trading_logic::workers::OracleConsumer::new(
-            event_bus.clone(),
-            settlement_service.clone(),
-            "trading_oracle_group".to_string(),
-            format!("trading_oracle_{}", Uuid::new_v4()),
         ));
 
         // Recurring-order & price-alert automation (Phase 6). Both read/write
@@ -197,7 +185,6 @@ impl ServiceBuilder {
             settlement: settlement_service,
             matcher: matcher_service,
             vpp: vpp_service,
-            oracle_consumer,
             recurring_evaluator,
             trigger_evaluator,
         };

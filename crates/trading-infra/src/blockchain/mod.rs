@@ -82,69 +82,6 @@ impl BlockchainGateway for BlockchainService {
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 
-    async fn execute_settlement(
-        &self,
-        settlement: &trading_core::models::Settlement,
-    ) -> TraitResult<trading_core::models::SettlementTransaction> {
-        info!("Executing on-chain settlement for ID: {}", settlement.id);
-
-        if settlement.trade_id.is_none() {
-            // Oracle Surplus Settlement (Minting model)
-            if !self.oracle_mint_enabled {
-                // Issuance owned elsewhere (e.g. Aggregator Bridge). Refuse to
-                // mint rather than silently confirm; the caller releases the
-                // claimed row for retry (it is never minted here), preventing
-                // cross-service double mint.
-                return Err(trading_core::error::ApiError::Internal(
-                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); issuance owned by Aggregator Bridge".to_string(),
-                ));
-            }
-            info!(
-                "Surplus detected: Executing generation mint for user {}",
-                settlement.seller_id
-            );
-
-            let seller_wallet = self
-                .get_user_primary_wallet(&settlement.seller_id)
-                .await
-                .map_err(|e| {
-                    trading_core::error::ApiError::Internal(format!(
-                        "Failed to resolve seller wallet: {}",
-                        e
-                    ))
-                })?
-                .ok_or_else(|| {
-                    trading_core::error::ApiError::NotFound(format!(
-                        "Primary wallet not found for user {}",
-                        settlement.seller_id
-                    ))
-                })?;
-
-            let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
-            let signature = provider
-                .execute_generation_mint(
-                    &seller_wallet,
-                    settlement.energy_amount,
-                    gridtokenx_telemetry::time::now().timestamp(),
-                )
-                .await?;
-
-            Ok(trading_core::models::SettlementTransaction {
-                settlement_id: settlement.id,
-                signature,
-                slot: 0, // Slot will be confirmed by bridge
-                confirmation_status: "confirmed".to_string(),
-            })
-        } else {
-            // Matching Engine Trade (Atomic swap model)
-            // Note: This requires resolving Order PDAs which we'll handle in a separate refinement.
-            // For now, we'll return a specific error or a fallback.
-            Err(trading_core::error::ApiError::Internal(
-                "Atomic swap settlement not yet fully wired to PDAs".to_string(),
-            ))
-        }
-    }
-
     async fn execute_batched_settlements(
         &self,
         settlements: Vec<trading_core::models::Settlement>,
@@ -155,63 +92,14 @@ impl BlockchainGateway for BlockchainService {
 
         info!("Executing batched on-chain settlements for {} records", settlements.len());
 
-        // Split into Oracle and Trade settlements
-        let (oracle_settlements, trade_settlements): (Vec<_>, Vec<_>) = 
-            settlements.into_iter().partition(|s| s.trade_id.is_none());
-
         let mut results = Vec::new();
 
-        // 1. Process Oracle Settlements in batches
-        if !oracle_settlements.is_empty() {
-            if !self.oracle_mint_enabled {
-                // Issuance owned elsewhere; refuse to mint so the same metered
-                // generation isn't minted by both trading and the issuer.
-                return Err(trading_core::error::ApiError::Internal(format!(
-                    "oracle generation mint disabled (ORACLE_MINT_ENABLED=false); {} surplus settlement(s) not minted (caller releases them for retry)",
-                    oracle_settlements.len()
-                )));
-            }
-            let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
-            
-            let mut mint_inputs = Vec::new();
-            let mut oracle_ids = Vec::new();
-
-            for settlement in oracle_settlements {
-                let seller_wallet = self
-                    .get_user_primary_wallet(&settlement.seller_id)
-                    .await
-                    .map_err(|e| {
-                        trading_core::error::ApiError::Internal(format!(
-                            "Failed to resolve seller wallet: {}",
-                            e
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        trading_core::error::ApiError::NotFound(format!(
-                            "Primary wallet not found for user {}",
-                            settlement.seller_id
-                        ))
-                    })?;
-
-                mint_inputs.push((seller_wallet, settlement.energy_amount));
-                oracle_ids.push(settlement.id);
-            }
-
-            if !mint_inputs.is_empty() {
-                let signature = provider.execute_batched_generation_mints(mint_inputs).await?;
-
-                for id in oracle_ids {
-                    results.push(trading_core::models::SettlementTransaction {
-                        settlement_id: id,
-                        signature: signature.clone(),
-                        slot: 0,
-                        confirmation_status: "confirmed".to_string(),
-                    });
-                }
-            }
-        }
-
-        // 2. Process Trade Settlements (on-chain atomic energy↔currency swap).
+        // Process matching-engine trade settlements as on-chain atomic
+        // energy↔currency swaps. (Generation issuance is no longer minted here —
+        // it is owned by the metering/issuance service; trading only settles
+        // trades.) A settlement carrying no resolvable order PDA / wallet is
+        // skipped and left for retry rather than failing the whole batch.
+        let trade_settlements = settlements;
         if !trade_settlements.is_empty() {
             if !self.trade_settlement_enabled {
                 // Disabled until the swap path is validated against a live
@@ -342,23 +230,6 @@ impl BlockchainGateway for BlockchainService {
             cert_id, signature
         );
         Ok(signature.to_string())
-    }
-
-    async fn execute_generation_mint(
-        &self,
-        user_wallet: &str,
-        energy_amount: Decimal,
-        timestamp: i64,
-    ) -> TraitResult<String> {
-        use std::str::FromStr;
-        let wallet_pubkey = Pubkey::from_str(user_wallet).map_err(|e| {
-            trading_core::error::ApiError::Validation(format!("Invalid wallet address: {}", e))
-        })?;
-
-        let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
-        provider
-            .execute_generation_mint(&wallet_pubkey, energy_amount, timestamp)
-            .await
     }
 
     async fn sync_total_supply(&self) -> TraitResult<String> {

@@ -15,9 +15,6 @@ pub struct BlockchainService {
     pub core: Arc<gridtokenx_blockchain_core::BlockchainService>,
     pub db: Option<sqlx::PgPool>,
     pub identity_gateway: Option<Arc<dyn trading_core::traits::IdentityGateway>>,
-    /// When false, the oracle/surplus generation-mint path (path B) is disabled
-    /// so trading no longer mints metered generation (issuance owned elsewhere).
-    pub oracle_mint_enabled: bool,
     /// When false, on-chain atomic-swap settlement of matching-engine trades is
     /// disabled (trade settlements are left for retry, never sent on-chain).
     pub trade_settlement_enabled: bool,
@@ -68,7 +65,6 @@ impl BlockchainService {
             core: Arc::new(core),
             db,
             identity_gateway: None,
-            oracle_mint_enabled: true,
             trade_settlement_enabled: false,
         })
     }
@@ -76,12 +72,6 @@ impl BlockchainService {
     /// Set the identity gateway for custodial signing
     pub fn with_identity_gateway(mut self, gateway: Arc<dyn trading_core::traits::IdentityGateway>) -> Self {
         self.identity_gateway = Some(gateway);
-        self
-    }
-
-    /// Enable/disable trading's oracle generation-mint path (path B).
-    pub fn with_oracle_mint_enabled(mut self, enabled: bool) -> Self {
-        self.oracle_mint_enabled = enabled;
         self
     }
 
