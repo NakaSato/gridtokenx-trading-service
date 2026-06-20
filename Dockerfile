@@ -1,6 +1,7 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # =============================================================================
-# GridTokenX Trading Service - Debian Bookworm Production Image
+# GridTokenX Trading Service — distroless image: binary + its shared libs only.
+# No Rust toolchain, no target/ in the image (target lives in a BuildKit cache).
 # =============================================================================
 FROM rust:1.89-bookworm AS builder
 
@@ -37,37 +38,32 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     strip target/release/trading-service && \
     cp target/release/trading-service /app/trading-service-bin
 
-# -----------------------------------------------------------------------------
-# Stage 2: Runtime (Minimal Debian)
-# -----------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+# Collect the binary + its non-glibc shared libs into a flat lib/ folder.
+# glibc core + the dynamic loader come from the distroless/cc base — skip them.
+RUN set -eux; \
+    BIN=/app/trading-service-bin; \
+    mkdir -p /out/lib; \
+    cp "$BIN" /out/trading-service; \
+    ldd "$BIN" | awk '/=>/{print $3} !/=>/{print $1}' | grep -E '^/' | sort -u | while read -r lib; do \
+        case "$lib" in \
+            */ld-linux*|*/libc.so*|*/libm.so*|*/libpthread*|*/libdl.so*|*/librt.so*) continue;; \
+        esac; \
+        cp -Lv "$lib" /out/lib/; \
+    done
 
-# Install runtime dependencies
-RUN <<EOT
-    apt-get update
-    apt-get install -y --no-install-recommends \
-        ca-certificates \
-        libssl3 \
-        tzdata
-EOT
-
-# Create non-root user
-RUN <<EOT
-    groupadd -g 1000 appgroup
-    useradd -u 1000 -g appgroup -s /bin/sh appuser
-EOT
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime (distroless, non-root uid 65532)
+# -----------------------------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 WORKDIR /app
 
-# Copy binary from builder stage
-COPY --from=builder /app/trading-service-bin /app/trading-service
+# Copy binary, its lib folder, and migrations from the builder stage
+COPY --from=builder /out/trading-service /app/trading-service
+COPY --from=builder /out/lib/ /app/lib/
 COPY --from=builder /app/gridtokenx-trading-service/migrations /app/migrations
 
-# Ensure appuser owns the directory
-RUN chown -R appuser:appgroup /app
-
-# Use non-root user
-USER appuser
+ENV LD_LIBRARY_PATH=/app/lib
 
 # Expose gRPC port (5020) and HTTP metrics port (4020)
 EXPOSE 5020 4020
