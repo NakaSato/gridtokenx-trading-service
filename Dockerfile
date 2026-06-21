@@ -17,7 +17,8 @@ RUN <<EOT
         git \
         curl \
         libprotobuf-dev \
-        protobuf-compiler
+        protobuf-compiler \
+        busybox-static
 EOT
 
 # Set working directory
@@ -44,6 +45,7 @@ RUN set -eux; \
     BIN=/app/trading-service-bin; \
     mkdir -p /out/lib; \
     cp "$BIN" /out/trading-service; \
+    cp /bin/busybox /out/busybox; \
     ldd "$BIN" | awk '/=>/{print $3} !/=>/{print $1}' | grep -E '^/' | sort -u | while read -r lib; do \
         case "$lib" in \
             */ld-linux*|*/libc.so*|*/libm.so*|*/libpthread*|*/libdl.so*|*/librt.so*) continue;; \
@@ -61,6 +63,7 @@ WORKDIR /app
 # Copy binary, its lib folder, and migrations from the builder stage
 COPY --from=builder /out/trading-service /app/trading-service
 COPY --from=builder /out/lib/ /app/lib/
+COPY --from=builder /out/busybox /usr/bin/busybox
 COPY --from=builder /app/gridtokenx-trading-service/migrations /app/migrations
 
 ENV LD_LIBRARY_PATH=/app/lib
