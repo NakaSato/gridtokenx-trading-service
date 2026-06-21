@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gridtokenx_blockchain_core::rpc::{instructions::OffchainOrderPayload, BlockchainUtils};
+use gridtokenx_blockchain_core::rpc::BlockchainUtils;
 use solana_sdk::{
     instruction::Instruction,
     pubkey::Pubkey,
@@ -390,58 +390,11 @@ impl BlockchainService {
             .await
     }
 
-    /// Settle off-chain match
-    #[allow(clippy::too_many_arguments)]
-    pub async fn execute_settle_offchain_match(
-        &self,
-        market_pubkey: &Pubkey,
-        buyer_payload: &OffchainOrderPayload,
-        seller_payload: &OffchainOrderPayload,
-        match_amount: u64,
-        match_price: u64,
-        wheeling_charge: u64,
-        loss_cost: u64,
-        buyer_currency_ata: &Pubkey,
-        seller_currency_ata: &Pubkey,
-        seller_energy_ata: &Pubkey,
-        buyer_energy_ata: &Pubkey,
-        fee_collector_ata: &Pubkey,
-        wheeling_collector_ata: &Pubkey,
-        loss_collector_ata: &Pubkey,
-        currency_mint: &Pubkey,
-        energy_mint: &Pubkey,
-    ) -> Result<Signature> {
-        let authority = self.get_authority_keypair().await?;
-
-        let instruction = self
-            .core
-            .instruction_builder
-            .build_settle_offchain_match_instruction(
-                market_pubkey,
-                buyer_payload,
-                seller_payload,
-                match_amount,
-                match_price,
-                wheeling_charge,
-                loss_cost,
-                buyer_currency_ata,
-                seller_currency_ata,
-                seller_energy_ata,
-                buyer_energy_ata,
-                fee_collector_ata,
-                wheeling_collector_ata,
-                loss_collector_ata,
-                currency_mint,
-                energy_mint,
-            )?;
-
-        self.core
-            .on_chain_manager
-            .build_and_send_transaction(vec![instruction], &[&authority])
-            .await
-    }
-
-    /// Issue an ERC certificate on-chain
+    /// Issue an ERC certificate on-chain via the sovereign Chain Bridge path.
+    ///
+    /// Trading is custodial: it holds only the meter owner's `Pubkey` (the key
+    /// lives in IAM/Vault), so it cannot sign locally. Submit with no local
+    /// signer; Chain Bridge signs server-side.
     pub async fn issue_erc(
         &self,
         certificate_id: &str,
@@ -450,17 +403,15 @@ impl BlockchainService {
         energy_amount: u64,
         renewable_source: &str,
         validation_data: &str,
-        authority: &(dyn Signer + Send + Sync),
     ) -> Result<Signature> {
         self.core
-            .issue_erc_with_signer(
+            .issue_erc_sovereign(
                 certificate_id,
                 user_wallet,
                 meter_account,
                 energy_amount,
                 renewable_source,
                 validation_data,
-                authority,
             )
             .await
     }

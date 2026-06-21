@@ -200,10 +200,6 @@ impl BlockchainGateway for BlockchainService {
                 ))
             })?;
 
-        let authority = self.get_authority_keypair().await.map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to load authority: {}", e))
-        })?;
-
         // Format certificate ID: ERC-{meter_id}-{timestamp}
         let cert_id = format!("ERC-{}-{}", meter_id, gridtokenx_telemetry::time::now().timestamp());
 
@@ -212,6 +208,7 @@ impl BlockchainGateway for BlockchainService {
             .to_u64()
             .unwrap_or(0);
 
+        // Sovereign path: Trading holds only the owner Pubkey; Chain Bridge signs.
         let signature = self
             .issue_erc(
                 &cert_id,
@@ -220,7 +217,6 @@ impl BlockchainGateway for BlockchainService {
                 amount_u64,
                 "Solar",           // Source
                 "Oracle Verified", // Validation data
-                &authority as &(dyn Signer + Send + Sync),
             )
             .await
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;
