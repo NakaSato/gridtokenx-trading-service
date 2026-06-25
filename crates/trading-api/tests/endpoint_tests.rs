@@ -22,6 +22,15 @@ use trading_core::models::*;
 use trading_core::traits::*;
 use trading_core::types::*;
 
+// gRPC (ConnectRPC) handler test surface
+use buffa::view::OwnedView;
+use connectrpc::Context;
+use trading_api::handlers::TradingGrpcService;
+use trading_protocol::trading_proto::{
+    BatchExecuteSettlementsRequest, CancelOrderRequest, DispatchVppRequest, GetOrderRequest,
+    ListOrdersRequest, SubmitOrderRequest, TradingService,
+};
+
 // ── Manual Stubs ────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -556,6 +565,7 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
             "energy_token_program_id": "EzXnJoHSjS6VR7eBwHTkHHAJGqVfRsEvyksqz7uJCBpe",
             "trading_program_id": "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd",
             "governance_program_id": "BRQEyx7DHX1Ljx1eNTHUve52aHHwkWckBXGeL9FZPEgZ",
+            "treasury_program_id": "FfxSQYKUmx9NGdCC9TDPmZSYjWYE1h4ruu3JatzHN5Tn",
             "trading_market_id": "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u"
         },
         "encryption_secret": "secret",
@@ -566,7 +576,8 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         "kafka_topic_prefix": "trading",
         "role": "api",
         "platform_user_id": Uuid::nil(),
-        "aggregator_bridge_public_key": oracle_pub_key
+        "aggregator_bridge_public_key": oracle_pub_key,
+        "trade_settlement_enabled": false
     });
 
     let config: trading_core::config::Config = serde_json::from_value(config_json).unwrap();
@@ -1265,4 +1276,264 @@ async fn test_recurring_bad_interval_400() {
     let res = request(app, "POST", "/api/v1/orders/recurring", me,
         Body::from(json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "yearly" }).to_string())).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Full route coverage ───────────────────────────────────────────────────────
+//
+// Exercises EVERY route wired in `build_router` (startup.rs) against the mock
+// AppState. The contract here is reachability + dispatch, NOT business output:
+// each route must NOT return 404 (route absent / bad path param) or 405 (wrong
+// method) — that would mean the wiring drifted from the handler set. Routes that
+// the dedicated tests above already assert on output are re-checked here only
+// for "is it still wired". The five endpoints with no dedicated test
+// (futures/candles, futures/book, analytics/history, health/ready, /metrics)
+// get an explicit `OK` assertion so they have real coverage.
+
+/// Every (method, path, body, lookup) tuple in `build_router`. `lookup` = true
+/// when the path targets a specific resource id that won't exist in the mock,
+/// so a 404 is a legitimate NotFound (not a missing route) and is excluded from
+/// the no-404 assertion. Keep in lockstep with `trading_api::startup::build_router`.
+fn all_routes(uid: Uuid) -> Vec<(&'static str, String, Body, bool)> {
+    let new_id = Uuid::new_v4();
+    vec![
+        // Spot / core orders
+        ("POST", "/api/v1/orders".into(), Body::from(json!({
+            "side": "buy", "order_type": "limit",
+            "energy_amount_kwh": "1.0", "price_per_kwh": "4.5", "zone_id": 1
+        }).to_string()), false),
+        ("GET", "/api/v1/orders".into(), Body::empty(), false),
+        ("GET", format!("/api/v1/orders/{new_id}"), Body::empty(), true),
+        ("DELETE", format!("/api/v1/orders/{new_id}"), Body::empty(), true),
+        ("POST", "/api/v1/quotes".into(), Body::from(json!({
+            "buyer_zone_id": 1, "seller_zone_id": 2,
+            "energy_amount_kwh": "1.0", "agreed_price": "4.5"
+        }).to_string()), false),
+        ("GET", "/api/v1/zones/1/book".into(), Body::empty(), false),
+        ("GET", "/api/v1/stats".into(), Body::empty(), false),
+        // Markets (read-only)
+        ("GET", "/api/v1/markets/config".into(), Body::empty(), false),
+        ("GET", "/api/v1/markets/p2p/market-prices".into(), Body::empty(), false),
+        ("GET", "/api/v1/markets/matching-status".into(), Body::empty(), false),
+        ("GET", "/api/v1/markets/settlement-stats".into(), Body::empty(), false),
+        ("GET", "/api/v1/markets/orderbook".into(), Body::empty(), false),
+        // Trades
+        ("GET", "/api/v1/trades".into(), Body::empty(), false),
+        ("GET", "/api/v1/trades/export".into(), Body::empty(), false),
+        // Price alerts
+        ("POST", "/api/v1/price-alerts".into(), Body::from(json!({
+            "symbol": "GRID/GRX", "condition": "above", "target_price": "5.0"
+        }).to_string()), false),
+        ("GET", "/api/v1/price-alerts".into(), Body::empty(), false),
+        ("DELETE", format!("/api/v1/price-alerts/{new_id}"), Body::empty(), true),
+        // Recurring orders
+        ("POST", "/api/v1/orders/recurring".into(), Body::from(json!({
+            "side": "buy", "energy_amount": "1.0", "interval_type": "daily"
+        }).to_string()), false),
+        ("GET", "/api/v1/orders/recurring".into(), Body::empty(), false),
+        ("GET", format!("/api/v1/orders/recurring/{new_id}"), Body::empty(), true),
+        ("DELETE", format!("/api/v1/orders/recurring/{new_id}"), Body::empty(), true),
+        ("POST", format!("/api/v1/orders/recurring/{new_id}/pause"), Body::empty(), true),
+        ("POST", format!("/api/v1/orders/recurring/{new_id}/resume"), Body::empty(), true),
+        // Futures
+        ("GET", "/api/v1/futures/products".into(), Body::empty(), false),
+        ("GET", "/api/v1/futures/candles".into(), Body::empty(), false),
+        ("GET", "/api/v1/futures/book".into(), Body::empty(), false),
+        ("POST", "/api/v1/futures/orders".into(), Body::from(json!({
+            "product_id": new_id.to_string(), "side": "buy", "order_type": "market",
+            "quantity": 1.0, "price": 100.0, "leverage": 1
+        }).to_string()), false),
+        ("GET", "/api/v1/futures/orders".into(), Body::empty(), false),
+        ("GET", "/api/v1/futures/positions".into(), Body::empty(), false),
+        ("DELETE", format!("/api/v1/futures/positions/{new_id}"), Body::empty(), true),
+        // User data & analytics
+        ("GET", "/api/v1/wallets/addr123/balance".into(), Body::empty(), false),
+        ("GET", "/api/v1/analytics/stats".into(), Body::empty(), false),
+        ("GET", "/api/v1/analytics/history".into(), Body::empty(), false),
+        ("GET", "/api/v1/transactions".into(), Body::empty(), false),
+        // Carbon / ESG
+        ("GET", "/api/v1/carbon/balance".into(), Body::empty(), false),
+        ("GET", "/api/v1/carbon/history".into(), Body::empty(), false),
+        ("GET", "/api/v1/carbon/transactions".into(), Body::empty(), false),
+        ("POST", "/api/v1/carbon/transfers".into(), Body::from(json!({
+            "to_user_id": uid, "amount": "1.0"
+        }).to_string()), false),
+        // Ops
+        ("GET", "/health".into(), Body::empty(), false),
+        ("GET", "/health/ready".into(), Body::empty(), false),
+        ("GET", "/metrics".into(), Body::empty(), false),
+    ]
+}
+
+#[tokio::test]
+async fn test_every_route_reachable() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+
+    for (method, uri, body, lookup) in all_routes(me) {
+        let res = request(app.clone(), method, &uri, me, body).await;
+        let status = res.status();
+        // 405 always means the wiring drifted — wrong method bound for the path.
+        assert_ne!(
+            status, StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {uri} returned 405 — wrong method wired for this path?"
+        );
+        // 404 means an absent route — UNLESS the path looks up a resource id
+        // that legitimately doesn't exist in the mock (handler NotFound).
+        if !lookup {
+            assert_ne!(
+                status, StatusCode::NOT_FOUND,
+                "{method} {uri} returned 404 — route not wired in build_router?"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_untested_endpoints_return_ok() {
+    // The five routes with no dedicated test above — assert real 200s, not just
+    // "reachable", so they carry actual coverage.
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let me = Uuid::new_v4();
+
+    for uri in [
+        "/api/v1/futures/candles",
+        "/api/v1/futures/book",
+        "/api/v1/analytics/history",
+        "/health/ready",
+        "/metrics",
+    ] {
+        let res = request(app.clone(), "GET", uri, me, Body::empty()).await;
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri} expected 200");
+    }
+}
+
+// ── ConnectRPC gRPC handler coverage ──────────────────────────────────────────
+//
+// Exercises the real-logic `TradingService` methods (submit/get/list/cancel,
+// dispatch_vpp, batch settle empty-path) directly against `TradingGrpcService`
+// over the mock `AppState`. Request views are built with `OwnedView::from_owned`
+// (encode→decode roundtrip from a programmatically-constructed owned message).
+// The many handler methods that just return `Default::default()` are NOT covered
+// here — they carry no behavior to assert.
+
+fn grpc_service() -> TradingGrpcService {
+    TradingGrpcService::new(setup_test_state(test_oracle_key()))
+}
+
+fn ctx() -> Context {
+    Context::new(axum::http::HeaderMap::new())
+}
+
+/// Build a zero-copy request view from an owned protobuf message.
+fn owned_view<V>(owned: &V::Owned) -> OwnedView<V>
+where
+    V: buffa::view::MessageView<'static>,
+{
+    OwnedView::from_owned(owned).expect("owned message -> view roundtrip")
+}
+
+#[tokio::test]
+async fn test_grpc_submit_get_list_cancel_roundtrip() {
+    let svc = grpc_service();
+    let uid = Uuid::new_v4();
+
+    // submit_order — inserts into the mock order store, returns id.
+    let submit = SubmitOrderRequest {
+        user_id: uid.to_string(),
+        side: "buy".into(),
+        order_type: "limit".into(),
+        energy_amount: 100.0,
+        price_per_kwh: 4.5,
+        zone_id: Some(1),
+        ..Default::default()
+    };
+    let (res, _) = svc.submit_order(ctx(), owned_view(&submit)).await.expect("submit ok");
+    assert!(res.success);
+    let order_id = res.id.expect("submit returns id");
+
+    // get_order — the order just inserted round-trips back.
+    let get = GetOrderRequest { order_id: order_id.clone(), ..Default::default() };
+    let (got, _) = svc.get_order(ctx(), owned_view(&get)).await.expect("get ok");
+    assert_eq!(got.id, order_id);
+    assert_eq!(got.user_id, uid.to_string());
+    assert_eq!(got.side, "buy");
+
+    // list_orders — scoped to the user; exactly the one we created.
+    let list = ListOrdersRequest { user_id: uid.to_string(), ..Default::default() };
+    let (listed, _) = svc.list_orders(ctx(), owned_view(&list)).await.expect("list ok");
+    assert_eq!(listed.orders.len(), 1);
+    assert_eq!(listed.orders[0].id, order_id);
+
+    // cancel_order — mock cancel always succeeds.
+    let cancel = CancelOrderRequest {
+        order_id: order_id.clone(),
+        user_id: uid.to_string(),
+        ..Default::default()
+    };
+    let (cancelled, _) = svc.cancel_order(ctx(), owned_view(&cancel)).await.expect("cancel ok");
+    assert!(cancelled.success);
+}
+
+#[tokio::test]
+async fn test_grpc_submit_order_invalid_side_rejected() {
+    let svc = grpc_service();
+    let submit = SubmitOrderRequest {
+        user_id: Uuid::new_v4().to_string(),
+        side: "hold".into(), // not buy/sell
+        order_type: "limit".into(),
+        energy_amount: 1.0,
+        price_per_kwh: 1.0,
+        zone_id: Some(1),
+        ..Default::default()
+    };
+    assert!(svc.submit_order(ctx(), owned_view(&submit)).await.is_err());
+}
+
+#[tokio::test]
+async fn test_grpc_submit_order_invalid_user_rejected() {
+    let svc = grpc_service();
+    let submit = SubmitOrderRequest {
+        user_id: "not-a-uuid".into(),
+        side: "buy".into(),
+        order_type: "limit".into(),
+        energy_amount: 1.0,
+        price_per_kwh: 1.0,
+        zone_id: Some(1),
+        ..Default::default()
+    };
+    assert!(svc.submit_order(ctx(), owned_view(&submit)).await.is_err());
+}
+
+#[tokio::test]
+async fn test_grpc_get_order_not_found() {
+    let svc = grpc_service();
+    let get = GetOrderRequest { order_id: Uuid::new_v4().to_string(), ..Default::default() };
+    assert!(svc.get_order(ctx(), owned_view(&get)).await.is_err());
+}
+
+#[tokio::test]
+async fn test_grpc_dispatch_vpp_succeeds() {
+    let svc = grpc_service();
+    // Mock cluster exists with 0 members -> optimize returns empty -> success.
+    let req = DispatchVppRequest {
+        cluster_id: "vpp-1".into(),
+        dispatch_mode: "discharge".into(),
+        target_kw: 10.0,
+        ..Default::default()
+    };
+    let (res, _) = svc.dispatch_vpp(ctx(), owned_view(&req)).await.expect("dispatch ok");
+    assert!(res.success);
+}
+
+#[tokio::test]
+async fn test_grpc_batch_execute_settlements_empty() {
+    let svc = grpc_service();
+    let req = BatchExecuteSettlementsRequest::default(); // no settlements
+    let (res, _) = svc
+        .batch_execute_settlements(ctx(), owned_view(&req))
+        .await
+        .expect("batch ok");
+    // Empty input short-circuits to the default response: success=false, no ids.
+    assert!(!res.success);
+    assert!(res.settlement_ids.is_empty());
 }

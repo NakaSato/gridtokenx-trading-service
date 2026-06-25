@@ -2048,8 +2048,11 @@ mod tests {
         let rec = build_trade_record(&settlement(me, Uuid::new_v4()), me);
         let csv = trades_to_csv(&[rec]);
         let mut lines = csv.lines();
-        assert!(lines.next().unwrap().starts_with("id,executed_at,role,"));
-        let row = lines.next().unwrap();
+        assert!(lines
+            .next()
+            .expect("csv header line")
+            .starts_with("id,executed_at,role,"));
+        let row = lines.next().expect("csv data row");
         assert!(row.contains("buyer"));
         assert!(row.contains("12.6"));
         // exactly header + 1 data row

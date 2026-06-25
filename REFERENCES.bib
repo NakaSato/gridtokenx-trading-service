@@ -1,0 +1,114 @@
+% References for GridTokenX Trading Service
+% Academic / domain sources backing algorithms implemented in crates/.
+% Verified 2026-06-08.
+
+% ───────────────────────────────────────────────────────────────────────────
+% Continuous Double Auction (CDA) matching engine
+%   crates/trading-engine/src/engine.rs
+% ───────────────────────────────────────────────────────────────────────────
+
+@book{friedman1993double,
+  author    = {Friedman, Daniel and Rust, John},
+  title     = {The Double Auction Market: Institutions, Theories, and Evidence},
+  publisher = {Addison-Wesley},
+  series    = {Santa Fe Institute Studies in the Sciences of Complexity},
+  year      = {1993},
+  isbn      = {978-0201624595}
+}
+
+@article{smith1962experimental,
+  author  = {Smith, Vernon L.},
+  title   = {An Experimental Study of Competitive Market Behavior},
+  journal = {Journal of Political Economy},
+  volume  = {70},
+  number  = {2},
+  pages   = {111--137},
+  year    = {1962},
+  doi     = {10.1086/258609}
+}
+
+@article{gode1993allocative,
+  author  = {Gode, Dhananjay K. and Sunder, Shyam},
+  title   = {Allocative Efficiency of Markets with Zero-Intelligence Traders:
+             Market as a Partial Substitute for Individual Rationality},
+  journal = {Journal of Political Economy},
+  volume  = {101},
+  number  = {1},
+  pages   = {119--137},
+  year    = {1993},
+  doi     = {10.1086/261868}
+}
+
+% ───────────────────────────────────────────────────────────────────────────
+% Price-Time priority (FIFO) order matching
+%   crates/trading-engine/src/engine.rs:47
+%   crates/trading-logic/src/matcher_service.rs:101
+% ───────────────────────────────────────────────────────────────────────────
+
+@article{gould2013limit,
+  author  = {Gould, Martin D. and Porter, Mason A. and Williams, Stacy and
+             McDonald, Mark and Fenn, Daniel J. and Howison, Sam D.},
+  title   = {Limit order books},
+  journal = {Quantitative Finance},
+  volume  = {13},
+  number  = {11},
+  pages   = {1709--1742},
+  year    = {2013},
+  doi     = {10.1080/14697688.2013.803148}
+}
+
+@book{harris2003trading,
+  author    = {Harris, Larry},
+  title     = {Trading and Exchanges: Market Microstructure for Practitioners},
+  publisher = {Oxford University Press},
+  year      = {2003},
+  isbn      = {978-0195144703}
+}
+
+% ───────────────────────────────────────────────────────────────────────────
+% P2P energy market context
+% ───────────────────────────────────────────────────────────────────────────
+
+@article{sousa2019peer,
+  author  = {Sousa, Tiago and Soares, Tiago and Pinson, Pierre and
+             Moret, Fabio and Baroche, Thomas and Sorin, Etienne},
+  title   = {Peer-to-peer and community-based markets: A comprehensive review},
+  journal = {Renewable and Sustainable Energy Reviews},
+  volume  = {104},
+  pages   = {367--378},
+  year    = {2019},
+  doi     = {10.1016/j.rser.2019.01.036}
+}
+
+@article{tushar2021peer,
+  author  = {Tushar, Wayes and Yuen, Chau and Saha, Tapan K. and
+             Morstyn, Thomas and Chapman, Archie C. and Alam, M. Jan E. and
+             Hanif, Sarmad and Poor, H. Vincent},
+  title   = {Peer-to-peer energy systems for connected communities:
+             A review of recent advances and emerging challenges},
+  journal = {Applied Energy},
+  volume  = {282},
+  pages   = {116131},
+  year    = {2021},
+  doi     = {10.1016/j.apenergy.2020.116131}
+}
+
+% ───────────────────────────────────────────────────────────────────────────
+% Load forecasting / clustering method
+%   crates/trading-logic/src/forecasting.rs:20
+%   NOTE: Thai Standard Load Profile (SLP) itself is a utility/regulatory
+%   spec (MEA / PEA / ERC Thailand), NOT a peer-reviewed source. Cite Chicco
+%   only for the load-pattern clustering methodology.
+% ───────────────────────────────────────────────────────────────────────────
+
+@article{chicco2012overview,
+  author  = {Chicco, Gianfranco},
+  title   = {Overview and performance assessment of the clustering methods
+             for electrical load pattern grouping},
+  journal = {Energy},
+  volume  = {42},
+  number  = {1},
+  pages   = {68--80},
+  year    = {2012},
+  doi     = {10.1016/j.energy.2011.12.031}
+}

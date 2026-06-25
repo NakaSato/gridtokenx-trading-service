@@ -21,10 +21,12 @@ cargo test                               # unit tests
 cargo test -p trading-engine             # one crate
 cargo test test_order_matching -- --nocapture   # one test
 
-# Integration tests (need a live Postgres) live in bin/trading-service/tests/
-cargo test -p trading-service --test repository_integration_test
-cargo test -p trading-service --test settlement_integration_test
+# Integration tests live in bin/trading-service/tests/ (run any by --test <file stem>).
+# Those marked below need a live Postgres; settlement_cas_retry_test is self-contained.
+cargo test -p trading-service --test repository_integration_test   # needs Postgres
+cargo test -p trading-service --test settlement_integration_test   # needs Postgres
 cargo test -p trading-service --test api_routing_test
+cargo test -p trading-service --test settlement_cas_retry_test     # CAS retry on tx-hash write-back
 ```
 
 **Lints are enforced workspace-wide** (`Cargo.toml [workspace.lints]`): `unsafe_code = "deny"`,
@@ -66,7 +68,7 @@ separate per-crate processes. The crates enforce the layered dependency directio
 | `trading-infra` | External adapters: `blockchain` (Chain Bridge), `events` (Kafka/Redis EventBus + outbox), `cache` (Redis), `audit`, `identity` (IAM gateway), `telemetry`, `metrics`. | async |
 | `trading-logic` | Services & background workers: `MatcherService`, `SettlementService`, `vpp`, `forecasting`, `clearing`, conditional/recurring order evaluators, `workers/` (matcher, settlement, supply_sync, oracle_consumer). | async |
 | `trading-api` | ConnectRPC handlers + REST (`rest.rs`, `handlers.rs`), `startup`, `state::AppState`, auth/middleware. | async |
-| `iam-protocol-compat` / `blockchain-core-compat` | Local shims standing in for the cross-service crates so this workspace builds in isolation (BPF target conflicts keep it out of the root workspace). | — |
+| `iam-protocol` / `gridtokenx-blockchain-core` | Cross-service crates pulled by **path** from sibling submodules (`../gridtokenx-iam-service/crates/iam-protocol`, `../gridtokenx-blockchain-core` — see `Cargo.toml` `[workspace.dependencies]`). Not vendored shims: these siblings must be checked out for the build. The workspace is excluded from the root workspace due to BPF target conflicts. | — |
 
 ### Dependency injection
 
@@ -103,8 +105,9 @@ No direct Solana RPC. `BlockchainGateway` (`trading-infra::blockchain`) talks to
 
 `crates/trading-protocol/build.rs` compiles `crates/trading-protocol/proto/trading.proto` via
 **`connectrpc_build`** (the `buffa` codegen) into `_trading_include.rs` — **not** prost/tonic,
-despite the root CLAUDE.md's general note. The compat crates supply hand-written `buffa::Message`
-impls (e.g. `google.protobuf.Empty`). (There is no service-root proto: the workspace manifest has
+despite the root CLAUDE.md's general note. Hand-written `buffa::Message` impls for the well-known
+types the generated code references (e.g. `google.protobuf.Empty`) live in
+`crates/trading-protocol/src/lib.rs`. (There is no service-root proto: the workspace manifest has
 no `[package]`, so a root `build.rs` would never run — the authoritative proto lives in the
 `trading-protocol` crate.)
 
@@ -133,6 +136,10 @@ Loaded by `trading_core::config::Config::from_env()` (`crates/trading-core/src/c
 ## Domain notes
 
 - **GRID** = energy token, **GRX** = currency token (see superproject `docs/glossary.md`).
+- **Trading never mints tokens.** Token issuance was removed (commit `9587dd3`); GRID supply is
+  minted upstream (meter-service via Chain Bridge). This service only **settles** trades —
+  `BlockchainSettlement::execute_atomic_settlement` does a token *swap*, never a mint. ATA
+  derivation is program-aware per mint (classic SPL vs Token-2022) in `settlement.rs`.
 - Matching is CDA; price math uses `fast_price::FastPrice` fixed-point (no floats on the hot path).
 - Beyond spot orders: **futures**, **carbon/REC**, **VPP** (virtual power plant with forecasting),
   and **conditional/recurring** orders each have their own repo + logic module.
@@ -177,3 +184,9 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 2. Use `detect_changes` for code review.
 3. Use `get_affected_flows` to understand impact.
 4. Use `query_graph` pattern="tests_for" to check coverage.
+
+## Search Tooling
+
+> **Use `rg` (ripgrep), never `grep`.** When shelling out to search files, run `rg` —
+> it respects `.gitignore`, skips binaries, and is far faster than `grep`/`find -exec grep`.
+> Reserve plain `grep` only for piping non-file streams.

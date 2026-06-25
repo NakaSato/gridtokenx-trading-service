@@ -8,6 +8,18 @@ use crate::blockchain::BlockchainService;
 use trading_core::error::ApiError;
 use trading_core::models::{Settlement, SettlementTransaction};
 
+/// The four party ATAs a trade settlement moves tokens between. Each is derived
+/// under its mint's owning token program — energy (GRID) is Token-2022, currency
+/// (GRX) is classic SPL Token. Deriving a classic-mint ATA under Token-2022 (or
+/// vice versa) yields a different, unfunded address, so the program must be chosen
+/// per mint and never assumed.
+struct TradeAtas {
+    buyer_currency_ata: Pubkey,
+    seller_energy_ata: Pubkey,
+    seller_currency_ata: Pubkey,
+    buyer_energy_ata: Pubkey,
+}
+
 #[derive(Debug)]
 pub struct BlockchainSettlementProvider {
     blockchain: Arc<BlockchainService>,
@@ -16,6 +28,43 @@ pub struct BlockchainSettlementProvider {
 impl BlockchainSettlementProvider {
     pub fn new(blockchain: Arc<BlockchainService>) -> Self {
         Self { blockchain }
+    }
+
+    /// Derive the four trade-settlement party ATAs, each under its mint's owning
+    /// token program (currency = classic SPL Token, energy = Token-2022). Shared
+    /// by the single and batched settlement paths so the program selection cannot
+    /// drift between them.
+    fn derive_trade_atas(
+        &self,
+        energy_mint: &Pubkey,
+        currency_mint: &Pubkey,
+        buyer_pubkey: &Pubkey,
+        seller_pubkey: &Pubkey,
+    ) -> trading_core::error::Result<TradeAtas> {
+        let energy_tp = spl_token_2022::id();
+        let currency_tp = spl_token::id();
+        Ok(TradeAtas {
+            buyer_currency_ata: self.blockchain.calculate_ata_address_with_program(
+                buyer_pubkey,
+                currency_mint,
+                &currency_tp,
+            )?,
+            seller_energy_ata: self.blockchain.calculate_ata_address_with_program(
+                seller_pubkey,
+                energy_mint,
+                &energy_tp,
+            )?,
+            seller_currency_ata: self.blockchain.calculate_ata_address_with_program(
+                seller_pubkey,
+                currency_mint,
+                &currency_tp,
+            )?,
+            buyer_energy_ata: self.blockchain.calculate_ata_address_with_program(
+                buyer_pubkey,
+                energy_mint,
+                &energy_tp,
+            )?,
+        })
     }
 
     #[tracing::instrument(skip(self, settlement), fields(settlement_id = %settlement.id))]
@@ -48,21 +97,16 @@ impl BlockchainSettlementProvider {
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
-        // ATAs
-        let buyer_currency_ata = self
-            .blockchain
-            .calculate_ata_address(buyer_pubkey, &currency_mint)?;
-        let seller_energy_ata = self
-            .blockchain
-            .calculate_ata_address(seller_pubkey, &energy_mint)?;
-        let seller_currency_ata = self
-            .blockchain
-            .calculate_ata_address(seller_pubkey, &currency_mint)?;
-        let buyer_energy_ata = self
-            .blockchain
-            .calculate_ata_address(buyer_pubkey, &energy_mint)?;
+        // Party ATAs (currency = classic SPL Token, energy = Token-2022).
+        let TradeAtas {
+            buyer_currency_ata,
+            seller_energy_ata,
+            seller_currency_ata,
+            buyer_energy_ata,
+        } = self.derive_trade_atas(&energy_mint, &currency_mint, buyer_pubkey, seller_pubkey)?;
 
-        // Collectors
+        // Collectors (currency mint → classic SPL Token program).
+        let currency_tp = spl_token::id();
         let fee_collector =
             BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
         let wheeling_collector = BlockchainService::parse_pubkey(
@@ -74,13 +118,13 @@ impl BlockchainSettlementProvider {
 
         let fee_collector_ata = self
             .blockchain
-            .calculate_ata_address(&fee_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&fee_collector, &currency_mint, &currency_tp)?;
         let wheeling_collector_ata = self
             .blockchain
-            .calculate_ata_address(&wheeling_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&wheeling_collector, &currency_mint, &currency_tp)?;
         let loss_collector_ata = self
             .blockchain
-            .calculate_ata_address(&loss_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&loss_collector, &currency_mint, &currency_tp)?;
 
         // Amounts in atomic units - using direct conversion (more efficient than to_string().parse())
         let amount_atomic = ToPrimitive::to_u64(
@@ -227,33 +271,31 @@ impl BlockchainSettlementProvider {
             &std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(),
         )?;
 
+        // Collectors hold currency (GRX) → classic SPL Token program. Party ATAs
+        // are derived per-trade below via `derive_trade_atas`.
+        let currency_tp = spl_token::id();
+
         let fee_collector_ata = self
             .blockchain
-            .calculate_ata_address(&fee_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&fee_collector, &currency_mint, &currency_tp)?;
         let wheeling_collector_ata = self
             .blockchain
-            .calculate_ata_address(&wheeling_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&wheeling_collector, &currency_mint, &currency_tp)?;
         let loss_collector_ata = self
             .blockchain
-            .calculate_ata_address(&loss_collector, &currency_mint)?;
+            .calculate_ata_address_with_program(&loss_collector, &currency_mint, &currency_tp)?;
 
         let mut instructions = Vec::new();
         let mut settlement_ids = Vec::new();
 
         for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs {
-            // ATAs
-            let buyer_currency_ata = self
-                .blockchain
-                .calculate_ata_address(&buyer_pubkey, &currency_mint)?;
-            let seller_energy_ata = self
-                .blockchain
-                .calculate_ata_address(&seller_pubkey, &energy_mint)?;
-            let seller_currency_ata = self
-                .blockchain
-                .calculate_ata_address(&seller_pubkey, &currency_mint)?;
-            let buyer_energy_ata = self
-                .blockchain
-                .calculate_ata_address(&buyer_pubkey, &energy_mint)?;
+            // Party ATAs (currency = classic SPL Token, energy = Token-2022).
+            let TradeAtas {
+                buyer_currency_ata,
+                seller_energy_ata,
+                seller_currency_ata,
+                buyer_energy_ata,
+            } = self.derive_trade_atas(&energy_mint, &currency_mint, &buyer_pubkey, &seller_pubkey)?;
 
             // Amounts in atomic units - using direct conversion
             let amount_atomic = (settlement.energy_amount * Decimal::from(1_000_000_000i64))
@@ -331,4 +373,92 @@ impl BlockchainSettlementProvider {
         Ok(tx_results)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trading_core::config::SolanaProgramsConfig;
+
+    fn programs() -> SolanaProgramsConfig {
+        SolanaProgramsConfig {
+            registry_program_id: "Registry111111111111111111111111111111111".to_string(),
+            oracle_program_id: "Oracle1111111111111111111111111111111111".to_string(),
+            energy_token_program_id: "Energy1111111111111111111111111111111".to_string(),
+            governance_program_id: "Gov11111111111111111111111111111111111".to_string(),
+            treasury_program_id: "Treasury11111111111111111111111111111111".to_string(),
+            trading_program_id: "Trade1111111111111111111111111111111111".to_string(),
+            trading_market_id: "Market1111111111111111111111111111111111".to_string(),
+        }
+    }
+
+    fn classic_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+        spl_associated_token_account::get_associated_token_address_with_program_id(
+            owner,
+            mint,
+            &spl_token::id(),
+        )
+    }
+
+    fn token_2022_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+        spl_associated_token_account::get_associated_token_address_with_program_id(
+            owner,
+            mint,
+            &spl_token_2022::id(),
+        )
+    }
+
+    /// Regression guard for the currency-ATA bug: `derive_trade_atas` must derive
+    /// currency (GRX) ATAs under the **classic** SPL Token program and energy
+    /// (GRID) ATAs under **Token-2022**. Deriving the classic currency mint under
+    /// Token-2022 (the original bug) produced unfunded addresses that broke the
+    /// atomic swap once `TRADE_SETTLEMENT_ENABLED=true`.
+    #[tokio::test]
+    async fn derive_trade_atas_picks_token_program_per_mint() {
+        std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
+
+        let blockchain = Arc::new(
+            BlockchainService::new(
+                "http://localhost:8899".to_string(),
+                "localnet".to_string(),
+                programs(),
+                None,
+                None,
+            )
+            .await
+            .expect("construct BlockchainService offline"),
+        );
+        let provider = BlockchainSettlementProvider::new(blockchain);
+
+        let energy_mint = Pubkey::new_unique();
+        let currency_mint = Pubkey::new_unique();
+        let buyer = Pubkey::new_unique();
+        let seller = Pubkey::new_unique();
+
+        let atas = provider
+            .derive_trade_atas(&energy_mint, &currency_mint, &buyer, &seller)
+            .expect("derive trade ATAs");
+
+        // Currency ATAs use the classic SPL Token program.
+        assert_eq!(atas.buyer_currency_ata, classic_ata(&buyer, &currency_mint));
+        assert_eq!(
+            atas.seller_currency_ata,
+            classic_ata(&seller, &currency_mint)
+        );
+        // Energy ATAs use the Token-2022 program.
+        assert_eq!(atas.seller_energy_ata, token_2022_ata(&seller, &energy_mint));
+        assert_eq!(atas.buyer_energy_ata, token_2022_ata(&buyer, &energy_mint));
+
+        // The bug: currency ATAs must NOT match the Token-2022 derivation.
+        assert_ne!(
+            atas.buyer_currency_ata,
+            token_2022_ata(&buyer, &currency_mint),
+            "currency ATA must not regress to Token-2022 derivation"
+        );
+        assert_ne!(
+            atas.seller_currency_ata,
+            token_2022_ata(&seller, &currency_mint),
+            "currency ATA must not regress to Token-2022 derivation"
+        );
+    }
 }

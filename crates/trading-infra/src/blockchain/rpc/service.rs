@@ -49,6 +49,7 @@ impl BlockchainService {
             governance_program_id: program_ids.governance_program_id,
             energy_token_program_id: program_ids.energy_token_program_id,
             trading_program_id: program_ids.trading_program_id,
+            treasury_program_id: program_ids.treasury_program_id,
             trading_market_id: program_ids.trading_market_id,
         };
 
@@ -230,9 +231,23 @@ impl BlockchainService {
         self.core.account_manager.get_account_data(pubkey).await
     }
 
-    /// Calculate ATA address
+    /// Calculate ATA address (assumes Token-2022 — correct for the energy mint only).
     pub fn calculate_ata_address(&self, owner: &Pubkey, mint: &Pubkey) -> Result<Pubkey> {
         self.core.account_manager.calculate_ata_address(owner, mint)
+    }
+
+    /// Calculate ATA address under an explicit token program. Use for mints that
+    /// are not Token-2022 — notably the classic-SPL currency mint, whose ATAs must
+    /// be derived under `spl_token::id()`.
+    pub fn calculate_ata_address_with_program(
+        &self,
+        owner: &Pubkey,
+        mint: &Pubkey,
+        token_program: &Pubkey,
+    ) -> Result<Pubkey> {
+        self.core
+            .account_manager
+            .calculate_ata_address_with_program(owner, mint, token_program)
     }
 
     /// Ensure token account exists

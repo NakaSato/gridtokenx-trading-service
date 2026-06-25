@@ -59,6 +59,7 @@ async fn test_settlement_numeric_integrity() {
         oracle_program_id: "Oracle1111111111111111111111111111111111".to_string(),
         energy_token_program_id: "Energy1111111111111111111111111111111".to_string(),
         governance_program_id: "Gov11111111111111111111111111111111111".to_string(),
+        treasury_program_id: "Treasury11111111111111111111111111111111".to_string(),
         trading_program_id: "Trade1111111111111111111111111111111111".to_string(),
         trading_market_id: "Market1111111111111111111111111111111111".to_string(),
     };

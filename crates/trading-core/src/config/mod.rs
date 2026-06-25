@@ -52,6 +52,7 @@ pub struct SolanaProgramsConfig {
     pub energy_token_program_id: String,
     pub trading_program_id: String,
     pub governance_program_id: String,
+    pub treasury_program_id: String,
     pub trading_market_id: String,
 }
 
@@ -67,6 +68,7 @@ impl Default for SolanaProgramsConfig {
             energy_token_program_id: "6FZKcVKCLFSNLMxypFJGU4K14xUBnxNW9VAuKGhmqjGX".to_string(),
             trading_program_id: "CnWDEUhTvSixeLSyViWgAnnu9YouBAYVGcrrFm1s9WcX".to_string(),
             governance_program_id: "FokVuBSPXP11aeL7VZWd8n8aVAhWqVpyPZETToSxdvTS".to_string(),
+            treasury_program_id: "FfxSQYKUmx9NGdCC9TDPmZSYjWYE1h4ruu3JatzHN5Tn".to_string(),
             trading_market_id: "mqiBmZcWMc3mor3B8fnSE2xrKThqHW7HzjuhhGKtv9u".to_string(),
         }
     }
@@ -226,6 +228,8 @@ impl Config {
                         .unwrap_or(d.trading_program_id),
                     governance_program_id: env::var("SOLANA_GOVERNANCE_PROGRAM_ID")
                         .unwrap_or(d.governance_program_id),
+                    treasury_program_id: env::var("SOLANA_TREASURY_PROGRAM_ID")
+                        .unwrap_or(d.treasury_program_id),
                     trading_market_id: env::var("SOLANA_TRADING_MARKET_ID")
                         .unwrap_or(d.trading_market_id),
                 }

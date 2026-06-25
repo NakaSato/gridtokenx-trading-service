@@ -24,12 +24,107 @@ pub trait TopologySnapshot: Send + Sync {
     fn calculate_loss_factor(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> FastPrice;
 }
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// The pure matching engine.
 pub struct MatchingEngine;
 
+/// A priced match candidate ready to fill, carrying its own price-time sort key
+/// so the comparator never has to re-index the sell slice.
+struct Candidate {
+    sell_idx: usize,
+    landed: FastPrice,
+    wheeling: FastPrice,
+    loss: FastPrice,
+    loss_cost: FastPrice,
+    sort_price: FastPrice,
+    sort_time: i64,
+    sort_id: uuid::Uuid,
+}
+
+/// Wheeling + loss for a (sell_zone, buy_zone) pair — constant across every sell
+/// in one zone book for a given buy, so computed once per zone, not per sell.
+#[derive(Clone, Copy)]
+struct ZoneFees {
+    wheeling: FastPrice,
+    loss: FastPrice,
+}
+
 impl MatchingEngine {
+    /// Price one sell against a buy. Returns a [`Candidate`] when the trade is
+    /// viable: not a self-trade, the grid can carry the flow, and the landed
+    /// cost crosses the bid. All raw fixed-point arithmetic is saturating /
+    /// checked — overflow clamps to `i64::MAX` rather than wrapping, so an
+    /// adversarial price can never wrap the accumulator into a false (negative)
+    /// cross.
+    fn priced_candidate(
+        buy: &FastOrder,
+        sell_idx: usize,
+        sell: &FastOrder,
+        topology: &dyn TopologySnapshot,
+        fees: ZoneFees,
+        dynamic_multiplier: FastPrice,
+        intra_zone_mult: FastPrice,
+    ) -> Option<Candidate> {
+        if buy.user_id == sell.user_id {
+            return None;
+        }
+        let sell_zone_id = sell.zone_id;
+
+        // Strict topology check for the actual tradeable amount.
+        let potential_amount = buy.remaining_amount().min(sell.remaining_amount());
+        if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, potential_amount) {
+            return None;
+        }
+
+        // wheeling/loss are zone-constant — passed in, not recomputed per sell.
+        let wheeling_fp = fees.wheeling;
+        let loss_fp = fees.loss;
+
+        let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR);
+        // i128 intermediate then clamp into i64 — never wraps on large prices.
+        let loss_cost_extra_raw = i64::try_from(
+            i128::from(sell.price.raw()) * i128::from(extra_loss_raw) / i128::from(FastPrice::FACTOR),
+        )
+        .unwrap_or(i64::MAX);
+
+        let landed_raw = sell
+            .price
+            .raw()
+            .saturating_add(wheeling_fp.raw())
+            .saturating_add(loss_cost_extra_raw);
+        let mut landed_cost = FastPrice::from_raw(landed_raw);
+
+        // checked_mul clamps to i64::MAX on overflow. An over-large landed cost
+        // stays huge (> any sane bid) so it simply fails to cross — never wraps
+        // negative and books a spurious match.
+        if dynamic_multiplier != FastPrice::from_raw(FastPrice::FACTOR) {
+            landed_cost = landed_cost
+                .checked_mul(dynamic_multiplier)
+                .unwrap_or_else(|| FastPrice::from_raw(i64::MAX));
+        }
+        if sell_zone_id == buy.zone_id {
+            landed_cost = landed_cost
+                .checked_mul(intra_zone_mult)
+                .unwrap_or_else(|| FastPrice::from_raw(i64::MAX));
+        }
+
+        if landed_cost <= buy.price {
+            Some(Candidate {
+                sell_idx,
+                landed: landed_cost,
+                wheeling: wheeling_fp,
+                loss: loss_fp,
+                loss_cost: FastPrice::from_raw(loss_cost_extra_raw),
+                sort_price: sell.price,
+                sort_time: sell.created_at_ns,
+                sort_id: sell.id,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Execute a matching cycle on a set of orders.
     /// Optimized for grid-scale throughput using zone-segmented order books.
     pub fn match_cycle(
@@ -44,10 +139,26 @@ impl MatchingEngine {
         let mut results = Vec::new();
         let mut stats = CycleStats::default();
 
-        // 1. Segment active sell orders by Zone and Price-Time priority
+        // 0. Enforce CDA buy-side priority here, in the engine, so correctness does
+        // not depend on how the caller pre-sorted: highest bid first (most
+        // aggressive buyer wins scarce liquidity), ties broken by earliest arrival
+        // (price-time priority), then id for determinism.
+        buy_orders.sort_unstable_by(|a, b| {
+            b.price
+                .cmp(&a.price)
+                .then_with(|| a.created_at_ns.cmp(&b.created_at_ns))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        // Intra-zone discount multiplier, derived once from the INTRA_ZONE_DISCOUNT
+        // const (1 - discount). Integer/decimal math, no float, no drift.
+        let intra_zone_mult = FastPrice::from(Decimal::ONE - INTRA_ZONE_DISCOUNT);
+
+        // 1. Segment active sell orders by Zone and Price-Time priority.
+        // BTreeMap (not HashMap) so zone iteration order is deterministic.
         // Map: ZoneId -> BTreeMap<(Price, CreatedAt, Id), Index>
-        let mut zone_books: HashMap<Option<i32>, BTreeMap<(FastPrice, i64, uuid::Uuid), usize>> =
-            HashMap::new();
+        let mut zone_books: BTreeMap<Option<i32>, BTreeMap<(FastPrice, i64, uuid::Uuid), usize>> =
+            BTreeMap::new();
         for (idx, sell) in sell_orders.iter().enumerate() {
             if sell.remaining_amount() >= MIN_TRADE_AMOUNT && !sell.is_expired(now_ns) {
                 zone_books
@@ -77,74 +188,88 @@ impl MatchingEngine {
                     continue;
                 }
 
-                // Range query: all sells in this zone with price <= buy.price
-                for ((sell_price, _, _), &sell_idx) in
-                    book.range(..=(buy.price, i64::MAX, uuid::Uuid::max()))
-                {
-                    let sell = &sell_orders[sell_idx];
+                // wheeling + loss depend only on (sell_zone, buy_zone) — compute once
+                // per zone book, not once per sell.
+                let fees = ZoneFees {
+                    wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
+                    loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
+                };
 
-                    if buy.user_id == sell.user_id {
-                        continue;
-                    }
-
-                    // Strict topology check for actual amount
-                    let potential_amount = buy.remaining_amount().min(sell.remaining_amount());
-                    if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, potential_amount) {
-                        continue;
-                    }
-
-                    let wheeling_fp = topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id);
-                    let loss_fp = topology.calculate_loss_factor(sell_zone_id, buy.zone_id);
-
-                    let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR);
-                    let loss_cost_extra_raw = (sell_price.raw() as i128 * extra_loss_raw as i128
-                        / FastPrice::FACTOR as i128)
-                        as i64;
-                    let mut landed_cost = FastPrice::from_raw(
-                        sell_price.raw() + wheeling_fp.raw() + loss_cost_extra_raw,
-                    );
-
-                    if dynamic_multiplier != FastPrice::from_raw(FastPrice::FACTOR) {
-                        landed_cost = landed_cost.unchecked_mul(dynamic_multiplier);
-                    }
-
-                    if sell_zone_id == buy.zone_id {
-                        const DISCOUNT_FP_RAW: i64 =
-                            (FastPrice::FACTOR as f64 * (1.0 - 0.05)) as i64;
-                        landed_cost =
-                            landed_cost.unchecked_mul(FastPrice::from_raw(DISCOUNT_FP_RAW));
-                    }
-
-                    if landed_cost <= buy.price {
-                        candidates.push((
-                            sell_idx,
-                            landed_cost,
-                            wheeling_fp,
-                            loss_fp,
-                            FastPrice::from_raw(loss_cost_extra_raw),
-                        ));
+                // Range query: all sells in this zone with raw price <= upper bound.
+                // landed_cost = raw_cost * dynamic_multiplier (all zones) * intra-zone
+                // discount (buyer's own zone only). Whenever that combined factor scales
+                // cost DOWN (< 1.0), a sell priced above the raw bid can still cross, so
+                // the prune bound must widen to bid / factor — otherwise the range query
+                // drops it before the discount/multiplier is applied. `priced_candidate`
+                // still does the final landed <= bid check, so widening only over-admits.
+                let mut factor_raw = i128::from(dynamic_multiplier.raw());
+                if sell_zone_id == buy.zone_id {
+                    factor_raw =
+                        factor_raw * i128::from(intra_zone_mult.raw()) / i128::from(FastPrice::FACTOR);
+                }
+                let upper_price = if factor_raw <= 0 {
+                    // zero / misconfigured factor → cost collapses to 0, every sell crosses.
+                    FastPrice::from_raw(i64::MAX)
+                } else if factor_raw < i128::from(FastPrice::FACTOR) {
+                    // cost scaled down → widen to bid / factor. CEIL (inclusive bound) so a
+                    // sell landing exactly at the bid is kept, not dropped one ULP short.
+                    let num = i128::from(buy.price.raw()) * i128::from(FastPrice::FACTOR);
+                    let raw = (num + factor_raw - 1) / factor_raw;
+                    FastPrice::from_raw(i64::try_from(raw).unwrap_or(i64::MAX))
+                } else {
+                    // factor >= 1.0 → cost only rises, raw bid is already a safe upper bound.
+                    buy.price
+                };
+                for (_, &sell_idx) in book.range(..=(upper_price, i64::MAX, uuid::Uuid::max())) {
+                    if let Some(c) = Self::priced_candidate(
+                        buy,
+                        sell_idx,
+                        &sell_orders[sell_idx],
+                        topology,
+                        fees,
+                        dynamic_multiplier,
+                        intra_zone_mult,
+                    ) {
+                        candidates.push(c);
                     }
                 }
             }
 
-            // Sort consolidated candidates from all reachable zones by landed cost
-            candidates.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+            // Sort consolidated candidates from all reachable zones by landed cost.
+            // Ties broken by raw sell price, then arrival, then id so the chosen
+            // fill order is deterministic (price-time priority) and not subject to
+            // zone-book traversal order.
+            candidates.sort_unstable_by(|a, b| {
+                a.landed
+                    .cmp(&b.landed)
+                    .then_with(|| a.sort_price.cmp(&b.sort_price))
+                    .then_with(|| a.sort_time.cmp(&b.sort_time))
+                    .then_with(|| a.sort_id.cmp(&b.sort_id))
+            });
 
             // FOK handling
             if buy.time_in_force == TimeInForce::Fok {
                 let total_available: Decimal = candidates
                     .iter()
-                    .map(|c| sell_orders[c.0].remaining_amount())
+                    .map(|c| sell_orders[c.sell_idx].remaining_amount())
                     .sum();
                 if total_available < buy.remaining_amount() {
                     continue;
                 }
             }
 
-            for (sell_idx, landed_cost_fp, wheeling_fp, loss_fp, loss_cost_fp) in candidates {
+            for c in candidates {
                 if buy.remaining_amount() < MIN_TRADE_AMOUNT {
                     break;
                 }
+                let Candidate {
+                    sell_idx,
+                    landed: landed_cost_fp,
+                    wheeling: wheeling_fp,
+                    loss: loss_fp,
+                    loss_cost: loss_cost_fp,
+                    ..
+                } = c;
 
                 let sell = &mut sell_orders[sell_idx];
                 if sell.remaining_amount() < MIN_TRADE_AMOUNT {
@@ -293,5 +418,506 @@ mod tests {
         assert_eq!(stats.total_volume, dec!(50.0));
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].match_amount, dec!(50.0));
+    }
+
+    /// CDA price priority on the BUY side.
+    ///
+    /// Two buyers compete for a single cheap sell that can fill only one of
+    /// them. Buyer HIGH bids more but arrived later; buyer LOW bids less but
+    /// arrived earlier. Buys are handed to the engine in FIFO order `[LOW, HIGH]`
+    /// (the order the orchestrator would pass them).
+    ///
+    /// Textbook CDA awards scarce liquidity to the most aggressive (highest) bid
+    /// first. `match_cycle` enforces this internally (it re-sorts buys by
+    /// price-desc, then time — see step 0), so HIGH wins despite arriving later.
+    /// Guards that buy-side priority is the engine's responsibility, not the
+    /// caller's.
+    #[test]
+    fn cda_buy_price_priority_highest_bid_wins() {
+        let seller = Uuid::new_v4();
+        let buyer_low = Uuid::new_v4();
+        let buyer_high = Uuid::new_v4();
+
+        // One sell, only enough to fill ONE buyer.
+        let mut sells = vec![FastOrder {
+            id: Uuid::new_v4(),
+            user_id: seller,
+            price: FastPrice::from(dec!(0.5)),
+            energy_amount: dec!(50.0),
+            filled_amount: dec!(0.0),
+            zone_id: Some(1),
+            created_at_ns: 100,
+            expires_at_ns: None,
+            time_in_force: TimeInForce::Gtc,
+            metadata_index: 0,
+        }];
+        let sell_meta = vec![OrderMetadata {
+            epoch_id: None,
+            order_pda: None,
+            session_token: None,
+        }];
+
+        // Buys handed to the engine in FIFO order (what the orchestrator does):
+        // LOW bid (earlier) first, HIGH bid (later) second.
+        let mut buys = vec![
+            FastOrder {
+                id: buyer_low,
+                user_id: buyer_low,
+                price: FastPrice::from(dec!(0.60)),
+                energy_amount: dec!(50.0),
+                filled_amount: dec!(0.0),
+                zone_id: Some(1),
+                created_at_ns: 100,
+                expires_at_ns: None,
+                time_in_force: TimeInForce::Gtc,
+                metadata_index: 0,
+            },
+            FastOrder {
+                id: buyer_high,
+                user_id: buyer_high,
+                price: FastPrice::from(dec!(1.00)),
+                energy_amount: dec!(50.0),
+                filled_amount: dec!(0.0),
+                zone_id: Some(1),
+                created_at_ns: 200,
+                expires_at_ns: None,
+                time_in_force: TimeInForce::Gtc,
+                metadata_index: 1,
+            },
+        ];
+        let buy_meta = vec![
+            OrderMetadata {
+                epoch_id: None,
+                order_pda: None,
+                session_token: None,
+            },
+            OrderMetadata {
+                epoch_id: None,
+                order_pda: None,
+                session_token: None,
+            },
+        ];
+
+        let topo = MockTopology;
+        let (matches, _stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &buy_meta,
+            &sell_meta,
+            &topo,
+            FastPrice::from(dec!(1.0)),
+            300,
+        );
+
+        assert_eq!(matches.len(), 1, "only one buyer can be filled");
+        assert_eq!(
+            matches[0].buyer_id, buyer_high,
+            "CDA price priority: the higher bid (1.00) must win over the \
+             earlier lower bid (0.60), even though it arrived later"
+        );
+    }
+
+    // ── Edge-case coverage ───────────────────────────────────────────────────
+
+    /// Zero wheeling, unit loss factor → landed cost == sell price. Lets the
+    /// discount / tiebreak / FOK tests reason about exact numbers.
+    struct NoFeeTopology;
+    impl TopologySnapshot for NoFeeTopology {
+        fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+            true
+        }
+        fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(0))
+        }
+        fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(1.0))
+        }
+    }
+
+    fn order(
+        user: Uuid,
+        price: Decimal,
+        amount: Decimal,
+        zone: i32,
+        t: i64,
+        tif: TimeInForce,
+        mi: usize,
+    ) -> FastOrder {
+        FastOrder {
+            id: Uuid::new_v4(),
+            user_id: user,
+            price: FastPrice::from(price),
+            energy_amount: amount,
+            filled_amount: dec!(0.0),
+            zone_id: Some(zone),
+            created_at_ns: t,
+            expires_at_ns: None,
+            time_in_force: tif,
+            metadata_index: mi,
+        }
+    }
+
+    fn meta(n: usize) -> Vec<OrderMetadata> {
+        (0..n)
+            .map(|_| OrderMetadata {
+                epoch_id: None,
+                order_pda: None,
+                session_token: None,
+            })
+            .collect()
+    }
+
+    fn unit() -> FastPrice {
+        FastPrice::from(dec!(1.0))
+    }
+
+    #[test]
+    fn self_trade_is_skipped() {
+        let u = Uuid::new_v4();
+        let mut buys = vec![order(u, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(u, dec!(0.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "same user must not trade with itself");
+        assert_eq!(stats.matches_created, 0);
+    }
+
+    #[test]
+    fn expired_sell_is_skipped() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        sells[0].expires_at_ns = Some(150); // expires before now_ns = 200
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "expired sell must not match");
+    }
+
+    #[test]
+    fn intra_zone_discount_applied() {
+        // Same zone → 5% discount. NoFee landed = sell price 1.0 → discounted 0.95.
+        // Bid 1.10 is above raw price so the range query admits the sell, and the
+        // recorded clearing price is the discounted 0.95.
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.10), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1, "same-zone trade should clear");
+        assert_eq!(
+            matches[0].match_price,
+            dec!(0.95),
+            "intra-zone price = 1.0 * (1 - 0.05)"
+        );
+    }
+
+    /// The zone-book range query is discount-aware for the buyer's own zone: a
+    /// local sell priced ABOVE the bid still crosses when the 5% discount pulls
+    /// its landed cost under the bid. Here sell=1.0, bid=0.96, discounted
+    /// landed=0.95 ≤ 0.96 → it must match and clear at 0.95.
+    #[test]
+    fn intra_zone_discount_rescues_above_bid_sell() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1, "discount must rescue the above-bid local sell");
+        assert_eq!(matches[0].match_price, dec!(0.95));
+    }
+
+    /// Cross-zone has NO discount, so an above-bid sell in another zone stays
+    /// excluded (wheeling/loss only add cost). Guards the widening from leaking
+    /// across zones.
+    #[test]
+    fn cross_zone_above_bid_sell_still_excluded() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "no discount across zones → no rescue");
+    }
+
+    /// Regression for the CEIL-division fix at the intra-zone range bound.
+    /// Raw-constructed so `bid / (1 - discount)` is INEXACT: bid = 0.950000001,
+    /// sell = 1.000000002 (FACTOR = 1e9, discount mult = 0.95).
+    /// landed = floor(1.000000002 * 0.95) = 0.950000001 == bid → it crosses.
+    /// floor(bid/0.95) = 1.000000001 would exclude the sell from the range;
+    /// ceil(bid/0.95) = 1.000000002 keeps it. With the ceil fix it must match.
+    #[test]
+    fn intra_zone_range_bound_ceils_at_inexact_boundary() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![FastOrder {
+            id: Uuid::new_v4(),
+            user_id: buyer,
+            price: FastPrice::from_raw(950_000_001),
+            energy_amount: dec!(10.0),
+            filled_amount: dec!(0.0),
+            zone_id: Some(1),
+            created_at_ns: 100,
+            expires_at_ns: None,
+            time_in_force: TimeInForce::Gtc,
+            metadata_index: 0,
+        }];
+        let mut sells = vec![FastOrder {
+            id: Uuid::new_v4(),
+            user_id: seller,
+            price: FastPrice::from_raw(1_000_000_002),
+            energy_amount: dec!(10.0),
+            filled_amount: dec!(0.0),
+            zone_id: Some(1),
+            created_at_ns: 100,
+            expires_at_ns: None,
+            time_in_force: TimeInForce::Gtc,
+            metadata_index: 0,
+        }];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(
+            matches.len(),
+            1,
+            "ceil bound must keep the exact-boundary intra-zone sell"
+        );
+    }
+
+    /// Overflow must SATURATE, not wrap. Sell price 5e9 (in range of bid 5e9) times
+    /// a 5e9 dynamic multiplier overflows i64 in the landed-cost product. With the
+    /// old `unchecked_mul` this wrapped negative and passed `landed <= bid`, booking
+    /// a spurious match at a garbage price. `checked_mul` clamps to i64::MAX → no cross.
+    #[test]
+    fn landed_cost_overflow_does_not_wrap_into_false_match() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let big = FastPrice::from_raw(5_000_000_000_000_000_000); // 5e9
+        let mut buys = vec![FastOrder {
+            id: Uuid::new_v4(),
+            user_id: buyer,
+            price: big,
+            energy_amount: dec!(10.0),
+            filled_amount: dec!(0.0),
+            zone_id: Some(1),
+            created_at_ns: 100,
+            expires_at_ns: None,
+            time_in_force: TimeInForce::Gtc,
+            metadata_index: 0,
+        }];
+        let mut sells = vec![FastOrder {
+            id: Uuid::new_v4(),
+            user_id: seller,
+            price: big,
+            energy_amount: dec!(10.0),
+            filled_amount: dec!(0.0),
+            zone_id: Some(2), // cross-zone → no discount widening, plain bid bound
+            created_at_ns: 100,
+            expires_at_ns: None,
+            time_in_force: TimeInForce::Gtc,
+            metadata_index: 0,
+        }];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            big, // adversarial dynamic_multiplier
+            200,
+        );
+        assert!(
+            matches.is_empty(),
+            "overflowed landed cost must clamp high, not wrap into a false match"
+        );
+    }
+
+    /// A dynamic_multiplier below 1.0 lowers landed cost for ALL zones, so the
+    /// range bound must widen by 1/multiplier — otherwise an above-bid sell that
+    /// crosses post-multiplier is pruned. Cross-zone (no intra discount) isolates
+    /// the multiplier's effect: sell 1.5, bid 0.96, multiplier 0.5 → landed 0.75.
+    #[test]
+    fn dynamic_multiplier_below_one_widens_bound() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            FastPrice::from(dec!(0.5)),
+            200,
+        );
+        assert_eq!(matches.len(), 1, "multiplier <1 must widen the prune bound");
+        assert_eq!(matches[0].match_price, dec!(0.75), "1.5 * 0.5");
+    }
+
+    #[test]
+    fn fok_kills_when_insufficient_liquidity() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // FOK wants 100, only 50 available → nothing fills.
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "FOK must be all-or-nothing");
+        assert_eq!(buys[0].filled_amount, dec!(0.0), "buy untouched after kill");
+    }
+
+    #[test]
+    fn fok_fills_when_sufficient_liquidity() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(stats.total_volume, dec!(50.0));
+    }
+
+    #[test]
+    fn partial_fill_carries_across_cycles() {
+        let buyer = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
+        let bmeta = meta(1);
+
+        // Cycle 1: only 40 of liquidity.
+        let mut sells1 = vec![order(
+            Uuid::new_v4(),
+            dec!(0.5),
+            dec!(40.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let (m1, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells1,
+            &bmeta,
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(m1.len(), 1);
+        assert_eq!(buys[0].filled_amount, dec!(40.0));
+        assert_eq!(buys[0].remaining_amount(), dec!(60.0));
+
+        // Cycle 2: same buy (filled state carried), new 60 of liquidity → full.
+        let mut sells2 = vec![order(
+            Uuid::new_v4(),
+            dec!(0.5),
+            dec!(60.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let (m2, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells2,
+            &bmeta,
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            300,
+        );
+        assert_eq!(m2.len(), 1);
+        assert_eq!(buys[0].filled_amount, dec!(100.0));
+        assert!(buys[0].remaining_amount() < MIN_TRADE_AMOUNT);
+    }
+
+    #[test]
+    fn multi_zone_equal_cost_tiebreak_is_deterministic() {
+        // Two sells, different zones, identical price; buyer in a third zone so
+        // neither gets the intra-zone discount → equal landed cost. Tiebreak
+        // resolves to the smaller order id, stably across repeated runs.
+        let buyer = Uuid::new_v4();
+        let s1 = order(Uuid::new_v4(), dec!(0.5), dec!(30.0), 1, 100, TimeInForce::Gtc, 0);
+        let s2 = order(Uuid::new_v4(), dec!(0.5), dec!(30.0), 2, 100, TimeInForce::Gtc, 1);
+        let expected_winner = if s1.id < s2.id { s1.user_id } else { s2.user_id };
+
+        for run in 0..5 {
+            let mut buys = vec![order(buyer, dec!(1.0), dec!(30.0), 3, 100, TimeInForce::Gtc, 0)];
+            let mut sells = vec![s1.clone(), s2.clone()];
+            let (matches, _) = MatchingEngine::match_cycle(
+                &mut buys,
+                &mut sells,
+                &meta(1),
+                &meta(2),
+                &NoFeeTopology,
+                unit(),
+                200,
+            );
+            assert_eq!(matches.len(), 1, "buyer only fills 30 = one sell");
+            assert_eq!(
+                matches[0].seller_id, expected_winner,
+                "run {run}: tiebreak must pick the same (lowest-id) sell every time"
+            );
+        }
     }
 }

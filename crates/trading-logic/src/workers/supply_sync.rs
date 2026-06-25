@@ -62,11 +62,7 @@ impl SupplySyncWorker {
                     }
 
                     // Exponential backoff: interval * 2^(n-1), capped.
-                    let backoff = self
-                        .interval
-                        .checked_mul(1u32 << (consecutive_failures - 1).min(16))
-                        .unwrap_or(MAX_BACKOFF)
-                        .min(MAX_BACKOFF);
+                    let backoff = backoff_delay(self.interval, consecutive_failures);
 
                     if consecutive_failures == 1 || backoff >= MAX_BACKOFF {
                         warn!(
@@ -92,5 +88,51 @@ impl SupplySyncWorker {
                 Err(e)
             }
         }
+    }
+}
+
+/// Backoff for the `n`th consecutive failure: `interval * 2^(n-1)`, capped at
+/// [`MAX_BACKOFF`]. The shift exponent is clamped (and `checked_mul` guards
+/// against `Duration` overflow) so a long outage saturates at the cap instead of
+/// wrapping or panicking.
+fn backoff_delay(interval: Duration, consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(16);
+    interval
+        .checked_mul(1u32 << shift)
+        .unwrap_or(MAX_BACKOFF)
+        .min(MAX_BACKOFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_failure_waits_one_interval() {
+        let i = Duration::from_secs(60);
+        assert_eq!(backoff_delay(i, 1), i, "2^0 = 1x interval");
+    }
+
+    #[test]
+    fn backoff_doubles_per_failure() {
+        let i = Duration::from_secs(10);
+        assert_eq!(backoff_delay(i, 2), Duration::from_secs(20)); // 2^1
+        assert_eq!(backoff_delay(i, 3), Duration::from_secs(40)); // 2^2
+        assert_eq!(backoff_delay(i, 4), Duration::from_secs(80)); // 2^3
+    }
+
+    #[test]
+    fn backoff_is_capped_at_max() {
+        let i = Duration::from_secs(60);
+        // 2^16 * 60s ≫ 30min cap.
+        assert_eq!(backoff_delay(i, 50), MAX_BACKOFF);
+        assert_eq!(backoff_delay(i, 17), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn backoff_handles_overflow_to_cap() {
+        // A huge interval whose doubling overflows Duration must saturate, not panic.
+        let huge = Duration::from_secs(u64::MAX / 2);
+        assert_eq!(backoff_delay(huge, 10), MAX_BACKOFF);
     }
 }
