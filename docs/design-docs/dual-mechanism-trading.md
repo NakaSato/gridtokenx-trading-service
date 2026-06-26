@@ -1,7 +1,14 @@
-# Proposal — Dual-Mechanism Trading (CDA + Uniform-Price Auction)
+# Dual-Mechanism Trading (CDA + Uniform-Price Auction)
 
-> Status: **Proposal** (plan only, no code) · Owner: WiT · Date: 2026-06-25
+> Status: **Implemented** (Phases 0–5 shipped + verified end-to-end) · Owner: WiT
+> · Proposed 2026-06-25 · Implemented 2026-06-26/27
 > Scope: `gridtokenx-trading-service` (Rust matching/settlement backend)
+>
+> Both mechanisms are live: orders carry a `market_segment`; `Realtime` orders
+> match continuously (CDA), `Interval` orders clear per-zone at a uniform price
+> on the 15-min epoch boundary. Verified by a chained live-Postgres test
+> (`bin/trading-service/tests/interval_clearing_e2e_test.rs`: place → persist →
+> elapse → clear → settle). Phase-by-phase status is marked inline in §4 below.
 
 ## 1. Motivation
 
@@ -15,7 +22,7 @@ Two distinct classes of grid participant need two distinct market mechanisms:
 ## 2. Current state (verified)
 
 - **CDA exists and runs.** Pure engine `MatchingEngine::match_cycle` (`crates/trading-engine/src/engine.rs:35`); driven by `MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:31`); spawned as `MatcherWorker` every 1s (`bin/trading-service/src/main.rs`).
-- **Uniform-price does NOT exist.** `crates/trading-logic/src/clearing.rs` is `// Placeholder`. The on-chain `trigger_market_clearing` instruction exists in the Anchor program but nothing in trading-logic calls it.
+- ~~**Uniform-price does NOT exist.**~~ **Now implemented** — pure engine `UniformAuction::clear_cycle` (`crates/trading-engine/src/uniform_auction.rs`), orchestrated by `ClearingService` (`crates/trading-logic/src/clearing.rs`), driven by `ClearingWorker` (`crates/trading-logic/src/workers/clearing.rs`). The on-chain `trigger_market_clearing` instruction is still NOT used — settlement reuses the per-trade swap path (see §5.4 decision).
 - **Schema already anticipates clearing.** `MarketEpoch` (`crates/trading-core/src/models.rs:328`) carries `clearing_price`, `total_volume`, `matched_orders`, `status: EpochStatus` — fields only a uniform-price clearing fills. `OrderMatch` (`models.rs:341`) is keyed by `epoch_id`.
 - **No routing dimension.** `OrderType` (`crates/trading-core/src/types.rs:27`) is only `Limit | Market`. `TradingOrder` (`models.rs:22`) has `epoch_id`, `zone_id`, `meter_id` but **no field that selects CDA vs uniform-price**. `get_active_buy_orders` / `get_active_sell_orders` (`crates/trading-core/src/traits.rs:90,93`) return ALL active orders — CDA would currently consume prosumer orders too.
 
@@ -35,7 +42,13 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 
 ## 4. Phased plan
 
-### Phase 0 — Routing dimension (`market_segment`)
+### Phase 0 — Routing dimension (`market_segment`) — ✅ DONE
+> Enum/field/intake landed `f96a2dd`; the DB column + persistence round-trip
+> landed later (IAM migration `20260627000000_add_market_segment.sql` = `a06311e`;
+> persistence read/write = `84d63de`). The column was initially deferred and the
+> `From<TradingOrderDb>` defaulted the segment — a real gap (interval orders read
+> back as `realtime`) closed in `84d63de`, verified by `test_market_segment_round_trips`.
+
 - `trading-core/src/types.rs`: new `enum MarketSegment { Realtime, Interval }` (sqlx type, `Display`, default `Realtime`).
 - `trading-core/src/models.rs:22` `TradingOrder`: add `pub market_segment: MarketSegment`.
 - DB: `market_segment` column on `orders`, default `'realtime'` (zero behaviour change for existing rows). Schema is owned externally (service `CLAUDE.md` — DB provisioned by superproject `just migrate`/IAM); coordinate the migration there.
@@ -43,12 +56,21 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 - Order intake (`crates/trading-api/src/rest.rs` / handlers): set segment from request or participant; default `Realtime`.
 - **Test:** round-trip an `Interval` order through the repo; assert segment persists.
 
-### Phase 1 — Split the CDA feed
+### Phase 1 — Split the CDA feed — ✅ DONE (`f96a2dd`)
+> Implemented as the in-memory filter variant: `run_matching_cycle` filters the
+> existing feed to `Realtime`. Tests `run_matching_cycle_ignores_interval_segment`,
+> `run_matching_cycle_does_not_cross_segments`.
+
 - `OrderRepository` (`traits.rs:90,93`): add `get_active_buy_orders_by_segment` / `_sell_` (preferred — non-breaking) or filter existing to `Realtime`.
 - `MatcherService::run_matching_cycle` (`matcher_service.rs:31`) consumes `Realtime` only.
 - **Test:** mixed-segment fixture → CDA cycle ignores `Interval` orders.
 
-### Phase 2 — Pure uniform-price engine
+### Phase 2 — Pure uniform-price engine — ✅ DONE (`8e61579`)
+> Shipped as `UniformAuction::clear_cycle` (per-zone two-pointer sweep; `p*` =
+> `i64::midpoint(bid, ask)` of the marginal crossing). 8 pure tests incl.
+> midpoint clear, flat-marginal time-priority proration, per-zone isolation, tie,
+> self-trade skip, expiry.
+
 - New `crates/trading-engine/src/uniform_auction.rs`, symmetric to `engine.rs` (sync, zero I/O, zero DB — keep the hot path pure):
   ```rust
   pub fn clear_epoch(
@@ -67,7 +89,14 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 - Reuse `FastPrice`, `FastOrder`, `MIN_TRADE_AMOUNT`, `TopologySnapshot` from the engine crate.
 - **Tests (pure, fast):** single crossing; flat marginal (many orders at `p*` → proration); no-cross (empty result); per-zone isolation; tie at `p*`. Pin the economics before any I/O exists.
 
-### Phase 3 — Orchestrator (`clearing.rs`)
+### Phase 3 — Orchestrator (`clearing.rs`) — ✅ DONE (`a5e9875`)
+> `ClearingService::run_epoch_clearing(epoch_id)` clears one epoch's `Interval`
+> orders and persists via the **shared** path: the settlement-row-first /
+> match-row / aggregated-fill logic was extracted into
+> `clearing_support::{to_fast_orders, order_totals, persist_matches}` and is used
+> by BOTH the matcher and the clearing service (no duplicated outbox logic).
+> Epoch lifecycle write-back moved to the Phase-4 worker (§5.2 decision).
+
 - Fill the placeholder with `ClearingService::run_epoch_clearing(epoch_id)`:
   1. Load `MarketEpoch`; guard `status == Open`.
   2. Fetch `Interval` orders for the epoch (and zone); convert to `FastOrder` (mirror `matcher_service.rs:40-103`).
@@ -77,22 +106,27 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 - Settlement reuses `BlockchainSettlement::execute_atomic_settlement` (token swap) — **no new on-chain path**.
 - **Test:** in-memory repos, one epoch; assert uniform price + epoch row updated.
 
-### Phase 4 — `ClearingWorker`
-- New worker in `crates/trading-logic/src/workers/`, spawned in `main.rs` beside `MatcherWorker`.
-- Fires at the epoch boundary (15-min, aligned to `MarketEpoch.end_time`), not a fixed poll. On fire: close current epoch → `run_epoch_clearing` → open next.
-- Graceful-degrade on repeated failure (mirror `SupplySyncWorker`).
-- **Test:** boundary trigger calls clearing once per epoch; idempotent when already `Cleared`.
+### Phase 4 — `ClearingWorker` — ✅ DONE (`6d9a537`, live test `e7a13ed`)
+- New worker `crates/trading-logic/src/workers/clearing.rs`, spawned in `main.rs` beside `MatcherWorker`.
+- **Polls every 60s** (revised from boundary-firing): `ClearingService::clear_due_epochs` selects epochs whose window has elapsed (`status='active' AND end_time <= NOW()`) and closes each — **even empty ones** — so none linger `active`. Polling is robust to restart/clock drift; the boundary is detected, not depended upon.
+- Epoch lifecycle owned here (§5.2): `mark_epoch_cleared` flips `active → cleared` guarded by `WHERE status='active'` → idempotent; stamps `clearing_price` (single-zone only; multi-zone/empty → NULL), `total_volume`, `matched_orders`.
+- Graceful-degrade: a failed cycle is logged; the loop continues.
+- **Tests:** `clears_and_closes_due_epochs`, `closes_empty_due_epoch`; live SQL (due predicate + idempotent close) in `epoch_clearing_integration_test`.
 
-### Phase 5 — API / observability
-- REST: expose epoch clearing result (price, volume) in `rest.rs`.
-- Metrics: `record_clearing_cycle` beside `record_matching_cycle` (`crates/trading-infra/src/metrics.rs:141`).
+### Phase 5 — API / observability — ✅ DONE (`91a0b33`)
+- REST: `GET /api/v1/markets/clearing-epochs?limit=N` (newest first, clamp 1..=100) → per-epoch `clearing_price` / `total_volume` / `matched_orders`, backed by `OrderRepository::list_recent_cleared_epochs`. Tests: `test_clearing_epochs_endpoint`, live `test_list_recent_cleared_epochs_e2e`.
+- Metrics: `record_clearing_cycle(zones, matches, volume)` in `crates/trading-infra/src/metrics.rs`, emitted per epoch in `clear_due_epochs`.
 
-## 5. Open decisions for design review
+## 5. Decisions taken (was: open for review)
 
-1. **Cross-zone trades in the uniform auction** — drop unmatched residual, or allow a single price plus wheeling adjustment?
-2. **Epoch lifecycle owner** — does `ClearingWorker` open/close `MarketEpoch` rows, or does upstream (meter-service) own the epoch boundary?
-3. **Marginal-order proration** — pro-rata by size vs. time priority for the partially-filled marginal order.
-4. **On-chain granularity** — settle per-trade only (reuse), or also emit the epoch-level `trigger_market_clearing` instruction for an on-chain clearing record?
+1. **Cross-zone trades in the uniform auction → clear PER-ZONE; no cross-zone in the batch.** `clear_cycle` partitions orders by zone and clears each independently at its own `p*`. Cross-zone balancing stays the CDA matcher's job (where wheeling/loss pricing already lives). A residual unmatched in a zone simply doesn't clear this epoch.
+2. **Epoch lifecycle owner → the `ClearingWorker`.** It selects elapsed epochs and flips `active → cleared` (idempotent `WHERE status='active'` guard). `get_or_create_active_epoch` (intake) opens the next epoch on demand. `ClearingService` stays a pure "clear one epoch, persist trades" unit; the worker owns open/close + write-back.
+3. **Marginal-order proration → time priority.** When several orders sit at `p*`, the marginal fill goes by earliest-arrival (price-time), not pro-rata-by-size. Test `flat_marginal_prorates_by_time_priority`.
+4. **On-chain granularity → per-trade settlement only.** Each cleared trade settles via the existing `BlockchainSettlement::execute_atomic_settlement` swap (shared with the matcher). The epoch-level on-chain `trigger_market_clearing` instruction is **not** emitted — no separate on-chain clearing record. Revisit only if an on-chain audit trail of the epoch price is required.
+
+> Additional decisions made during implementation:
+> - **`market`-order-type → IOC default; `interval` requires GTC.** A market order with no explicit TIF defaults to IOC (fill-or-drop); `Interval` orders reject IOC/FOK (batch clearing has no "immediate" semantics, and the CDA IOC sweep never sees interval orders). Both enforced at intake (REST 400 / gRPC InvalidArgument).
+> - **Expiry reaping** (`expire_stale_orders`) runs in the matcher cycle and is segment-agnostic, so interval orders that never clear are reaped on `expires_at` like any other.
 
 ## 6. Non-goals
 
