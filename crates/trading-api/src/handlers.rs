@@ -100,38 +100,25 @@ impl TradingService for TradingGrpcService {
             ConnectError::new(ErrorCode::InvalidArgument, "Invalid energy_amount")
         })?;
 
-        // Market BUY crosses any resting ask (aggressive bid, fills at the
-        // maker/sell price), must be immediate. A positive price_per_kwh is the
-        // buyer's MAXIMUM acceptable price (slippage cap): used as the bid so a
-        // fill never crosses above it; absent (<= 0) → a wide default ceiling.
-        // Market SELL is unsupported (the matcher would clear it at its own ask,
-        // not the best bid). Limit needs a real price. Mirrors rest.rs::submit_order.
-        let price = match order_type {
-            OrderType::Market => {
-                if matches!(side, OrderSide::Sell) {
-                    return Err(ConnectError::new(
-                        ErrorCode::InvalidArgument,
-                        "market sell orders are not supported; submit a limit sell",
-                    ));
-                }
-                if time_in_force == TimeInForce::Gtc {
-                    return Err(ConnectError::new(
-                        ErrorCode::InvalidArgument,
-                        "market orders are immediate — use ioc or fok",
-                    ));
-                }
-                if request.price_per_kwh > 0.0 {
-                    Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
-                        ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
-                    })?
-                } else {
-                    Decimal::new(1_000_000, 0)
-                }
-            }
-            _ => Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
+        // Parse the optional price input (limit price OR market-buy slippage cap),
+        // then apply the shared admission policy. The proto price_per_kwh is a
+        // non-optional f64, so a non-positive value means "absent" (a market buy
+        // falls back to the ceiling; a limit order is then rejected as missing).
+        // See `trading_core::order_policy::resolve_order_price`.
+        let price_input = if request.price_per_kwh > 0.0 {
+            Some(Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
                 ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
-            })?,
+            })?)
+        } else {
+            None
         };
+        let price = trading_core::order_policy::resolve_order_price(
+            order_type,
+            side,
+            time_in_force,
+            price_input,
+        )
+        .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.message()))?;
 
         // Resolve the active market epoch so the matcher's settlement and
         // order_matches inserts satisfy their NOT NULL FK to market_epochs.

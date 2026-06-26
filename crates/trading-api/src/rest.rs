@@ -203,67 +203,25 @@ pub async fn submit_order(
         }
     };
 
-    // Resolve the matching price.
-    // - Market BUY: crosses any resting ask, so it gets an aggressive bid and
-    //   fills at the resting ask (the engine prices trades at the maker/sell
-    //   side, so the buyer pays the real ask, not this bid). It must be immediate
-    //   (IOC/FOK) so a max-price bid never rests in the book. `price_per_kwh`, if
-    //   supplied, is the buyer's MAXIMUM acceptable price (slippage cap): the bid
-    //   is set to it so a fill never crosses above it. Absent → a wide default
-    //   ceiling (unbounded for practical energy prices).
-    // - Market SELL: unsupported — the matcher would clear it at its OWN ask, not
-    //   the best bid, so a market sell can't be priced correctly here.
-    // - Limit: requires an explicit price.
-    let price = match order_type {
-        OrderType::Market => {
-            if matches!(side, OrderSide::Sell) {
-                return Err((
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "market sell orders are not supported (the matcher prices at the resting ask); submit a limit sell".to_string(),
-                ));
-            }
-            if time_in_force == TimeInForce::Gtc {
-                return Err((
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "market orders are immediate — use ioc or fok (gtc would rest a max-price bid)".to_string(),
-                ));
-            }
-            // Slippage cap: if the caller supplied a price, it is the maximum
-            // they will pay — use it as the bid so a fill never crosses above it.
-            // Otherwise fall back to a ceiling bid above any realistic energy ask
-            // and well below fixed-point overflow.
-            match req.price_per_kwh.as_deref() {
-                Some(raw) => {
-                    let cap = Decimal::from_str(raw).map_err(|e| {
-                        (
-                            axum::http::StatusCode::BAD_REQUEST,
-                            format!("Invalid price_per_kwh: {}", e),
-                        )
-                    })?;
-                    if cap <= Decimal::ZERO {
-                        return Err((
-                            axum::http::StatusCode::BAD_REQUEST,
-                            "price_per_kwh (market buy slippage cap) must be positive".to_string(),
-                        ));
-                    }
-                    cap
-                }
-                None => Decimal::new(1_000_000, 0),
-            }
-        }
-        _ => {
-            let raw = req.price_per_kwh.as_deref().ok_or((
+    // Parse the optional price input (limit price OR market-buy slippage cap),
+    // then apply the shared admission policy. See
+    // `trading_core::order_policy::resolve_order_price` for the rules.
+    let price_input = match req.price_per_kwh.as_deref() {
+        Some(raw) => Some(Decimal::from_str(raw).map_err(|e| {
+            (
                 axum::http::StatusCode::BAD_REQUEST,
-                "price_per_kwh is required for limit orders".to_string(),
-            ))?;
-            Decimal::from_str(raw).map_err(|e| {
-                (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    format!("Invalid price_per_kwh: {}", e),
-                )
-            })?
-        }
+                format!("Invalid price_per_kwh: {}", e),
+            )
+        })?),
+        None => None,
     };
+    let price = trading_core::order_policy::resolve_order_price(
+        order_type,
+        side,
+        time_in_force,
+        price_input,
+    )
+    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.message().to_string()))?;
 
     let market_segment = match req.market_segment.as_deref().map(str::to_lowercase).as_deref() {
         None | Some("realtime") => trading_core::types::MarketSegment::Realtime,
