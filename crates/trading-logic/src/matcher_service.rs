@@ -26,6 +26,18 @@ impl MatcherService {
 
     /// Run a matching cycle for all active orders
     pub async fn run_matching_cycle(&self) -> TraitResult<usize> {
+        // 0. Reap expired orders first: mark every open order past its expiry as
+        // Expired (segment-agnostic) so it never re-enters the book. Without this
+        // an expired order stays Active forever, re-fetched every cycle — and the
+        // engine only skips expired orders, it never reaps them.
+        let reaped = self
+            .order_repo
+            .expire_stale_orders(gridtokenx_telemetry::time::now())
+            .await?;
+        if !reaped.is_empty() {
+            info!("Reaped {} expired order(s)", reaped.len());
+        }
+
         // 1. Fetch active orders, then keep only Realtime-segment orders. Interval
         // orders are settled by the uniform-price clearing path, not the CDA matcher;
         // routing them here would let the two mechanisms double-fill the same order.
@@ -206,10 +218,18 @@ mod tests {
         buys: Vec<TradingOrder>,
         sells: Vec<TradingOrder>,
         fills: Mutex<Vec<(Uuid, Decimal, OrderStatus)>>,
+        /// Ids the reaper returns (preset per test).
+        expire_returns: Vec<Uuid>,
+        /// How many times the matcher invoked the reaper.
+        expire_calls: Mutex<usize>,
     }
 
     #[async_trait]
     impl OrderRepository for MockOrderRepo {
+        async fn expire_stale_orders(&self, _now: DateTime<Utc>) -> TraitResult<Vec<Uuid>> {
+            *self.expire_calls.lock().unwrap() += 1;
+            Ok(self.expire_returns.clone())
+        }
         async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
             Ok(self.buys.clone())
         }
@@ -275,6 +295,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
@@ -303,6 +324,7 @@ mod tests {
             buys: vec![order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10)],
             sells: vec![],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
@@ -312,6 +334,33 @@ mod tests {
         assert_eq!(matched, 0);
         assert!(settlements.settlements.lock().unwrap().is_empty());
         assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// Every cycle reaps expired orders first: the matcher invokes
+    /// `expire_stale_orders` exactly once per run, and a non-empty reap does not
+    /// disrupt matching the still-live pair.
+    #[tokio::test]
+    async fn run_matching_cycle_reaps_expired_first() {
+        let buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10);
+        let sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            expire_returns: vec![Uuid::new_v4(), Uuid::new_v4()],
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        assert_eq!(
+            *orders.expire_calls.lock().unwrap(),
+            1,
+            "reaper must run once per cycle"
+        );
+        assert_eq!(matched, 1, "reap does not disrupt matching the live pair");
     }
 
     /// An unfilled IOC order with no counterparty is cancelled, not left Active:
@@ -327,6 +376,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
@@ -357,6 +407,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
@@ -388,6 +439,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
@@ -412,6 +464,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =

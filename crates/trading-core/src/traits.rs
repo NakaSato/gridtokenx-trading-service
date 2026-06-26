@@ -92,6 +92,16 @@ pub trait OrderRepository: Send + Sync {
     /// Get all active sell orders.
     async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>>;
 
+    /// Reap expired orders: mark every still-open order (`pending` / `active` /
+    /// `partially_filled`) whose `expires_at` has passed as `Expired`, emitting
+    /// an `OrderUpdate` event per order into the outbox in the same transaction.
+    /// Returns the ids reaped. Idempotent — a second call finds nothing, the
+    /// status no longer matches. Default is a no-op so non-persistent mocks need
+    /// not implement it; the Postgres repository overrides it.
+    async fn expire_stale_orders(&self, _now: DateTime<Utc>) -> TraitResult<Vec<Uuid>> {
+        Ok(Vec::new())
+    }
+
     /// Cancel an order.
     async fn cancel_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool>;
 

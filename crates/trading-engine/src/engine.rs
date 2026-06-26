@@ -354,8 +354,10 @@ impl MatchingEngine {
         // 3. IOC sweep. An Immediate-or-Cancel order fills only what crosses in
         // THIS pass; its leftover must not rest in the book for a later cycle. Any
         // IOC order (buy or sell) still holding >= MIN_TRADE_AMOUNT of unfilled
-        // energy is reported for cancellation. Expired orders are skipped — they
-        // are already handled by the expiry path and would be double-cancelled.
+        // energy is reported for cancellation. Expired orders are skipped here:
+        // they are reaped to `Expired` by the orchestrator's expiry sweep
+        // (`OrderRepository::expire_stale_orders`), so cancelling them too would
+        // race that terminal status.
         for o in buy_orders.iter().chain(sell_orders.iter()) {
             if o.time_in_force == TimeInForce::Ioc
                 && !o.is_expired(now_ns)

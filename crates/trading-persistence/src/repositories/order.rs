@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Row};
 use uuid::Uuid;
 
 use trading_core::events::Event;
@@ -314,6 +314,42 @@ impl OrderRepository for PostgresOrderRepository {
         Ok(())
     }
 
+    async fn expire_stale_orders(&self, now: DateTime<Utc>) -> TraitResult<Vec<Uuid>> {
+        // Reap + outbox in one transaction: the status flip to Expired and its
+        // OrderUpdate event commit together, so the event can never be lost
+        // relative to the state change (mirrors `update_filled_amount_with_event`).
+        let mut tx = self.pool.begin().await?;
+
+        let rows = sqlx::query(
+            "UPDATE trading_orders \
+             SET status = 'expired', updated_at = NOW() \
+             WHERE status IN ('pending', 'active', 'partially_filled') \
+               AND expires_at IS NOT NULL AND expires_at <= $1 \
+             RETURNING id, filled_amount, zone_id",
+        )
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.try_get("id")?;
+            let filled_amount: Decimal = row.try_get("filled_amount")?;
+            let zone_id: Option<i32> = row.try_get("zone_id")?;
+            let event = Event::OrderUpdate {
+                id,
+                filled_amount,
+                status: OrderStatus::Expired.to_string(),
+                zone_id,
+            };
+            crate::repositories::outbox::insert_event_in_tx(&mut tx, &event).await?;
+            ids.push(id);
+        }
+
+        tx.commit().await?;
+        Ok(ids)
+    }
+
     async fn cancel_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool> {
         let result = sqlx::query(
             "UPDATE trading_orders SET status = 'cancelled' WHERE id = $1 AND user_id = $2 AND status IN ('pending', 'active', 'partially_filled')"
@@ -338,7 +374,7 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            "SELECT * FROM trading_orders WHERE side = 'buy' AND status IN ('pending', 'active', 'partially_filled')"
+            "SELECT * FROM trading_orders WHERE side = 'buy' AND status IN ('pending', 'active', 'partially_filled') AND (expires_at IS NULL OR expires_at > NOW())"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -348,7 +384,7 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            "SELECT * FROM trading_orders WHERE side = 'sell' AND status IN ('pending', 'active', 'partially_filled')"
+            "SELECT * FROM trading_orders WHERE side = 'sell' AND status IN ('pending', 'active', 'partially_filled') AND (expires_at IS NULL OR expires_at > NOW())"
         )
         .fetch_all(&self.pool)
         .await?;
