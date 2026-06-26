@@ -31,6 +31,11 @@ pub struct SubmitOrderRequest {
     pub zone_id: i32,
     pub meter_id: Option<Uuid>,
     pub custodial_sign: Option<bool>,
+    /// Time-in-force: "gtc" (default), "ioc", or "fok".
+    pub time_in_force: Option<String>,
+    /// Market segment: "realtime" (default, CDA matcher) or "interval"
+    /// (15-min uniform-price clearing).
+    pub market_segment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +161,29 @@ pub async fn submit_order(
         _ => OrderType::Limit,
     };
 
+    let time_in_force = match req.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
+        None | Some("gtc") => TimeInForce::Gtc,
+        Some("ioc") => TimeInForce::Ioc,
+        Some("fok") => TimeInForce::Fok,
+        Some(other) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid time_in_force: {other} (expected gtc|ioc|fok)"),
+            ))
+        }
+    };
+
+    let market_segment = match req.market_segment.as_deref().map(str::to_lowercase).as_deref() {
+        None | Some("realtime") => trading_core::types::MarketSegment::Realtime,
+        Some("interval") => trading_core::types::MarketSegment::Interval,
+        Some(other) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid market_segment: {other} (expected realtime|interval)"),
+            ))
+        }
+    };
+
     let mut order = TradingOrder {
         id: Uuid::new_v4(),
         user_id: user.user_id,
@@ -179,8 +207,8 @@ pub async fn submit_order(
         blockchain_tx_hash: None,
         blockchain_error: None,
         retry_count: 0,
-        time_in_force: TimeInForce::Gtc,
-        market_segment: trading_core::types::MarketSegment::Realtime,
+        time_in_force,
+        market_segment,
     };
 
     // ── Optional On-Chain Execution ───────

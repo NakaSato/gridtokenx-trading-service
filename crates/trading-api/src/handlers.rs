@@ -55,6 +55,29 @@ impl TradingService for TradingGrpcService {
             _ => OrderType::Limit,
         };
 
+        let time_in_force = match request.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
+            None | Some("gtc") => TimeInForce::Gtc,
+            Some("ioc") => TimeInForce::Ioc,
+            Some("fok") => TimeInForce::Fok,
+            Some(_) => {
+                return Err(ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    "Invalid time_in_force (expected gtc|ioc|fok)",
+                ))
+            }
+        };
+
+        let market_segment = match request.market_segment.as_deref().map(str::to_lowercase).as_deref() {
+            None | Some("realtime") => trading_core::types::MarketSegment::Realtime,
+            Some("interval") => trading_core::types::MarketSegment::Interval,
+            Some(_) => {
+                return Err(ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    "Invalid market_segment (expected realtime|interval)",
+                ))
+            }
+        };
+
         let amount = Decimal::from_f64_retain(request.energy_amount).ok_or_else(|| {
             ConnectError::new(ErrorCode::InvalidArgument, "Invalid energy_amount")
         })?;
@@ -106,8 +129,8 @@ impl TradingService for TradingGrpcService {
             blockchain_tx_hash: None,
             blockchain_error: None,
             retry_count: 0,
-            time_in_force: TimeInForce::Gtc,
-            market_segment: trading_core::types::MarketSegment::Realtime,
+            time_in_force,
+            market_segment,
         };
 
         // Insert the order and its OrderCreated event in one transaction so the

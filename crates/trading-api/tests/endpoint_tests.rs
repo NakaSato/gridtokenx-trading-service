@@ -1538,3 +1538,79 @@ async fn test_grpc_batch_execute_settlements_empty() {
     assert!(!res.success);
     assert!(res.settlement_ids.is_empty());
 }
+
+/// #1 wiring: the REST submit endpoint must parse `time_in_force` and
+/// `market_segment` from the request and persist them — previously both were
+/// hardcoded Gtc/Realtime, leaving IOC and the interval (uniform-auction)
+/// segment unreachable from the API.
+#[tokio::test]
+async fn test_submit_order_parses_tif_and_segment() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let user_id = Uuid::new_v4();
+
+    // Explicit IOC + Interval flow through to the persisted order.
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "time_in_force": "ioc", "market_segment": "interval"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().expect("order captured");
+        assert_eq!(o.time_in_force, TimeInForce::Ioc);
+        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Interval);
+    }
+
+    // Omitted → defaults Gtc / Realtime.
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "buy", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().unwrap();
+        assert_eq!(o.time_in_force, TimeInForce::Gtc);
+        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Realtime);
+    }
+
+    // Unknown value → 400, not a silent default.
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "buy", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "time_in_force": "bogus"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

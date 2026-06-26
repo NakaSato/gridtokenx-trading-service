@@ -66,6 +66,8 @@ message SubmitOrderRequest {
   string meter_id = 6;
   string session_token = 7;
   optional int32 zone_id = 8;
+  optional string time_in_force = 9; // "gtc" (default), "ioc", "fok"
+  optional string market_segment = 10; // "realtime" (default), "interval"
 }
 
 message UpdateOrderRequest {
