@@ -12,8 +12,8 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::types::{
-    AlertCondition, AlertStatus, EpochStatus, IntervalType, OrderSide, OrderStatus, OrderType,
-    RecurringStatus, TimeInForce, TriggerStatus, TriggerType,
+    AlertCondition, AlertStatus, EpochStatus, IntervalType, MarketSegment, OrderSide, OrderStatus,
+    OrderType, RecurringStatus, TimeInForce, TriggerStatus, TriggerType,
 };
 
 // ── Core Order Models ────────────────────────────────────────────────────────
@@ -46,6 +46,10 @@ pub struct TradingOrder {
     pub blockchain_error: Option<String>,
     pub retry_count: i32,
     pub time_in_force: TimeInForce,
+    /// Routing: CDA (`Realtime`) vs uniform-price auction (`Interval`).
+    /// Defaults to `Realtime`.
+    #[serde(default)]
+    pub market_segment: MarketSegment,
 }
 
 // ── Escrow ───────────────────────────────────────────────────────────────────

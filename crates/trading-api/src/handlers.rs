@@ -107,6 +107,7 @@ impl TradingService for TradingGrpcService {
             blockchain_error: None,
             retry_count: 0,
             time_in_force: TimeInForce::Gtc,
+            market_segment: trading_core::types::MarketSegment::Realtime,
         };
 
         // Insert the order and its OrderCreated event in one transaction so the

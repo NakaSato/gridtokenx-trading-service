@@ -82,6 +82,7 @@ async fn test_postgres_order_repository_e2e() {
         blockchain_error: None,
         retry_count: 0,
         time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
     };
 
     // 5. Test insert and fetch
@@ -130,6 +131,7 @@ async fn test_postgres_order_repository_e2e() {
         blockchain_error: None,
         retry_count: 0,
         time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
     };
     order_repo.insert_order(&sell_order).await.expect("Failed to insert sell order");
 

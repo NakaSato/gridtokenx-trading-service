@@ -103,6 +103,7 @@ async fn seed_fk_chain(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
             blockchain_error: None,
             retry_count: 0,
             time_in_force: TimeInForce::Gtc,
+            market_segment: trading_core::types::MarketSegment::Realtime,
         };
         order_repo.insert_order(&order).await.expect("insert order");
     }

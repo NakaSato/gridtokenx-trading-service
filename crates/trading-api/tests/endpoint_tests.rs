@@ -475,6 +475,7 @@ fn mk_order(side: OrderSide, price: i64, amount: i64) -> TradingOrder {
         blockchain_error: None,
         retry_count: 0,
         time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
     }
 }
 

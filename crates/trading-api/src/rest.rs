@@ -180,6 +180,7 @@ pub async fn submit_order(
         blockchain_error: None,
         retry_count: 0,
         time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
     };
 
     // ── Optional On-Chain Execution ───────
@@ -1738,6 +1739,7 @@ mod tests {
             blockchain_error: None,
             retry_count: 0,
             time_in_force: TimeInForce::Gtc,
+            market_segment: trading_core::types::MarketSegment::Realtime,
         }
     }
 

@@ -76,6 +76,9 @@ impl From<TradingOrderDb> for TradingOrder {
             blockchain_error: db.blockchain_error,
             retry_count: db.retry_count,
             time_in_force: db.time_in_force,
+            // Phase 1: default until the market_segment column lands (Phase 0
+            // migration). Map db.market_segment here once TradingOrderDb reads it.
+            market_segment: trading_core::types::MarketSegment::default(),
         }
     }
 }

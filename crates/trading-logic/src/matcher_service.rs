@@ -29,9 +29,23 @@ impl MatcherService {
 
     /// Run a matching cycle for all active orders
     pub async fn run_matching_cycle(&self) -> TraitResult<usize> {
-        // 1. Fetch active orders
-        let buy_orders = self.order_repo.get_active_buy_orders().await?;
-        let sell_orders = self.order_repo.get_active_sell_orders().await?;
+        // 1. Fetch active orders, then keep only Realtime-segment orders. Interval
+        // orders are settled by the uniform-price clearing path, not the CDA matcher;
+        // routing them here would let the two mechanisms double-fill the same order.
+        let buy_orders: Vec<_> = self
+            .order_repo
+            .get_active_buy_orders()
+            .await?
+            .into_iter()
+            .filter(|o| o.market_segment == trading_core::types::MarketSegment::Realtime)
+            .collect();
+        let sell_orders: Vec<_> = self
+            .order_repo
+            .get_active_sell_orders()
+            .await?
+            .into_iter()
+            .filter(|o| o.market_segment == trading_core::types::MarketSegment::Realtime)
+            .collect();
 
         if buy_orders.is_empty() || sell_orders.is_empty() {
             return Ok(0);
@@ -290,7 +304,7 @@ mod tests {
     use trading_core::models::{
         OrderBookEntry, OrderMatch, Settlement, SettlementStats, TradingOrder,
     };
-    use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
+    use trading_core::types::{MarketSegment, OrderSide, OrderStatus, OrderType, TimeInForce};
 
     /// Permissive topology: every flow accommodated, zero wheeling/loss — so the
     /// test exercises the match→persist orchestration, not grid routing.
@@ -332,6 +346,7 @@ mod tests {
             blockchain_error: None,
             retry_count: 0,
             time_in_force: TimeInForce::Gtc,
+            market_segment: MarketSegment::Realtime,
         }
     }
 
@@ -445,6 +460,55 @@ mod tests {
 
         assert_eq!(matched, 0);
         assert!(settlements.settlements.lock().unwrap().is_empty());
+        assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// Phase 1: the CDA matcher must ignore Interval-segment orders (they belong
+    /// to the uniform-price clearing path). A crossing Interval buy/sell pair must
+    /// NOT match here.
+    #[tokio::test]
+    async fn run_matching_cycle_ignores_interval_segment() {
+        let mut buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10);
+        let mut sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
+        buy.market_segment = MarketSegment::Interval;
+        sell.market_segment = MarketSegment::Interval;
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        assert_eq!(matched, 0, "interval orders are not matched by CDA");
+        assert!(settlements.settlements.lock().unwrap().is_empty());
+        assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// A Realtime buy and an Interval sell at a crossing price must NOT match —
+    /// the Interval sell is filtered out, leaving no counterparty.
+    #[tokio::test]
+    async fn run_matching_cycle_does_not_cross_segments() {
+        let buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10); // Realtime (default)
+        let mut sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
+        sell.market_segment = MarketSegment::Interval;
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        assert_eq!(matched, 0, "segments must not cross-match");
         assert!(orders.fills.lock().unwrap().is_empty());
     }
 }

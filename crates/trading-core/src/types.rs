@@ -38,6 +38,47 @@ impl OrderType {
     }
 }
 
+/// Which trading mechanism an order is routed to.
+///
+/// - `Realtime` → the continuous double auction (CDA) matcher — large flexible
+///   assets (BESS, EV-chargers).
+/// - `Interval` → the 15-minute uniform-price auction clearing — prosumer /
+///   consumer meter trading.
+///
+/// Defaults to `Realtime` so existing orders (and rows from before the
+/// `market_segment` column exists) keep their CDA behavior.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    PartialEq,
+    Eq,
+    ToSchema,
+    Display,
+    EnumString,
+)]
+#[sqlx(type_name = "market_segment", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum MarketSegment {
+    #[default]
+    Realtime,
+    Interval,
+}
+
+impl MarketSegment {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Interval => "interval",
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,
