@@ -175,3 +175,82 @@ async fn test_postgres_order_repository_e2e() {
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
+
+/// Phase 0: the market_segment column round-trips. An Interval order inserted
+/// via the repository must read back as Interval — not silently default to
+/// Realtime (which would route it to the CDA matcher instead of the clearing
+/// worker).
+#[tokio::test]
+async fn test_market_segment_round_trips() {
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+    let pool = PgPool::connect(&db_url).await.expect("connect");
+
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1,$2,$3,$4,$5)")
+        .bind(user_id)
+        .bind(format!("seg-{user_id}@gridtokenx.com"))
+        .bind(format!("seg_user_{user_id}"))
+        .bind("mock_hash")
+        .bind(format!("Wallet_{}", &user_id.to_string()[..32]))
+        .execute(&pool).await.expect("insert user");
+
+    let epoch_id = Uuid::new_v4();
+    // Derive epoch_number from the epoch UUID (epoch_number is UNIQUE) — a
+    // timestamp-based number would collide with the sibling test running in
+    // parallel at the same nanosecond.
+    let epoch_num = (epoch_id.as_u128() & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+    sqlx::query("INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1,$2,$3,$4,'active'::epoch_status)")
+        .bind(epoch_id)
+        .bind(epoch_num)
+        .bind(Utc::now())
+        .bind(Utc::now() + chrono::Duration::minutes(15))
+        .execute(&pool).await.expect("insert epoch");
+
+    let repo = PostgresOrderRepository::new(pool.clone());
+    let order_id = Uuid::new_v4();
+    let mut order = TradingOrder {
+        id: order_id,
+        user_id,
+        order_type: OrderType::Limit,
+        side: OrderSide::Buy,
+        energy_amount: dec!(5.0),
+        price_per_kwh: dec!(2.0),
+        filled_amount: dec!(0.0),
+        status: OrderStatus::Active,
+        expires_at: None,
+        created_at: Some(Utc::now()),
+        filled_at: None,
+        epoch_id: Some(epoch_id),
+        zone_id: Some(1),
+        meter_id: None,
+        refund_tx_signature: None,
+        order_pda: None,
+        order_index: None,
+        session_token: None,
+        blockchain_status: None,
+        blockchain_tx_hash: None,
+        blockchain_error: None,
+        retry_count: 0,
+        time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Interval,
+    };
+    repo.insert_order(&order).await.expect("insert interval order");
+    let fetched = repo.get_order(order_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.market_segment,
+        trading_core::types::MarketSegment::Interval,
+        "interval segment must survive the DB round-trip"
+    );
+
+    // A defaulted (realtime) order also round-trips.
+    order.id = Uuid::new_v4();
+    order.market_segment = trading_core::types::MarketSegment::Realtime;
+    repo.insert_order(&order).await.expect("insert realtime order");
+    let rt = repo.get_order(order.id).await.unwrap().unwrap();
+    assert_eq!(rt.market_segment, trading_core::types::MarketSegment::Realtime);
+
+    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+}

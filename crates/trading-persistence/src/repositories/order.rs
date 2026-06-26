@@ -10,7 +10,7 @@ use trading_core::events::Event;
 use trading_core::models::{OrderBookEntry, TradingOrder};
 use trading_core::traits::{OrderRepository, TraitResult};
 use trading_core::types::{
-    OrderSide, OrderStatus, OrderType, TimeInForce, TriggerStatus, TriggerType,
+    MarketSegment, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerStatus, TriggerType,
 };
 
 /// Database-specific order model with SQLx metadata.
@@ -48,6 +48,7 @@ pub struct TradingOrderDb {
     pub blockchain_error: Option<String>,
     pub retry_count: i32,
     pub time_in_force: TimeInForce,
+    pub market_segment: MarketSegment,
 }
 
 impl From<TradingOrderDb> for TradingOrder {
@@ -76,9 +77,7 @@ impl From<TradingOrderDb> for TradingOrder {
             blockchain_error: db.blockchain_error,
             retry_count: db.retry_count,
             time_in_force: db.time_in_force,
-            // Phase 1: default until the market_segment column lands (Phase 0
-            // migration). Map db.market_segment here once TradingOrderDb reads it.
-            market_segment: trading_core::types::MarketSegment::default(),
+            market_segment: db.market_segment,
         }
     }
 }
@@ -102,8 +101,8 @@ impl OrderRepository for PostgresOrderRepository {
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
-                epoch_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                epoch_id, market_segment
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(order.id)
@@ -122,6 +121,7 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(&order.blockchain_tx_hash)
         .bind(&order.blockchain_status)
         .bind(order.epoch_id)
+        .bind(order.market_segment)
         .execute(&self.pool)
         .await?;
 
@@ -144,8 +144,8 @@ impl OrderRepository for PostgresOrderRepository {
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
-                epoch_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                epoch_id, market_segment
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(order.id)
@@ -164,6 +164,7 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(&order.blockchain_tx_hash)
         .bind(&order.blockchain_status)
         .bind(order.epoch_id)
+        .bind(order.market_segment)
         .execute(&mut *tx)
         .await?;
 
