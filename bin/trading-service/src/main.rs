@@ -65,6 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         clearing_worker.run().await;
     });
 
+    // Expiry reaper — marks open orders past their expires_at as Expired. Its own
+    // worker (not the matcher) so it runs in every role; 30s cadence.
+    let reaper_worker = trading_logic::ReaperWorker::new(
+        infra.order_repo.clone(),
+        tokio::time::Duration::from_secs(30),
+    );
+    tokio::spawn(async move {
+        reaper_worker.run().await;
+    });
+
     let settlement_worker = trading_logic::SettlementWorker::new(
         services.settlement.clone(),
         tokio::time::Duration::from_secs(10),

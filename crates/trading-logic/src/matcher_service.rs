@@ -26,17 +26,10 @@ impl MatcherService {
 
     /// Run a matching cycle for all active orders
     pub async fn run_matching_cycle(&self) -> TraitResult<usize> {
-        // 0. Reap expired orders first: mark every open order past its expiry as
-        // Expired (segment-agnostic) so it never re-enters the book. Without this
-        // an expired order stays Active forever, re-fetched every cycle — and the
-        // engine only skips expired orders, it never reaps them.
-        let reaped = self
-            .order_repo
-            .expire_stale_orders(gridtokenx_telemetry::time::now())
-            .await?;
-        if !reaped.is_empty() {
-            info!("Reaped {} expired order(s)", reaped.len());
-        }
+        // Expiry reaping is owned by the dedicated `ReaperWorker` (runs in every
+        // role, not just where the matcher runs). The engine still skips any
+        // expired order it's handed (`is_expired`), so a not-yet-reaped expired
+        // order can never match here.
 
         // 1. Fetch active orders, then keep only Realtime-segment orders. Interval
         // orders are settled by the uniform-price clearing path, not the CDA matcher;
@@ -336,17 +329,15 @@ mod tests {
         assert!(orders.fills.lock().unwrap().is_empty());
     }
 
-    /// Every cycle reaps expired orders first: the matcher invokes
-    /// `expire_stale_orders` exactly once per run, and a non-empty reap does not
-    /// disrupt matching the still-live pair.
+    /// Reaping is the ReaperWorker's job, NOT the matcher's: a matching cycle
+    /// must not call expire_stale_orders (it would reap in only the matcher role).
     #[tokio::test]
-    async fn run_matching_cycle_reaps_expired_first() {
+    async fn run_matching_cycle_does_not_reap() {
         let buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10);
         let sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
         let orders = Arc::new(MockOrderRepo {
             buys: vec![buy],
             sells: vec![sell],
-            expire_returns: vec![Uuid::new_v4(), Uuid::new_v4()],
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
@@ -357,10 +348,10 @@ mod tests {
 
         assert_eq!(
             *orders.expire_calls.lock().unwrap(),
-            1,
-            "reaper must run once per cycle"
+            0,
+            "matcher must not reap; that's the ReaperWorker's job"
         );
-        assert_eq!(matched, 1, "reap does not disrupt matching the live pair");
+        assert_eq!(matched, 1, "matching still works");
     }
 
     /// An unfilled IOC order with no counterparty is cancelled, not left Active:

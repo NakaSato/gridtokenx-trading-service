@@ -184,6 +184,18 @@ impl Default for TimeInForce {
     }
 }
 
+impl TimeInForce {
+    /// Immediate time-in-force: the order must fill in the matching pass it
+    /// enters and must never rest in the book. Both IOC and FOK are immediate;
+    /// only GTC may rest. The CDA IOC sweep uses this to cancel any unfilled
+    /// remainder (e.g. an FOK that failed its all-or-nothing liquidity check)
+    /// instead of leaving it resting at its bid ceiling.
+    #[must_use]
+    pub fn is_immediate(self) -> bool {
+        matches!(self, Self::Ioc | Self::Fok)
+    }
+}
+
 // ── Conditional Order Enums ──────────────────────────────────────────────────
 
 /// Type of conditional order trigger

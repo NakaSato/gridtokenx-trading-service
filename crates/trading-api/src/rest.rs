@@ -27,7 +27,10 @@ pub struct SubmitOrderRequest {
     pub side: String,
     pub order_type: String,
     pub energy_amount_kwh: String,
-    pub price_per_kwh: String,
+    /// Required for limit orders. For a market buy it is optional and, if given,
+    /// acts as the maximum acceptable price (slippage cap); absent → a wide
+    /// default ceiling. A market buy still fills at the resting ask, not this value.
+    pub price_per_kwh: Option<String>,
     pub zone_id: i32,
     pub meter_id: Option<Uuid>,
     pub custodial_sign: Option<bool>,
@@ -71,11 +74,37 @@ pub struct OrderData {
     pub id: Uuid,
     pub zone_id: i32,
     pub side: String,
+    pub order_type: String,
     pub status: String,
     pub energy_amount_kwh: String,
-    pub price_per_kwh: String,
+    /// `None` for market orders: their stored `price_per_kwh` is a synthetic bid
+    /// (ceiling or slippage cap), not the price the order executed at — surfacing
+    /// it would mislead. Limit orders carry the user's real price.
+    pub price_per_kwh: Option<String>,
     pub filled_amount_kwh: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl OrderData {
+    fn from_order(o: &TradingOrder) -> Self {
+        // Market orders price at the resting ask; the row's price_per_kwh is a
+        // synthetic bid the user never set, so don't expose it as the price.
+        let price_per_kwh = match o.order_type {
+            OrderType::Market => None,
+            _ => Some(o.price_per_kwh.to_string()),
+        };
+        OrderData {
+            id: o.id,
+            zone_id: o.zone_id.unwrap_or(0),
+            side: o.side.to_string().to_lowercase(),
+            order_type: o.order_type.to_string().to_lowercase(),
+            status: o.status.to_string().to_lowercase(),
+            energy_amount_kwh: o.energy_amount.to_string(),
+            price_per_kwh,
+            filled_amount_kwh: o.filled_amount.to_string(),
+            created_at: o.created_at.unwrap_or_else(gridtokenx_telemetry::time::now),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -137,12 +166,6 @@ pub async fn submit_order(
             format!("Invalid energy_amount_kwh: {}", e),
         )
     })?;
-    let price = Decimal::from_str(&req.price_per_kwh).map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("Invalid price_per_kwh: {}", e),
-        )
-    })?;
 
     let side = match req.side.to_lowercase().as_str() {
         "buy" => OrderSide::Buy,
@@ -177,6 +200,68 @@ pub async fn submit_order(
                 axum::http::StatusCode::BAD_REQUEST,
                 format!("Invalid time_in_force: {other} (expected gtc|ioc|fok)"),
             ))
+        }
+    };
+
+    // Resolve the matching price.
+    // - Market BUY: crosses any resting ask, so it gets an aggressive bid and
+    //   fills at the resting ask (the engine prices trades at the maker/sell
+    //   side, so the buyer pays the real ask, not this bid). It must be immediate
+    //   (IOC/FOK) so a max-price bid never rests in the book. `price_per_kwh`, if
+    //   supplied, is the buyer's MAXIMUM acceptable price (slippage cap): the bid
+    //   is set to it so a fill never crosses above it. Absent → a wide default
+    //   ceiling (unbounded for practical energy prices).
+    // - Market SELL: unsupported — the matcher would clear it at its OWN ask, not
+    //   the best bid, so a market sell can't be priced correctly here.
+    // - Limit: requires an explicit price.
+    let price = match order_type {
+        OrderType::Market => {
+            if matches!(side, OrderSide::Sell) {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "market sell orders are not supported (the matcher prices at the resting ask); submit a limit sell".to_string(),
+                ));
+            }
+            if time_in_force == TimeInForce::Gtc {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "market orders are immediate — use ioc or fok (gtc would rest a max-price bid)".to_string(),
+                ));
+            }
+            // Slippage cap: if the caller supplied a price, it is the maximum
+            // they will pay — use it as the bid so a fill never crosses above it.
+            // Otherwise fall back to a ceiling bid above any realistic energy ask
+            // and well below fixed-point overflow.
+            match req.price_per_kwh.as_deref() {
+                Some(raw) => {
+                    let cap = Decimal::from_str(raw).map_err(|e| {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            format!("Invalid price_per_kwh: {}", e),
+                        )
+                    })?;
+                    if cap <= Decimal::ZERO {
+                        return Err((
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "price_per_kwh (market buy slippage cap) must be positive".to_string(),
+                        ));
+                    }
+                    cap
+                }
+                None => Decimal::new(1_000_000, 0),
+            }
+        }
+        _ => {
+            let raw = req.price_per_kwh.as_deref().ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "price_per_kwh is required for limit orders".to_string(),
+            ))?;
+            Decimal::from_str(raw).map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid price_per_kwh: {}", e),
+                )
+            })?
         }
     };
 
@@ -388,19 +473,7 @@ pub async fn list_orders(
             )
         })?;
 
-    let data = orders
-        .into_iter()
-        .map(|o| OrderData {
-            id: o.id,
-            zone_id: o.zone_id.unwrap_or(0),
-            side: o.side.to_string().to_lowercase(),
-            status: o.status.to_string().to_lowercase(),
-            energy_amount_kwh: o.energy_amount.to_string(),
-            price_per_kwh: o.price_per_kwh.to_string(),
-            filled_amount_kwh: o.filled_amount.to_string(),
-            created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
-        })
-        .collect::<Vec<_>>();
+    let data = orders.iter().map(OrderData::from_order).collect::<Vec<_>>();
 
     let total = data.len();
     Ok(Json(ListOrdersResponse {
@@ -447,16 +520,7 @@ pub async fn get_order_by_id(
         ));
     }
 
-    Ok(Json(OrderData {
-        id: order.id,
-        zone_id: order.zone_id.unwrap_or(0),
-        side: order.side.to_string().to_lowercase(),
-        status: order.status.to_string().to_lowercase(),
-        energy_amount_kwh: order.energy_amount.to_string(),
-        price_per_kwh: order.price_per_kwh.to_string(),
-        filled_amount_kwh: order.filled_amount.to_string(),
-        created_at: order.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
-    }))
+    Ok(Json(OrderData::from_order(&order)))
 }
 
 pub async fn cancel_order(
@@ -942,11 +1006,29 @@ pub async fn get_matching_status(
         )
     })?;
 
-    Ok(Json(build_matching_status(&buys, &sells)))
+    Ok(Json(build_matching_status(
+        &buys,
+        &sells,
+        gridtokenx_telemetry::time::now(),
+    )))
 }
 
 /// Pure aggregation over active orders — unit-testable without a DB.
-fn build_matching_status(buys: &[TradingOrder], sells: &[TradingOrder]) -> MatchingStatusResponse {
+///
+/// `get_active_buy_orders`/`get_active_sell_orders` no longer filter expired rows
+/// at the DB level (expiry is reaped asynchronously by the `ReaperWorker`), so a
+/// row can be returned here after its `expires_at` but before the next reap tick.
+/// The matcher skips such orders, so counting them as crossable would report
+/// phantom liquidity. Filter them out with the same expiry rule the engine uses.
+fn build_matching_status(
+    buys: &[TradingOrder],
+    sells: &[TradingOrder],
+    now: chrono::DateTime<chrono::Utc>,
+) -> MatchingStatusResponse {
+    let is_live = |o: &&TradingOrder| o.expires_at.is_none_or(|exp| exp > now);
+    let buys: Vec<&TradingOrder> = buys.iter().filter(is_live).collect();
+    let sells: Vec<&TradingOrder> = sells.iter().filter(is_live).collect();
+
     let buy_min = buys.iter().map(|o| o.price_per_kwh).min();
     let buy_max = buys.iter().map(|o| o.price_per_kwh).max();
     let sell_min = sells.iter().map(|o| o.price_per_kwh).min();
@@ -1925,7 +2007,7 @@ mod tests {
 
     #[test]
     fn matching_status_empty() {
-        let r = build_matching_status(&[], &[]);
+        let r = build_matching_status(&[], &[], gridtokenx_telemetry::time::now());
         assert_eq!(r.pending_buy_orders, 0);
         assert_eq!(r.pending_sell_orders, 0);
         assert_eq!(r.pending_matches, 0);
@@ -1937,7 +2019,7 @@ mod tests {
 
     #[test]
     fn matching_status_buys_only() {
-        let r = build_matching_status(&[order(OrderSide::Buy, 500)], &[]);
+        let r = build_matching_status(&[order(OrderSide::Buy, 500)], &[], gridtokenx_telemetry::time::now());
         assert_eq!(r.pending_buy_orders, 1);
         assert_eq!(r.pending_sell_orders, 0);
         assert!(!r.can_match);
@@ -1947,7 +2029,7 @@ mod tests {
 
     #[test]
     fn matching_status_sells_only() {
-        let r = build_matching_status(&[], &[order(OrderSide::Sell, 400)]);
+        let r = build_matching_status(&[], &[order(OrderSide::Sell, 400)], gridtokenx_telemetry::time::now());
         assert_eq!(r.pending_sell_orders, 1);
         assert!(!r.can_match);
         assert_eq!(r.match_reason, "no buy liquidity");
@@ -1958,7 +2040,7 @@ mod tests {
         // buy_max 500 >= sell_min 400 → crossing
         let buys = vec![order(OrderSide::Buy, 450), order(OrderSide::Buy, 500)];
         let sells = vec![order(OrderSide::Sell, 400), order(OrderSide::Sell, 600)];
-        let r = build_matching_status(&buys, &sells);
+        let r = build_matching_status(&buys, &sells, gridtokenx_telemetry::time::now());
         assert!(r.can_match);
         assert!(r.pending_matches > 0);
         assert_eq!(r.buy_price_range.min, 4.5);
@@ -1973,10 +2055,26 @@ mod tests {
         // buy_max 300 < sell_min 400 → spread too wide
         let buys = vec![order(OrderSide::Buy, 300)];
         let sells = vec![order(OrderSide::Sell, 400)];
-        let r = build_matching_status(&buys, &sells);
+        let r = build_matching_status(&buys, &sells, gridtokenx_telemetry::time::now());
         assert!(!r.can_match);
         assert_eq!(r.pending_matches, 0);
         assert_eq!(r.match_reason, "spread too wide");
+    }
+
+    /// Expired-but-unreaped orders must not count as liquidity: the DB query no
+    /// longer filters them, so build_matching_status filters by expires_at itself.
+    #[test]
+    fn matching_status_excludes_expired_orders() {
+        let now = gridtokenx_telemetry::time::now();
+        let mut expired_sell = order(OrderSide::Sell, 400);
+        expired_sell.expires_at = Some(now - chrono::Duration::seconds(1));
+        // Crossing buy (500) vs an expired sell (400): without filtering this would
+        // report can_match=true; the expired sell must be dropped → no liquidity.
+        let r = build_matching_status(&[order(OrderSide::Buy, 500)], &[expired_sell], now);
+        assert_eq!(r.pending_sell_orders, 0, "expired sell excluded");
+        assert!(!r.can_match, "no live counterparty → cannot match");
+        assert_eq!(r.pending_matches, 0);
+        assert_eq!(r.match_reason, "no sell liquidity");
     }
 
     #[test]
@@ -1988,7 +2086,7 @@ mod tests {
             order(OrderSide::Buy, 520),
         ];
         let sells = vec![order(OrderSide::Sell, 400)];
-        let r = build_matching_status(&buys, &sells);
+        let r = build_matching_status(&buys, &sells, gridtokenx_telemetry::time::now());
         assert_eq!(r.pending_matches, 1);
     }
 

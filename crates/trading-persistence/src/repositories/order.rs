@@ -375,7 +375,12 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            "SELECT * FROM trading_orders WHERE side = 'buy' AND status IN ('pending', 'active', 'partially_filled') AND (expires_at IS NULL OR expires_at > NOW())"
+            // No `expires_at` predicate: expiry is gated by the telemetry (NTP)
+            // clock — the ReaperWorker (which flips expired → Expired, so they
+            // drop from this status filter) and the engine's `is_expired` skip.
+            // A DB `NOW()` predicate here would compare against a *different*
+            // clock than the one `expires_at` was written with.
+            "SELECT * FROM trading_orders WHERE side = 'buy' AND status IN ('pending', 'active', 'partially_filled')"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -385,7 +390,9 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            "SELECT * FROM trading_orders WHERE side = 'sell' AND status IN ('pending', 'active', 'partially_filled') AND (expires_at IS NULL OR expires_at > NOW())"
+            // See get_active_buy_orders: expiry is telemetry-clock-gated, not a
+            // DB NOW() predicate (which would mix clocks vs how expires_at is set).
+            "SELECT * FROM trading_orders WHERE side = 'sell' AND status IN ('pending', 'active', 'partially_filled')"
         )
         .fetch_all(&self.pool)
         .await?;

@@ -329,17 +329,23 @@ impl MatchingEngine {
             }
         }
 
-        // 3. IOC sweep. An Immediate-or-Cancel order fills only what crosses in
-        // THIS pass; its leftover must not rest in the book for a later cycle. Any
-        // IOC order (buy or sell) still holding >= MIN_TRADE_AMOUNT of unfilled
-        // energy is reported for cancellation. Expired orders are skipped here:
-        // they are reaped to `Expired` by the orchestrator's expiry sweep
-        // (`OrderRepository::expire_stale_orders`), so cancelling them too would
-        // race that terminal status.
+        // 3. Immediate-TIF sweep. An immediate order (IOC or FOK) fills only what
+        // crosses in THIS pass; its leftover must not rest in the book for a later
+        // cycle. This covers two cases: an IOC that partially filled, and an FOK
+        // whose all-or-nothing liquidity check failed above (the `continue` at the
+        // FOK branch) and so filled nothing — without this, that FOK would rest at
+        // its bid ceiling (e.g. a market buy's 1,000,000 ceiling) and cross any
+        // later ask up to that ceiling. Any immediate order (buy or sell) with ANY
+        // unfilled energy is reported for cancellation — including a
+        // sub-MIN_TRADE_AMOUNT dust remainder, which can never trade again (below
+        // the min) and so would otherwise rest as a permanent PartiallyFilled
+        // order. Expired orders are skipped here: they are reaped to `Expired` by
+        // the ReaperWorker (`OrderRepository::expire_stale_orders`), so cancelling
+        // them too would race that terminal status.
         for o in buy_orders.iter().chain(sell_orders.iter()) {
-            if o.time_in_force == TimeInForce::Ioc
+            if o.time_in_force.is_immediate()
                 && !o.is_expired(now_ns)
-                && o.remaining_amount() >= MIN_TRADE_AMOUNT
+                && o.remaining_amount() > Decimal::ZERO
             {
                 stats.ioc_cancellations.push(o.id);
             }
@@ -1030,6 +1036,86 @@ mod tests {
         assert!(
             stats.ioc_cancellations.is_empty(),
             "GTC remainder rests in the book, not cancelled"
+        );
+    }
+
+    /// An FOK buy whose all-or-nothing liquidity check fails fills nothing and
+    /// must be swept (cancelled), not left resting at its (possibly ceiling) bid.
+    /// Regression: the sweep previously matched only IOC, so a market+FOK buy rested
+    /// at the 1,000,000 ceiling and crossed later asks.
+    #[test]
+    fn fok_insufficient_liquidity_is_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // Buyer wants 100 kWh FOK; only 40 kWh resting → all-or-nothing fails.
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "FOK fills nothing when it can't fill fully");
+        assert_eq!(buys[0].filled_amount, dec!(0.0));
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "unfilled FOK must be swept, not left resting"
+        );
+    }
+
+    /// A fully-fillable FOK has no remainder, so it is NOT reported.
+    #[test]
+    fn fok_fully_filled_is_not_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert!(
+            stats.ioc_cancellations.is_empty(),
+            "fully-filled FOK has nothing to cancel"
+        );
+    }
+
+    /// A sub-MIN_TRADE_AMOUNT IOC dust remainder is reported: it can never trade
+    /// again (below the min), so for IOC it must be cancelled, not left resting.
+    /// buy 10.0005 fills 10.0 against the sell → 0.0005 dust (< MIN 0.001).
+    #[test]
+    fn ioc_sub_min_dust_remainder_is_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // Cross-zone (no intra discount) so landed cost = sell price, clean cross.
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0005), 1, 100, TimeInForce::Ioc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1, "fills the 10.0 that crossed");
+        assert!(buys[0].remaining_amount() < MIN_TRADE_AMOUNT, "leftover is dust");
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "sub-MIN IOC dust must still be reported for cancellation"
         );
     }
 

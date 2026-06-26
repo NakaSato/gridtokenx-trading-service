@@ -1690,3 +1690,52 @@ async fn test_clearing_epochs_endpoint() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_array(), "clearing-epochs returns a JSON array");
 }
+
+/// True market orders: a market BUY needs no price (crosses at the resting ask,
+/// gets the ceiling bid + IOC); a market SELL is rejected; market+GTC rejected;
+/// a limit order still requires a price.
+#[tokio::test]
+async fn test_market_order_semantics() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let user_id = Uuid::new_v4();
+
+    let post = |app: axum::Router, body: serde_json::Value| async move {
+        request(app, "POST", "/api/v1/orders", user_id, Body::from(body.to_string())).await
+    };
+
+    // Market BUY, no price → OK; stored at the ceiling bid, IOC.
+    let res = post(app.clone(), json!({
+        "side": "buy", "order_type": "market",
+        "energy_amount_kwh": "10", "zone_id": 1
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK, "market buy needs no price");
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().unwrap();
+        assert_eq!(o.price_per_kwh, rust_decimal::Decimal::new(1_000_000, 0), "ceiling bid");
+        assert_eq!(o.time_in_force, TimeInForce::Ioc);
+        assert_eq!(o.order_type, OrderType::Market);
+    }
+
+    // Market SELL → 400 (unsupported by the maker/sell-priced matcher).
+    let res = post(app.clone(), json!({
+        "side": "sell", "order_type": "market",
+        "energy_amount_kwh": "10", "zone_id": 1
+    })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "market sell rejected");
+
+    // Market + explicit GTC → 400 (market must be immediate).
+    let res = post(app.clone(), json!({
+        "side": "buy", "order_type": "market", "time_in_force": "gtc",
+        "energy_amount_kwh": "10", "zone_id": 1
+    })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "market gtc rejected");
+
+    // Limit without a price → 400.
+    let res = post(app, json!({
+        "side": "buy", "order_type": "limit",
+        "energy_amount_kwh": "10", "zone_id": 1
+    })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "limit needs a price");
+}
