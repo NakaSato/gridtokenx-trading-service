@@ -1549,7 +1549,56 @@ async fn test_submit_order_parses_tif_and_segment() {
     let app = build_router(state);
     let user_id = Uuid::new_v4();
 
-    // Explicit IOC + Interval flow through to the persisted order.
+    // Realtime + IOC flows through (interval+ioc is rejected — see guard below).
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "time_in_force": "ioc", "market_segment": "realtime"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().expect("order captured");
+        assert_eq!(o.time_in_force, TimeInForce::Ioc);
+        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Realtime);
+    }
+
+    // Interval + GTC is the valid interval combination.
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "market_segment": "interval"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().expect("order captured");
+        assert_eq!(o.time_in_force, TimeInForce::Gtc);
+        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Interval);
+    }
+
+    // Guard: interval + ioc is rejected — IOC has no meaning in batch clearing,
+    // and the CDA IOC sweep never sees interval orders.
     let res = request(
         app.clone(),
         "POST",
@@ -1565,13 +1614,7 @@ async fn test_submit_order_parses_tif_and_segment() {
         ),
     )
     .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    {
-        let orders = mock.orders.lock().unwrap();
-        let o = orders.last().expect("order captured");
-        assert_eq!(o.time_in_force, TimeInForce::Ioc);
-        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Interval);
-    }
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     // Omitted → defaults Gtc / Realtime.
     let res = request(

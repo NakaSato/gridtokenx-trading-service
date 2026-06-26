@@ -78,6 +78,19 @@ impl TradingService for TradingGrpcService {
             }
         };
 
+        // Interval orders clear in a 15-min uniform-price batch; IOC/FOK only make
+        // sense under continuous matching, and the CDA IOC sweep never sees interval
+        // orders (the matcher filters to Realtime), so an interval IOC remainder
+        // would never be cancelled. Reject the combination.
+        if market_segment == trading_core::types::MarketSegment::Interval
+            && time_in_force != TimeInForce::Gtc
+        {
+            return Err(ConnectError::new(
+                ErrorCode::InvalidArgument,
+                "interval orders must be gtc (ioc/fok require continuous matching)",
+            ));
+        }
+
         let amount = Decimal::from_f64_retain(request.energy_amount).ok_or_else(|| {
             ConnectError::new(ErrorCode::InvalidArgument, "Invalid energy_amount")
         })?;

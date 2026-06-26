@@ -184,6 +184,19 @@ pub async fn submit_order(
         }
     };
 
+    // Interval orders clear in a 15-min uniform-price batch, not continuously, so
+    // the "immediate" time-in-force modes (IOC/FOK) have no meaning there — and the
+    // CDA IOC sweep never sees interval orders (the matcher filters to Realtime), so
+    // an interval IOC remainder would never be cancelled. Reject the combination.
+    if market_segment == trading_core::types::MarketSegment::Interval
+        && time_in_force != TimeInForce::Gtc
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "interval orders must be gtc (ioc/fok require continuous matching)".to_string(),
+        ));
+    }
+
     let mut order = TradingOrder {
         id: Uuid::new_v4(),
         user_id: user.user_id,
