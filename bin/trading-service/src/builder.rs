@@ -4,7 +4,7 @@ use trading_core::traits::*;
 use trading_infra::audit::AuditLogger;
 use trading_infra::blockchain::BlockchainService;
 use trading_infra::cache::CacheService;
-use trading_logic::{GridAwareTopology, MatcherService, SettlementService};
+use trading_logic::{ClearingService, GridAwareTopology, MatcherService, SettlementService};
 use trading_persistence::repositories::{
     PostgresAnalyticsRepository, PostgresCarbonRepository, PostgresFuturesRepository,
     PostgresOrderRepository, PostgresPriceAlertRepository, PostgresRecurringOrderRepository,
@@ -35,6 +35,7 @@ pub struct Infrastructure {
 pub struct AppServices {
     pub settlement: Arc<SettlementService>,
     pub matcher: Arc<MatcherService>,
+    pub clearing: Arc<ClearingService>,
     pub vpp: Arc<trading_logic::vpp::VppService>,
     pub recurring_evaluator: Arc<trading_logic::RecurringEvaluator>,
     pub trigger_evaluator: Arc<trading_logic::TriggerEvaluator>,
@@ -163,6 +164,14 @@ impl ServiceBuilder {
             Arc::new(GridAwareTopology::new()),
         ));
 
+        // Uniform-price clearing for the Interval segment (Phase 4). Same repos +
+        // topology as the matcher; the ClearingWorker drives it on each tick.
+        let clearing_service = Arc::new(ClearingService::new(
+            order_repo.clone(),
+            settlement_repo.clone(),
+            Arc::new(GridAwareTopology::new()),
+        ));
+
         let vpp_service = Arc::new(trading_logic::vpp::VppService::new(
             vpp_repo.clone(),
             audit.clone(),
@@ -184,6 +193,7 @@ impl ServiceBuilder {
         let services = AppServices {
             settlement: settlement_service,
             matcher: matcher_service,
+            clearing: clearing_service,
             vpp: vpp_service,
             recurring_evaluator,
             trigger_evaluator,

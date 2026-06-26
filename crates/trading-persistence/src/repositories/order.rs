@@ -395,4 +395,25 @@ impl OrderRepository for PostgresOrderRepository {
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
         crate::repositories::epoch::get_or_create_active_epoch(&self.pool).await
     }
+
+    async fn get_epochs_due_for_clearing(&self) -> TraitResult<Vec<Uuid>> {
+        crate::repositories::epoch::get_epochs_due_for_clearing(&self.pool).await
+    }
+
+    async fn mark_epoch_cleared(
+        &self,
+        epoch_id: Uuid,
+        clearing_price: Option<Decimal>,
+        total_volume: Decimal,
+        matched_orders: i64,
+    ) -> TraitResult<()> {
+        crate::repositories::epoch::mark_epoch_cleared(
+            &self.pool,
+            epoch_id,
+            clearing_price,
+            total_volume,
+            matched_orders,
+        )
+        .await
+    }
 }

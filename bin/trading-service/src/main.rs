@@ -55,6 +55,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matcher_worker.run().await;
     });
 
+    // Uniform-price clearing for the Interval segment (Phase 4). Polls every 60s;
+    // clears + closes any epoch whose 15-minute window has elapsed.
+    let clearing_worker = trading_logic::ClearingWorker::new(
+        services.clearing.clone(),
+        tokio::time::Duration::from_secs(60),
+    );
+    tokio::spawn(async move {
+        clearing_worker.run().await;
+    });
+
     let settlement_worker = trading_logic::SettlementWorker::new(
         services.settlement.clone(),
         tokio::time::Duration::from_secs(10),

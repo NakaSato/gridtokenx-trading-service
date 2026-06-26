@@ -102,6 +102,27 @@ pub trait OrderRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Ids of epochs whose 15-minute window has elapsed but are still `active` —
+    /// i.e. due for uniform-price clearing. Default is empty so non-persistent
+    /// mocks need not implement it; the Postgres repository overrides it.
+    async fn get_epochs_due_for_clearing(&self) -> TraitResult<Vec<Uuid>> {
+        Ok(Vec::new())
+    }
+
+    /// Close an epoch after clearing: set status `cleared` and stamp the summary
+    /// (single-zone clearing price, total volume, matched-order count). Guarded so
+    /// it only transitions an `active` epoch — idempotent under re-runs. Default is
+    /// a no-op; the Postgres repository overrides it.
+    async fn mark_epoch_cleared(
+        &self,
+        _epoch_id: Uuid,
+        _clearing_price: Option<Decimal>,
+        _total_volume: Decimal,
+        _matched_orders: i64,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+
     /// Cancel an order.
     async fn cancel_order(&self, id: Uuid, user_id: Uuid) -> TraitResult<bool>;
 

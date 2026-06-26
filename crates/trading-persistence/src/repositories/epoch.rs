@@ -6,6 +6,7 @@
 //! settlement) must reference a row that exists here, so they all funnel through
 //! this routine instead of inventing nil/hardcoded epoch UUIDs.
 
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use trading_core::traits::TraitResult;
 use uuid::Uuid;
@@ -52,4 +53,42 @@ pub async fn get_or_create_active_epoch(pool: &PgPool) -> TraitResult<Uuid> {
 
     tx.commit().await?;
     Ok(id)
+}
+
+/// Ids of epochs whose window has elapsed (`end_time <= NOW()`) but are still
+/// `active` — the uniform-price clearing worker's work-list. Oldest first so a
+/// backlog clears in order.
+pub async fn get_epochs_due_for_clearing(pool: &PgPool) -> TraitResult<Vec<Uuid>> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM market_epochs \
+         WHERE status = 'active' AND end_time <= NOW() \
+         ORDER BY end_time ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Close an epoch after clearing: `active` → `cleared`, stamping the summary
+/// columns. The `WHERE status = 'active'` guard makes it idempotent — a second
+/// call (or a racing worker) updates zero rows.
+pub async fn mark_epoch_cleared(
+    pool: &PgPool,
+    epoch_id: Uuid,
+    clearing_price: Option<Decimal>,
+    total_volume: Decimal,
+    matched_orders: i64,
+) -> TraitResult<()> {
+    sqlx::query(
+        "UPDATE market_epochs \
+         SET status = 'cleared', clearing_price = $2, total_volume = $3, matched_orders = $4 \
+         WHERE id = $1 AND status = 'active'",
+    )
+    .bind(epoch_id)
+    .bind(clearing_price)
+    .bind(total_volume)
+    .bind(matched_orders)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

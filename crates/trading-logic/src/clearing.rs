@@ -144,6 +144,37 @@ impl ClearingService {
             zone_prices,
         })
     }
+
+    /// Clear every epoch whose window has elapsed, then close it. For each due
+    /// epoch: run the uniform-price clearing, then mark it `cleared` (stamping the
+    /// summary) — even when nothing matched, so the epoch doesn't linger `active`
+    /// and get re-selected forever. The `mark_epoch_cleared` guard makes the close
+    /// idempotent. Returns one summary per epoch processed.
+    pub async fn clear_due_epochs(&self) -> TraitResult<Vec<ClearingSummary>> {
+        let due = self.order_repo.get_epochs_due_for_clearing().await?;
+        let mut summaries = Vec::with_capacity(due.len());
+        for epoch_id in due {
+            let summary = self.run_epoch_clearing(epoch_id).await?;
+
+            // The epoch column holds a single price; only a single-zone clear has
+            // an unambiguous one. Multi-zone (or empty) clears leave it NULL — the
+            // per-zone prices live on the settlements/order_matches rows.
+            let clearing_price = match summary.zone_prices.as_slice() {
+                [(_, price)] => Some(*price),
+                _ => None,
+            };
+            self.order_repo
+                .mark_epoch_cleared(
+                    epoch_id,
+                    clearing_price,
+                    summary.total_volume,
+                    i64::try_from(summary.matches).unwrap_or(i64::MAX),
+                )
+                .await?;
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    }
 }
 
 #[cfg(test)]
@@ -218,10 +249,30 @@ mod tests {
         buys: Vec<TradingOrder>,
         sells: Vec<TradingOrder>,
         fills: Mutex<Vec<(Uuid, Decimal, OrderStatus)>>,
+        /// Epoch ids the worker should treat as due (preset per test).
+        due_epochs: Vec<Uuid>,
+        /// Captured `mark_epoch_cleared` calls: (epoch, price, volume, matched).
+        cleared: Mutex<Vec<(Uuid, Option<Decimal>, Decimal, i64)>>,
     }
 
     #[async_trait]
     impl OrderRepository for MockOrderRepo {
+        async fn get_epochs_due_for_clearing(&self) -> TraitResult<Vec<Uuid>> {
+            Ok(self.due_epochs.clone())
+        }
+        async fn mark_epoch_cleared(
+            &self,
+            epoch_id: Uuid,
+            clearing_price: Option<Decimal>,
+            total_volume: Decimal,
+            matched_orders: i64,
+        ) -> TraitResult<()> {
+            self.cleared
+                .lock()
+                .unwrap()
+                .push((epoch_id, clearing_price, total_volume, matched_orders));
+            Ok(())
+        }
         async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
             Ok(self.buys.clone())
         }
@@ -395,6 +446,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let svc = ClearingService::new(
@@ -432,6 +484,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
@@ -461,6 +514,7 @@ mod tests {
             buys: vec![buy],
             sells: vec![sell],
             fills: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
@@ -469,5 +523,64 @@ mod tests {
 
         assert_eq!(summary.zones_cleared, 0);
         assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// `clear_due_epochs` clears each due epoch and closes it with the
+    /// single-zone price + summary stamped via `mark_epoch_cleared`.
+    #[tokio::test]
+    async fn clears_and_closes_due_epochs() {
+        let epoch = Uuid::new_v4();
+        let buy = order(OrderSide::Buy, dec!(1.0), dec!(10.0), 1, epoch, MarketSegment::Interval);
+        let sell = order(
+            OrderSide::Sell,
+            dec!(0.6),
+            dec!(10.0),
+            1,
+            epoch,
+            MarketSegment::Interval,
+        );
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+            due_epochs: vec![epoch],
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+
+        let summaries = svc.clear_due_epochs().await.unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        let cleared = orders.cleared.lock().unwrap();
+        assert_eq!(
+            *cleared,
+            vec![(epoch, Some(dec!(0.8)), dec!(10.0), 1)],
+            "epoch closed with single-zone price, volume, matched count"
+        );
+    }
+
+    /// An empty due epoch (no matchable orders) is still closed — otherwise it
+    /// lingers `active` and is re-selected every tick. Price is NULL.
+    #[tokio::test]
+    async fn closes_empty_due_epoch() {
+        let epoch = Uuid::new_v4();
+        let orders = Arc::new(MockOrderRepo {
+            due_epochs: vec![epoch],
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+
+        let summaries = svc.clear_due_epochs().await.unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].matches, 0);
+        let cleared = orders.cleared.lock().unwrap();
+        assert_eq!(
+            *cleared,
+            vec![(epoch, None, Decimal::ZERO, 0)],
+            "empty epoch still closed, price NULL"
+        );
     }
 }

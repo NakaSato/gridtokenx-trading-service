@@ -1,9 +1,11 @@
+pub mod clearing;
 pub mod matcher;
 pub mod recurring;
 pub mod settlement;
 pub mod supply_sync;
 pub mod trigger;
 
+pub use clearing::ClearingWorker;
 pub use matcher::MatcherWorker;
 pub use recurring::RecurringEvaluatorWorker;
 pub use settlement::SettlementWorker;

@@ -22,6 +22,6 @@ pub use recurring_evaluator::RecurringEvaluator;
 pub use settlement::SettlementService;
 pub use trigger_evaluator::TriggerEvaluator;
 pub use workers::{
-    MatcherWorker, RecurringEvaluatorWorker, SettlementWorker, SupplySyncWorker,
+    ClearingWorker, MatcherWorker, RecurringEvaluatorWorker, SettlementWorker, SupplySyncWorker,
     TriggerEvaluatorWorker,
 };
