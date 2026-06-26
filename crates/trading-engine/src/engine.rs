@@ -254,13 +254,27 @@ impl MatchingEngine {
                     .then_with(|| a.sort_id.cmp(&b.sort_id))
             });
 
-            // FOK handling
+            // FOK handling — all-or-nothing. Simulate the real drain loop below
+            // (sells under MIN_TRADE_AMOUNT are skipped; the loop stops once the
+            // buy's remainder drops below MIN) and only proceed if the order fills
+            // completely. A plain `sum >= size` check is not enough: granular fills
+            // can leave a sub-MIN dust remainder that the real loop's MIN break
+            // strands, which the immediate sweep then cancels — a partial fill that
+            // violates fill-or-kill. If the simulation leaves anything unfilled,
+            // kill the order (skip matching; the sweep reports it for cancellation).
             if buy.time_in_force == TimeInForce::Fok {
-                let total_available: Decimal = candidates
-                    .iter()
-                    .map(|c| sell_orders[c.sell_idx].remaining_amount())
-                    .sum();
-                if total_available < buy.remaining_amount() {
+                let mut need = buy.remaining_amount();
+                for c in candidates.iter() {
+                    let avail = sell_orders[c.sell_idx].remaining_amount();
+                    if avail < MIN_TRADE_AMOUNT {
+                        continue;
+                    }
+                    need -= need.min(avail);
+                    if need < MIN_TRADE_AMOUNT {
+                        break;
+                    }
+                }
+                if need > Decimal::ZERO {
                     continue;
                 }
             }
@@ -1065,6 +1079,38 @@ mod tests {
             stats.ioc_cancellations,
             vec![buys[0].id],
             "unfilled FOK must be swept, not left resting"
+        );
+    }
+
+    /// An FOK with ample total liquidity that nonetheless can't fill completely
+    /// (granular fill strands sub-MIN dust) must be killed whole, not partially
+    /// filled then cancelled. buy 10.0005 vs sells 10.0 + 1.0: the first sell
+    /// fills 10.0, leaving 0.0005 (< MIN) which the drain loop strands — so the
+    /// order must fill NOTHING and be swept.
+    #[test]
+    fn fok_strands_dust_is_killed_whole() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0005), 1, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![
+            order(seller, dec!(0.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0),
+            order(seller, dec!(0.5), dec!(1.0), 1, 101, TimeInForce::Gtc, 0),
+        ];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(2),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "FOK that can't fully fill must not partially fill");
+        assert_eq!(buys[0].filled_amount, dec!(0.0));
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "killed FOK must be swept for cancellation"
         );
     }
 

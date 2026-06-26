@@ -102,15 +102,16 @@ impl TradingService for TradingGrpcService {
 
         // Parse the optional price input (limit price OR market-buy slippage cap),
         // then apply the shared admission policy. The proto price_per_kwh is a
-        // non-optional f64, so a non-positive value means "absent" (a market buy
-        // falls back to the ceiling; a limit order is then rejected as missing).
-        // See `trading_core::order_policy::resolve_order_price`.
-        let price_input = if request.price_per_kwh > 0.0 {
+        // non-optional f64, so exactly 0.0 means "absent" (a market buy falls back
+        // to the ceiling; a limit order is then rejected as missing); a negative
+        // value stays present and is rejected by the policy — matching REST. See
+        // `trading_core::order_policy::resolve_order_price`.
+        let price_input = if request.price_per_kwh == 0.0 {
+            None
+        } else {
             Some(Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
                 ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
             })?)
-        } else {
-            None
         };
         let price = trading_core::order_policy::resolve_order_price(
             order_type,

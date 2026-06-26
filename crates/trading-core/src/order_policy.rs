@@ -27,6 +27,9 @@ pub enum OrderPriceError {
     MarketCapNonPositive,
     /// A limit order requires an explicit price.
     LimitMissingPrice,
+    /// A limit order's price was supplied but is not positive (a zero/negative
+    /// bid or ask would mis-cross the CDA book).
+    LimitNonPositive,
 }
 
 impl OrderPriceError {
@@ -44,16 +47,20 @@ impl OrderPriceError {
                 "price_per_kwh (market buy slippage cap) must be positive"
             }
             Self::LimitMissingPrice => "price_per_kwh is required for limit orders",
+            Self::LimitNonPositive => "price_per_kwh must be positive",
         }
     }
 }
 
 /// Resolve the matching price for a submitted order.
 ///
-/// `price_input` is the caller's parsed `price_per_kwh`, if any:
-/// - **Limit**: it is the required order price (absent → [`OrderPriceError::LimitMissingPrice`]).
+/// `price_input` is the caller's parsed `price_per_kwh`, if any. Both edges map a
+/// parsed value of exactly zero to `None` (absent) so the two transports agree;
+/// a present value is therefore always non-zero here.
+/// - **Limit**: it is the required order price (absent → [`OrderPriceError::LimitMissingPrice`];
+///   negative → [`OrderPriceError::LimitNonPositive`]).
 /// - **Market BUY**: it is an *optional* maximum acceptable price (slippage cap)
-///   used as the bid; absent → [`MARKET_BUY_CEILING_BID`]. A non-positive cap is
+///   used as the bid; absent → [`MARKET_BUY_CEILING_BID`]. A negative cap is
 ///   rejected. Market SELL and market GTC are rejected outright.
 ///
 /// # Errors
@@ -79,7 +86,11 @@ pub fn resolve_order_price(
                 None => Ok(MARKET_BUY_CEILING_BID),
             }
         }
-        _ => price_input.ok_or(OrderPriceError::LimitMissingPrice),
+        _ => match price_input {
+            None => Err(OrderPriceError::LimitMissingPrice),
+            Some(p) if p <= Decimal::ZERO => Err(OrderPriceError::LimitNonPositive),
+            Some(p) => Ok(p),
+        },
     }
 }
 
@@ -139,5 +150,19 @@ mod tests {
             Some(dec!(4.5)),
         );
         assert_eq!(ok, Ok(dec!(4.5)));
+    }
+
+    #[test]
+    fn limit_non_positive_price_rejected() {
+        // Negative reaches the policy as Some(neg) (edges map only exact 0 -> None);
+        // a zero/negative limit price would mis-cross the CDA book.
+        for (side, bad) in [
+            (OrderSide::Buy, dec!(-5)),
+            (OrderSide::Sell, dec!(-0.01)),
+            (OrderSide::Buy, dec!(0)),
+        ] {
+            let p = resolve_order_price(OrderType::Limit, side, TimeInForce::Gtc, Some(bad));
+            assert_eq!(p, Err(OrderPriceError::LimitNonPositive));
+        }
     }
 }
