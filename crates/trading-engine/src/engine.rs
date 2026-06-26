@@ -139,7 +139,7 @@ impl MatchingEngine {
         dynamic_multiplier: FastPrice,
         now_ns: i64,
     ) -> (Vec<MatchResult>, CycleStats) {
-        let mut results = Vec::new();
+        let mut results: Vec<MatchResult> = Vec::new();
         let mut stats = CycleStats::default();
 
         // 0. Enforce CDA buy-side priority here, in the engine, so correctness does
@@ -171,17 +171,21 @@ impl MatchingEngine {
             }
         }
 
-        if zone_books.is_empty() {
-            return (results, stats);
-        }
+        // No early return on empty zone_books: the buy loop is a no-op without
+        // sells, but flow must still reach the IOC sweep below so an IOC order
+        // with no counterparty this cycle is reported for cancellation.
 
-        // 2. Iterate buys and match against reachable zone books
+        // 2. Iterate buys and match against reachable zone books.
+        // One scratch `candidates` buffer, reused across every buy (`clear()` keeps
+        // the allocation, `drain()` empties it on consume) — avoids a fresh Vec +
+        // grow per buy on the hot path.
+        let mut candidates: Vec<Candidate> = Vec::new();
         for buy in buy_orders.iter_mut() {
             if buy.remaining_amount() < MIN_TRADE_AMOUNT || buy.is_expired(now_ns) {
                 continue;
             }
 
-            let mut candidates = Vec::new();
+            candidates.clear();
 
             // Optimization: Only iterate through zones that can reach the buyer's zone
             for (&sell_zone_id, book) in &zone_books {
@@ -261,7 +265,10 @@ impl MatchingEngine {
                 }
             }
 
-            for c in candidates {
+            // drain(..) yields owned Candidates and leaves the buffer empty but
+            // allocated for the next buy. On an early `break`, drain's Drop still
+            // clears the remaining range — `clear()` next iteration is idempotent.
+            for c in candidates.drain(..) {
                 if buy.remaining_amount() < MIN_TRADE_AMOUNT {
                     break;
                 }
@@ -341,6 +348,20 @@ impl MatchingEngine {
                         book.remove(&(sell.price, sell.created_at_ns, sell.id));
                     }
                 }
+            }
+        }
+
+        // 3. IOC sweep. An Immediate-or-Cancel order fills only what crosses in
+        // THIS pass; its leftover must not rest in the book for a later cycle. Any
+        // IOC order (buy or sell) still holding >= MIN_TRADE_AMOUNT of unfilled
+        // energy is reported for cancellation. Expired orders are skipped — they
+        // are already handled by the expiry path and would be double-cancelled.
+        for o in buy_orders.iter().chain(sell_orders.iter()) {
+            if o.time_in_force == TimeInForce::Ioc
+                && !o.is_expired(now_ns)
+                && o.remaining_amount() >= MIN_TRADE_AMOUNT
+            {
+                stats.ioc_cancellations.push(o.id);
             }
         }
 
@@ -932,6 +953,128 @@ mod tests {
         assert_eq!(m2.len(), 1);
         assert_eq!(buys[0].filled_amount, dec!(100.0));
         assert!(buys[0].remaining_amount() < MIN_TRADE_AMOUNT);
+    }
+
+    // ── IOC (Immediate-or-Cancel) sweep ──────────────────────────────────────
+
+    /// IOC buy that only partially fills: the engine reports its id so the
+    /// orchestrator cancels the remainder instead of letting it rest in the book.
+    #[test]
+    fn ioc_partial_fill_remainder_is_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Ioc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1, "IOC fills what it can");
+        assert_eq!(buys[0].filled_amount, dec!(40.0));
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "60 kWh remainder must be reported for cancellation"
+        );
+    }
+
+    /// IOC order with no counterparty this cycle is reported in full — the
+    /// zone_books-empty path must still reach the sweep.
+    #[test]
+    fn ioc_with_no_liquidity_is_reported() {
+        let buyer = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Ioc, 0)];
+        let mut sells: Vec<FastOrder> = vec![];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(0),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty());
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "unfilled IOC with no sells must be cancelled, not rested"
+        );
+    }
+
+    /// A fully-filled IOC has no remainder, so it is NOT reported.
+    #[test]
+    fn ioc_fully_filled_is_not_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Ioc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert!(
+            stats.ioc_cancellations.is_empty(),
+            "fully-filled IOC has nothing to cancel"
+        );
+    }
+
+    /// A GTC order's unfilled remainder rests in the book — it must NOT be swept
+    /// as an IOC cancellation.
+    #[test]
+    fn gtc_remainder_is_not_swept() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (_m, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert!(
+            stats.ioc_cancellations.is_empty(),
+            "GTC remainder rests in the book, not cancelled"
+        );
+    }
+
+    /// The sweep is symmetric: an IOC SELL remainder is reported too, not just buys.
+    #[test]
+    fn ioc_sell_remainder_is_reported() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(100.0), 1, 100, TimeInForce::Ioc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![sells[0].id],
+            "IOC sell with 60 kWh left must be reported"
+        );
     }
 
     #[test]

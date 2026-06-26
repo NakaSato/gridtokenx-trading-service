@@ -44,7 +44,10 @@ impl MatcherService {
             .filter(|o| o.market_segment == trading_core::types::MarketSegment::Realtime)
             .collect();
 
-        if buy_orders.is_empty() || sell_orders.is_empty() {
+        // Run the engine whenever either side has orders — not just when both do.
+        // An IOC buy with no sells (or vice-versa) still has to be swept and
+        // cancelled, which only happens once the engine reports it.
+        if buy_orders.is_empty() && sell_orders.is_empty() {
             return Ok(0);
         }
 
@@ -67,29 +70,74 @@ impl MatcherService {
             now_ns,
         );
 
-        if matches.is_empty() {
-            return Ok(0);
+        // 4. Batch-persist fills + settlements (shared with the clearing engine).
+        if !matches.is_empty() {
+            info!(
+                "Matching cycle completed: {} matches, total volume: {}",
+                matches.len(),
+                stats.total_volume
+            );
+            let totals = crate::clearing_support::order_totals(&buy_orders, &sell_orders);
+            crate::clearing_support::persist_matches(
+                self.order_repo.as_ref(),
+                self.settlement_repo.as_ref(),
+                &matches,
+                &buy_metadata,
+                &sell_metadata,
+                &totals,
+            )
+            .await?;
         }
 
-        info!(
-            "Matching cycle completed: {} matches, total volume: {}",
-            matches.len(),
-            stats.total_volume
-        );
-
-        // 4. Batch-persist fills + settlements (shared with the clearing engine).
-        let totals = crate::clearing_support::order_totals(&buy_orders, &sell_orders);
-        crate::clearing_support::persist_matches(
-            self.order_repo.as_ref(),
-            self.settlement_repo.as_ref(),
-            &matches,
-            &buy_metadata,
-            &sell_metadata,
-            &totals,
-        )
-        .await?;
+        // 5. Cancel IOC remainders LAST, so Cancelled is the terminal status even
+        // for a partially-filled IOC (persist_matches above wrote PartiallyFilled
+        // for the part that crossed; this supersedes it). An IOC order fills only
+        // what crossed this cycle — its leftover never rests in the book. The
+        // filled amount is preserved (read from the engine-mutated FastOrder) and
+        // the OrderUpdate event is emitted atomically through the outbox.
+        self.cancel_ioc_remainders(&stats, &fast_buys, &fast_sells)
+            .await?;
 
         Ok(matches.len())
+    }
+
+    /// Mark every IOC order the engine flagged as `Cancelled`, preserving the
+    /// amount it filled this cycle. Each write goes through
+    /// `update_filled_amount_with_event` so the cancellation and its
+    /// `OrderUpdate` event land atomically (outbox). Filled amount and zone are
+    /// read from the engine-mutated `FastOrder`s, so a partially-filled IOC keeps
+    /// its fill and only the remainder is dropped.
+    async fn cancel_ioc_remainders(
+        &self,
+        stats: &trading_engine::types::CycleStats,
+        fast_buys: &[trading_engine::types::FastOrder],
+        fast_sells: &[trading_engine::types::FastOrder],
+    ) -> TraitResult<()> {
+        if stats.ioc_cancellations.is_empty() {
+            return Ok(());
+        }
+        let cancel: std::collections::HashSet<_> =
+            stats.ioc_cancellations.iter().copied().collect();
+        for fo in fast_buys.iter().chain(fast_sells.iter()) {
+            if !cancel.contains(&fo.id) {
+                continue;
+            }
+            let event = trading_core::events::Event::OrderUpdate {
+                id: fo.id,
+                filled_amount: fo.filled_amount,
+                status: trading_core::types::OrderStatus::Cancelled.to_string(),
+                zone_id: fo.zone_id,
+            };
+            self.order_repo
+                .update_filled_amount_with_event(
+                    fo.id,
+                    fo.filled_amount,
+                    trading_core::types::OrderStatus::Cancelled,
+                    &event,
+                )
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -264,6 +312,66 @@ mod tests {
         assert_eq!(matched, 0);
         assert!(settlements.settlements.lock().unwrap().is_empty());
         assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// An unfilled IOC order with no counterparty is cancelled, not left Active:
+    /// the engine reports it and the matcher writes a Cancelled status (filled 0).
+    /// Guards that the empty-sells path still runs the engine + sweep.
+    #[tokio::test]
+    async fn run_matching_cycle_cancels_unfilled_ioc() {
+        let mut buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10);
+        buy.time_in_force = TimeInForce::Ioc;
+        let buy_id = buy.id;
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![],
+            fills: Mutex::new(Vec::new()),
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        assert_eq!(matched, 0, "no liquidity → no match");
+        let fills = orders.fills.lock().unwrap();
+        assert_eq!(
+            *fills,
+            vec![(buy_id, dec!(0.0), OrderStatus::Cancelled)],
+            "unfilled IOC must be cancelled (filled 0), not rested"
+        );
+    }
+
+    /// A partially-filled IOC: it fills what crosses, then its remainder is
+    /// cancelled. The final write for the buy is Cancelled, preserving the 40 kWh
+    /// it actually filled.
+    #[tokio::test]
+    async fn run_matching_cycle_cancels_ioc_remainder_after_partial_fill() {
+        let mut buy = order(OrderSide::Buy, dec!(5.0), dec!(100.0), 10);
+        buy.time_in_force = TimeInForce::Ioc;
+        let buy_id = buy.id;
+        let sell = order(OrderSide::Sell, dec!(4.0), dec!(40.0), 20);
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        assert_eq!(matched, 1, "IOC fills the 40 that crossed");
+        let fills = orders.fills.lock().unwrap();
+        // Last write for the buy is the cancellation, keeping its 40 kWh fill.
+        assert_eq!(
+            *fills.last().unwrap(),
+            (buy_id, dec!(40.0), OrderStatus::Cancelled),
+            "IOC remainder cancelled, filled amount preserved"
+        );
     }
 
     /// Phase 1: the CDA matcher must ignore Interval-segment orders (they belong

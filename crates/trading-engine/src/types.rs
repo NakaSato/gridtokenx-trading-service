@@ -72,4 +72,9 @@ pub struct MatchResult {
 pub struct CycleStats {
     pub matches_created: usize,
     pub total_volume: Decimal,
+    /// Ids of Immediate-or-Cancel orders whose unfilled remainder must be
+    /// cancelled by the caller after this cycle. IOC fills whatever crosses in
+    /// the single matching pass; anything left over never rests in the book, so
+    /// the engine reports it here and the orchestrator marks it `Cancelled`.
+    pub ioc_cancellations: Vec<Uuid>,
 }
