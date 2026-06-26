@@ -290,33 +290,11 @@ impl MatchingEngine {
                 let buy_meta_idx = buy.metadata_index;
                 let sell_meta_idx = sell.metadata_index;
 
-                // Optimization: Match Consolidation
-                // If the last result was the same buyer/seller pair at the same price, merge them.
-                if let Some(last) = results.last_mut() {
-                    if last.buy_order_id == buy.id
-                        && last.sell_order_id == sell.id
-                        && last.match_price == landed_cost_fp.to_decimal()
-                    {
-                        last.match_amount += match_amount;
-                        last.total_energy_cost += match_amount * landed_cost_fp.to_decimal();
-                        last.wheeling_charge += match_amount * wheeling_fp.to_decimal();
-                        last.loss_cost += match_amount * loss_cost_fp.to_decimal();
-
-                        buy.filled_amount += match_amount;
-                        sell.filled_amount += match_amount;
-                        stats.total_volume += match_amount;
-
-                        if sell.remaining_amount() < MIN_TRADE_AMOUNT {
-                            // Invariant: `sell` was drawn from this zone's book, so the
-                            // entry exists. `if let` avoids a panic path for the lint.
-                            if let Some(book) = zone_books.get_mut(&sell.zone_id) {
-                                book.remove(&(sell.price, sell.created_at_ns, sell.id));
-                            }
-                        }
-                        continue;
-                    }
-                }
-
+                // No match-consolidation step: each sell lives in exactly one zone
+                // book and so appears at most once in `candidates`, and `buy` is
+                // fixed across this loop — so a given (buy, sell) pair can produce
+                // at most one result per cycle. There is never an adjacent same-pair
+                // result to merge into; emit each match directly.
                 let buy_meta = &buy_metadata[buy_meta_idx];
 
                 results.push(MatchResult {
