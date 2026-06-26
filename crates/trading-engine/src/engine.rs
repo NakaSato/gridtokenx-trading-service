@@ -81,7 +81,10 @@ impl MatchingEngine {
         let wheeling_fp = fees.wheeling;
         let loss_fp = fees.loss;
 
-        let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR);
+        // Line loss can only ADD cost: a loss factor below 1.0 would be a physical
+        // gain (impossible), so floor the excess at 0 rather than booking a negative
+        // loss_cost into the settlement ledger.
+        let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR).max(0);
         // i128 intermediate then clamp into i64 — never wraps on large prices.
         let loss_cost_extra_raw = i64::try_from(
             i128::from(sell.price.raw()) * i128::from(extra_loss_raw) / i128::from(FastPrice::FACTOR),
@@ -569,6 +572,46 @@ mod tests {
 
     fn unit() -> FastPrice {
         FastPrice::from(dec!(1.0))
+    }
+
+    /// Loss factor below 1.0 (physically a gain) — used to prove the engine floors
+    /// the loss component at 0 instead of crediting a negative cost.
+    struct SubUnitLossTopology;
+    impl TopologySnapshot for SubUnitLossTopology {
+        fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+            true
+        }
+        fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(0))
+        }
+        fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(0.9))
+        }
+    }
+
+    #[test]
+    fn sub_unit_loss_factor_does_not_credit_negative_cost() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // Cross-zone (no intra discount) isolates the loss term. sell=1.0, bid=1.5.
+        let mut buys = vec![order(buyer, dec!(1.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &SubUnitLossTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].loss_cost, dec!(0), "loss floored at 0, not negative");
+        assert_eq!(
+            matches[0].match_price,
+            dec!(1.0),
+            "no phantom discount from sub-unit loss"
+        );
     }
 
     #[test]
