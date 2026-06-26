@@ -7,7 +7,8 @@
 //! this routine instead of inventing nil/hardcoded epoch UUIDs.
 
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use trading_core::models::MarketEpoch;
 use trading_core::traits::TraitResult;
 use uuid::Uuid;
 
@@ -91,4 +92,36 @@ pub async fn mark_epoch_cleared(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Most-recently-cleared (or settled) epochs, newest first, capped at `limit` —
+/// the clearing-results read endpoint. `settled` is included because a settled
+/// epoch still carries the clearing summary.
+pub async fn list_recent_cleared_epochs(pool: &PgPool, limit: i64) -> TraitResult<Vec<MarketEpoch>> {
+    let rows = sqlx::query(
+        "SELECT id, epoch_number, start_time, end_time, status, clearing_price, \
+                total_volume, total_orders, matched_orders \
+         FROM market_epochs \
+         WHERE status IN ('cleared', 'settled') \
+         ORDER BY end_time DESC LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut epochs = Vec::with_capacity(rows.len());
+    for r in &rows {
+        epochs.push(MarketEpoch {
+            id: r.try_get("id")?,
+            epoch_number: r.try_get("epoch_number")?,
+            start_time: r.try_get("start_time")?,
+            end_time: r.try_get("end_time")?,
+            status: r.try_get("status")?,
+            clearing_price: r.try_get("clearing_price")?,
+            total_volume: r.try_get("total_volume")?,
+            total_orders: r.try_get("total_orders")?,
+            matched_orders: r.try_get("matched_orders")?,
+        });
+    }
+    Ok(epochs)
 }

@@ -49,6 +49,15 @@ pub fn record_order_match(order_type: &str, quantity: f64, price: f64, zone_id: 
     histogram!("trading_order_match_price").record(price);
 }
 
+/// Records one uniform-price epoch-clearing cycle (Interval segment): how many
+/// zones cleared, how many matches were produced, and the cleared volume.
+pub fn record_clearing_cycle(zones_cleared: u64, matches: u64, volume: f64) {
+    counter!("trading_clearing_cycles_total").increment(1);
+    counter!("trading_clearing_zones_total").increment(zones_cleared);
+    counter!("trading_clearing_matches_total").increment(matches);
+    histogram!("trading_clearing_volume").record(volume);
+}
+
 /// Records settlement operation metrics
 pub fn record_settlement(operation: &str, success: bool, duration_ms: f64) {
     counter!("trading_settlements_total",

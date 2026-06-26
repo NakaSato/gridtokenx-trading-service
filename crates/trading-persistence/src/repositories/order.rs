@@ -416,4 +416,11 @@ impl OrderRepository for PostgresOrderRepository {
         )
         .await
     }
+
+    async fn list_recent_cleared_epochs(
+        &self,
+        limit: i64,
+    ) -> TraitResult<Vec<trading_core::models::MarketEpoch>> {
+        crate::repositories::epoch::list_recent_cleared_epochs(&self.pool, limit).await
+    }
 }

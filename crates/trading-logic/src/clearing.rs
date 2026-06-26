@@ -171,6 +171,12 @@ impl ClearingService {
                     i64::try_from(summary.matches).unwrap_or(i64::MAX),
                 )
                 .await?;
+
+            trading_infra::metrics::record_clearing_cycle(
+                u64::try_from(summary.zones_cleared).unwrap_or(0),
+                u64::try_from(summary.matches).unwrap_or(0),
+                summary.total_volume.to_string().parse::<f64>().unwrap_or(0.0),
+            );
             summaries.push(summary);
         }
         Ok(summaries)

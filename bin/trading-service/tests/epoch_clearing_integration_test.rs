@@ -119,3 +119,59 @@ async fn test_epoch_clearing_lifecycle_e2e() {
             .ok();
     }
 }
+
+#[tokio::test]
+async fn test_list_recent_cleared_epochs_e2e() {
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| {
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+        });
+    let pool = PgPool::connect(&db_url).await.expect("connect");
+
+    let now = Utc::now();
+    let base = now.timestamp_nanos_opt().unwrap_or(0);
+
+    let insert = |id: Uuid, off: i64, end: chrono::DateTime<Utc>| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) \
+                 VALUES ($1, $2, $3, $4, 'active'::epoch_status)",
+            )
+            .bind(id)
+            .bind(base + off)
+            .bind(end - Duration::minutes(15))
+            .bind(end)
+            .execute(&pool)
+            .await
+            .expect("insert epoch");
+        }
+    };
+
+    // c1: elapsed, then closed with a summary → must be listed. a1: still active
+    // (future) → must NOT be listed.
+    let (c1, a1) = (Uuid::new_v4(), Uuid::new_v4());
+    insert(c1, 0, now - Duration::minutes(20)).await;
+    insert(a1, 1, now + Duration::minutes(20)).await;
+
+    let repo = PostgresOrderRepository::new(pool.clone());
+    repo.mark_epoch_cleared(c1, Some(dec!(1.25)), dec!(42.0), 3)
+        .await
+        .expect("close c1");
+
+    let listed = repo.list_recent_cleared_epochs(100).await.expect("list");
+    let found = listed.iter().find(|e| e.id == c1).expect("cleared epoch listed");
+    assert_eq!(found.clearing_price, Some(dec!(1.25)));
+    assert_eq!(found.total_volume, Some(dec!(42.0)));
+    assert_eq!(found.matched_orders, Some(3));
+    assert!(!listed.iter().any(|e| e.id == a1), "active epoch is not a clearing result");
+
+    for id in [c1, a1] {
+        sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+}

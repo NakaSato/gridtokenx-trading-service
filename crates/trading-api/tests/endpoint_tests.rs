@@ -1639,6 +1639,28 @@ async fn test_submit_order_parses_tif_and_segment() {
         assert_eq!(o.market_segment, trading_core::types::MarketSegment::Realtime);
     }
 
+    // A market order with no explicit TIF auto-maps to IOC (not GTC).
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "buy", "order_type": "market",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let o = orders.last().unwrap();
+        assert_eq!(o.time_in_force, TimeInForce::Ioc, "market defaults to IOC");
+    }
+
     // Unknown value → 400, not a silent default.
     let res = request(
         app,
@@ -1656,4 +1678,15 @@ async fn test_submit_order_parses_tif_and_segment() {
     )
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Phase 5: the clearing-results endpoint is wired and returns a JSON array
+/// (empty here — the mock has no cleared epochs). Guards routing, auth, and the
+/// response shape.
+#[tokio::test]
+async fn test_clearing_epochs_endpoint() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, body) = get_json(app, "/api/v1/markets/clearing-epochs?limit=5").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_array(), "clearing-epochs returns a JSON array");
 }

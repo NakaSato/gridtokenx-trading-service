@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::events::Event;
 use crate::models::{
-    ConditionalOrder, OrderBookEntry, OrderMatch, RecurringOrder, Settlement, SettlementStats,
-    TradingOrder,
+    ConditionalOrder, MarketEpoch, OrderBookEntry, OrderMatch, RecurringOrder, Settlement,
+    SettlementStats, TradingOrder,
 };
 use crate::types::OrderStatus;
 
@@ -121,6 +121,12 @@ pub trait OrderRepository: Send + Sync {
         _matched_orders: i64,
     ) -> TraitResult<()> {
         Ok(())
+    }
+
+    /// Most-recently-cleared epochs (newest first), capped at `limit` — backs the
+    /// clearing-results read endpoint. Default empty; Postgres repo overrides.
+    async fn list_recent_cleared_epochs(&self, _limit: i64) -> TraitResult<Vec<MarketEpoch>> {
+        Ok(Vec::new())
     }
 
     /// Cancel an order.

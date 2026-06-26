@@ -56,7 +56,12 @@ impl TradingService for TradingGrpcService {
         };
 
         let time_in_force = match request.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
-            None | Some("gtc") => TimeInForce::Gtc,
+            // Market orders default to IOC (fill now, never rest); limit → GTC.
+            None => match order_type {
+                OrderType::Market => TimeInForce::Ioc,
+                _ => TimeInForce::Gtc,
+            },
+            Some("gtc") => TimeInForce::Gtc,
             Some("ioc") => TimeInForce::Ioc,
             Some("fok") => TimeInForce::Fok,
             Some(_) => {

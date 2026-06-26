@@ -162,7 +162,14 @@ pub async fn submit_order(
     };
 
     let time_in_force = match req.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
-        None | Some("gtc") => TimeInForce::Gtc,
+        // A market order with no explicit TIF defaults to IOC — it should fill at
+        // whatever's resting and never sit in the book as a price-less GTC order.
+        // A limit order defaults to GTC.
+        None => match order_type {
+            OrderType::Market => TimeInForce::Ioc,
+            _ => TimeInForce::Gtc,
+        },
+        Some("gtc") => TimeInForce::Gtc,
         Some("ioc") => TimeInForce::Ioc,
         Some("fok") => TimeInForce::Fok,
         Some(other) => {
@@ -1058,6 +1065,66 @@ pub async fn get_settlement_stats(
         )
     })?;
     Ok(Json(build_settlement_stats_response(&stats)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClearingEpochsQuery {
+    /// Max rows (default 20, clamped to 1..=100).
+    pub limit: Option<i64>,
+}
+
+/// One uniform-price clearing result. Decimal fields are stringified to avoid
+/// float drift, matching the trade/stats responses.
+#[derive(Debug, Serialize)]
+pub struct ClearingEpochResponse {
+    pub epoch_id: Uuid,
+    pub epoch_number: i64,
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    pub end_time: chrono::DateTime<chrono::Utc>,
+    pub status: String,
+    pub clearing_price: Option<String>,
+    pub total_volume: Option<String>,
+    pub total_orders: Option<i64>,
+    pub matched_orders: Option<i64>,
+}
+
+/// GET /api/v1/markets/clearing-epochs — recent uniform-price (Interval) clearing
+/// results, newest first.
+pub async fn get_clearing_epochs(
+    role: ServiceRole,
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ClearingEpochsQuery>,
+) -> Result<Json<Vec<ClearingEpochResponse>>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let epochs = state
+        .order_repo
+        .list_recent_cleared_epochs(limit)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    let out = epochs
+        .into_iter()
+        .map(|e| ClearingEpochResponse {
+            epoch_id: e.id,
+            epoch_number: e.epoch_number,
+            start_time: e.start_time,
+            end_time: e.end_time,
+            status: e.status.to_string(),
+            clearing_price: e.clearing_price.map(|p| p.to_string()),
+            total_volume: e.total_volume.map(|v| v.to_string()),
+            total_orders: e.total_orders,
+            matched_orders: e.matched_orders,
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 /// GET /api/v1/markets/orderbook — cross-zone P2P aggregate order book.
