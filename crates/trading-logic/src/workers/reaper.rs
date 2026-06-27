@@ -39,11 +39,27 @@ impl ReaperWorker {
         loop {
             ticker.tick().await;
 
-            match self
-                .order_repo
-                .expire_stale_orders(gridtokenx_telemetry::time::now())
-                .await
-            {
+            // Bound the DB call: a hung-but-not-erroring connection would otherwise
+            // block this loop forever and silently stop all expiry (the supervisor
+            // can't see a stuck-alive task). On timeout we treat it as a failure and
+            // tick again rather than wait indefinitely. Cap at 2x the interval so a
+            // merely-slow tick isn't killed.
+            let deadline = self.interval.saturating_mul(2);
+            let outcome = tokio::time::timeout(
+                deadline,
+                self.order_repo
+                    .expire_stale_orders(gridtokenx_telemetry::time::now()),
+            )
+            .await;
+
+            // Collapse (timeout, db-error, ok) into a single Result for one
+            // success/failure handling path.
+            let result = match outcome {
+                Ok(inner) => inner.map_err(|e| e.to_string()),
+                Err(_elapsed) => Err(format!("expire_stale_orders timed out after {deadline:?}")),
+            };
+
+            match result {
                 Ok(reaped) => {
                     consecutive_failures = 0;
                     gauge!("trading_reaper_consecutive_failures").set(0.0);

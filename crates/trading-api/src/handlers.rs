@@ -103,9 +103,12 @@ impl TradingService for TradingGrpcService {
         // Parse the optional price input (limit price OR market-buy slippage cap),
         // then apply the shared admission policy. The proto price_per_kwh is a
         // non-optional f64, so exactly 0.0 means "absent" (a market buy falls back
-        // to the ceiling; a limit order is then rejected as missing); a negative
-        // value stays present and is rejected by the policy — matching REST. See
-        // `trading_core::order_policy::resolve_order_price`.
+        // to the ceiling; a limit order is then rejected as missing). A negative
+        // value stays present and is rejected by the policy. NOTE: REST can tell
+        // "0" from an omitted field and so rejects an explicit 0 cap; gRPC cannot
+        // (0.0 == unset here), so a literal 0.0 is treated as "no cap". This
+        // divergence is inherent to the proto and only affects the exact-zero case.
+        // See `trading_core::order_policy::resolve_order_price`.
         let price_input = if request.price_per_kwh == 0.0 {
             None
         } else {

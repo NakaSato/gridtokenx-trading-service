@@ -206,23 +206,19 @@ pub async fn submit_order(
     // Parse the optional price input (limit price OR market-buy slippage cap),
     // then apply the shared admission policy. See
     // `trading_core::order_policy::resolve_order_price` for the rules.
-    // Map an explicit zero to "absent" so REST and gRPC agree (the proto's
-    // non-optional f64 can't distinguish 0.0 from unset); a negative value stays
-    // present and is rejected by the policy.
+    // A present-but-non-positive value (e.g. "0") is kept present so the policy
+    // REJECTS it — REST can distinguish "0" from an omitted field. (The gRPC edge
+    // can't: its proto f64 default 0.0 is indistinguishable from unset, so there
+    // a market buy's 0.0 is treated as "no cap". That literal-zero divergence is
+    // inherent to the proto and is the safe direction — REST never silently drops
+    // slippage protection.)
     let price_input = match req.price_per_kwh.as_deref() {
-        Some(raw) => {
-            let d = Decimal::from_str(raw).map_err(|e| {
-                (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    format!("Invalid price_per_kwh: {}", e),
-                )
-            })?;
-            if d.is_zero() {
-                None
-            } else {
-                Some(d)
-            }
-        }
+        Some(raw) => Some(Decimal::from_str(raw).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid price_per_kwh: {}", e),
+            )
+        })?),
         None => None,
     };
     let price = trading_core::order_policy::resolve_order_price(

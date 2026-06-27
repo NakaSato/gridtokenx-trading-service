@@ -74,19 +74,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // backoff) instead of silently stopping all expiry.
     let reaper_repo = infra.order_repo.clone();
     tokio::spawn(async move {
+        // Exponential backoff capped at 30s so a deterministic panic-on-spawn
+        // degrades to one respawn per 30s instead of a 1Hz crash-loop that floods
+        // logs; reset to the base delay after a run that stayed up past it.
+        const BASE_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(1);
+        const MAX_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+        let mut backoff = BASE_BACKOFF;
         loop {
             let repo = reaper_repo.clone();
+            let started = tokio::time::Instant::now();
             let handle = tokio::spawn(async move {
                 trading_logic::ReaperWorker::new(repo, tokio::time::Duration::from_secs(10))
                     .run()
                     .await;
             });
             match handle.await {
-                // run() loops forever; a clean return is unexpected but harmless.
-                Ok(()) => break,
+                // run() is an infinite loop, so a clean return only happens if it
+                // is ever given a graceful-shutdown path. Treat that as intended
+                // shutdown and stop supervising — but log it so it is never silent.
+                Ok(()) => {
+                    info!("ReaperWorker run() returned; supervisor exiting (expiry stopped)");
+                    break;
+                }
                 Err(e) => {
-                    error!("ReaperWorker task terminated unexpectedly ({e}); respawning");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    // Reset backoff if the task ran healthily for a while before dying.
+                    if started.elapsed() >= MAX_BACKOFF {
+                        backoff = BASE_BACKOFF;
+                    }
+                    error!(
+                        "ReaperWorker task terminated unexpectedly ({e}); respawning in {:?}",
+                        backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
         }
