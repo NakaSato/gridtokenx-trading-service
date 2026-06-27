@@ -103,8 +103,7 @@ impl SettlementService {
         claimed: Vec<Settlement>,
     ) -> TraitResult<Vec<trading_core::models::SettlementTransaction>> {
         use std::collections::{HashMap, HashSet};
-        let by_id: HashMap<Uuid, Settlement> =
-            claimed.iter().cloned().map(|s| (s.id, s)).collect();
+        let by_id: HashMap<Uuid, Settlement> = claimed.iter().cloned().map(|s| (s.id, s)).collect();
 
         let tx_results = match self
             .blockchain
@@ -250,8 +249,8 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use rust_decimal::Decimal;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use trading_core::error::ApiError;
     use trading_core::events::Event;
     use trading_core::models::{
@@ -588,10 +587,7 @@ mod tests {
         let svc = service(repo.clone(), chain, audit);
 
         let out = svc
-            .execute_batched_settlements(vec![
-                make_settlement(minted),
-                make_settlement(unminted),
-            ])
+            .execute_batched_settlements(vec![make_settlement(minted), make_settlement(unminted)])
             .await
             .expect("settle should succeed (partial mint)");
 
@@ -669,7 +665,11 @@ mod tests {
             .expect("empty claim is Ok");
 
         assert!(out.is_empty());
-        assert_eq!(repo.claim_calls.load(Ordering::SeqCst), 1, "claim attempted");
+        assert_eq!(
+            repo.claim_calls.load(Ordering::SeqCst),
+            1,
+            "claim attempted"
+        );
         assert_eq!(
             chain.batch_calls.load(Ordering::SeqCst),
             0,
