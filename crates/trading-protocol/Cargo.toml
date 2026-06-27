@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 description = "Protobuf / ConnectRPC wire types for GridTokenX trading service"
 
+[lib]
+# The lib is generated ConnectRPC/buffa code; its doc-comment examples are
+# codegen boilerplate that does not compile as standalone doctests. Skip them so
+# `cargo test --workspace` isn't redded by non-tests.
+doctest = false
+
 [dependencies]
 trading-core.workspace = true
 
