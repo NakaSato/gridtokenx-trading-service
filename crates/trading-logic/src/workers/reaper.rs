@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use metrics::{counter, gauge};
+use tokio::time::interval;
 use tracing::{error, info};
 use trading_core::traits::OrderRepository;
 
@@ -28,24 +29,16 @@ impl ReaperWorker {
     }
 
     pub async fn run(self) {
-        // Adaptive cadence: `self.interval` is the ACTIVE (min) period used while
-        // orders are actually expiring; when ticks come up empty the delay backs
-        // off geometrically toward `max_delay` so an idle node (e.g. api-only,
-        // never matches) doesn't pay the full-scan UPDATE every `interval`. A
-        // non-empty reap or a failure snaps back to the active cadence.
-        let min_delay = self.interval;
-        let max_delay = self.interval.saturating_mul(6);
-        info!(
-            "🚀 Starting ReaperWorker loop (adaptive cadence {:?}..{:?})",
-            min_delay, max_delay
-        );
+        info!("🚀 Starting ReaperWorker loop (interval: {:?})", self.interval);
+        let mut ticker = interval(self.interval);
         // Tracks consecutive failures so a persistent DB fault — which silently
         // stops all expiry, since the get_active queries no longer filter
         // expired rows — surfaces as both an escalating log and a gauge.
         let mut consecutive_failures: u32 = 0;
-        let mut delay = min_delay;
 
         loop {
+            ticker.tick().await;
+
             // Bound the DB call: a hung-but-not-erroring connection would otherwise
             // block this loop forever and silently stop all expiry (the supervisor
             // can't see a stuck-alive task). On timeout we treat it as a failure and
@@ -70,15 +63,10 @@ impl ReaperWorker {
                 Ok(reaped) => {
                     consecutive_failures = 0;
                     gauge!("trading_reaper_consecutive_failures").set(0.0);
-                    if reaped.is_empty() {
-                        // Nothing to do — back off toward the idle cadence.
-                        delay = delay.saturating_mul(2).min(max_delay);
-                    } else {
+                    if !reaped.is_empty() {
                         counter!("trading_reaper_orders_expired_total")
                             .increment(reaped.len() as u64);
                         info!("Reaped {} expired order(s)", reaped.len());
-                        // Orders are actively expiring — stay at the tight cadence.
-                        delay = min_delay;
                     }
                 }
                 Err(e) => {
@@ -86,9 +74,6 @@ impl ReaperWorker {
                     counter!("trading_reaper_failures_total").increment(1);
                     gauge!("trading_reaper_consecutive_failures")
                         .set(f64::from(consecutive_failures));
-                    // Retry promptly at the active cadence — a failing reaper must
-                    // not also slow down.
-                    delay = min_delay;
                     // Expiry is now the ONLY mechanism that drops expired orders
                     // from the active set, so a sustained failure means expired
                     // orders keep matching. Escalate once it's clearly stuck.
@@ -102,8 +87,6 @@ impl ReaperWorker {
                     }
                 }
             }
-
-            tokio::time::sleep(delay).await;
         }
     }
 }

@@ -296,7 +296,11 @@ impl MatchingEngine {
             // allocated for the next buy. On an early `break`, drain's Drop still
             // clears the remaining range — `clear()` next iteration is idempotent.
             for c in candidates.drain(..) {
-                if buy.remaining_amount() < MIN_TRADE_AMOUNT {
+                // Stable within this iteration: `buy.filled_amount` is only bumped
+                // at the end, so compute the remaining need once and reuse it for
+                // both the MIN break guard and the fill amount.
+                let need = buy.remaining_amount();
+                if need < MIN_TRADE_AMOUNT {
                     break;
                 }
                 let Candidate {
@@ -309,9 +313,7 @@ impl MatchingEngine {
                 } = c;
 
                 let sell = &mut sell_orders[sell_idx];
-                let Some(match_amount) =
-                    fill_take(buy.remaining_amount(), sell.remaining_amount())
-                else {
+                let Some(match_amount) = fill_take(need, sell.remaining_amount()) else {
                     continue;
                 };
                 let buy_meta_idx = buy.metadata_index;

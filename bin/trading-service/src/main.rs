@@ -69,9 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // worker (not the matcher) so it runs in every role. Since the active-order
     // queries no longer filter expired rows at the DB level, this is the ONLY
     // mechanism that drops expired orders from the active set, so: (1) a tight 10s
-    // ACTIVE cadence (the worker backs off to ~60s only while ticks come up empty)
-    // keeps the expired backlog the matcher re-fetches small, and (2) it is
-    // supervised — if the loop ever panics it is respawned (with a capped
+    // cadence keeps the expired backlog the matcher re-fetches small, and (2) it
+    // is supervised — if the loop ever panics it is respawned (with a capped
     // exponential backoff) instead of silently stopping all expiry.
     let reaper_repo = infra.order_repo.clone();
     tokio::spawn(async move {

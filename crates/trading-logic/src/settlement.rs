@@ -243,3 +243,437 @@ const MAX_SETTLEMENT_RETRIES: i32 = 5;
 /// A settlement sitting in `processing` longer than this was orphaned by a
 /// crash/partial failure between claim and finalize; the worker reclaims it.
 const STALE_PROCESSING_SECS: i64 = 300;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use rust_decimal::Decimal;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use trading_core::error::ApiError;
+    use trading_core::events::Event;
+    use trading_core::models::{
+        OrderMatch, Settlement, SettlementStats, SettlementStatus, SettlementTransaction,
+    };
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+
+    /// Minimal, valid `Settlement` (it does not derive Default — fill all fields).
+    fn make_settlement(id: Uuid) -> Settlement {
+        Settlement {
+            id,
+            trade_id: Some(Uuid::new_v4()),
+            epoch_id: Uuid::new_v4(),
+            buyer_id: Uuid::new_v4(),
+            seller_id: Uuid::new_v4(),
+            buy_order_id: Uuid::new_v4(),
+            sell_order_id: Uuid::new_v4(),
+            energy_amount: Decimal::new(100, 0),
+            price: Decimal::new(5, 0),
+            total_amount: Decimal::new(500, 0),
+            fee_amount: Decimal::ZERO,
+            net_amount: Decimal::new(500, 0),
+            status: SettlementStatus::Processing,
+            blockchain_tx: None,
+            created_at: Utc::now(),
+            confirmed_at: None,
+            wheeling_charge: None,
+            loss_factor: None,
+            loss_cost: None,
+            effective_energy: None,
+            buyer_zone_id: None,
+            seller_zone_id: None,
+            buyer_session_token: None,
+            seller_session_token: None,
+            erc_certificate_id: None,
+            erc_transfer_tx: None,
+            retry_count: 0,
+            error_message: None,
+        }
+    }
+
+    fn tx_for(id: Uuid, sig: &str) -> SettlementTransaction {
+        SettlementTransaction {
+            settlement_id: id,
+            signature: sig.to_string(),
+            slot: 1,
+            confirmation_status: "confirmed".to_string(),
+        }
+    }
+
+    // ── Fake SettlementRepository ────────────────────────────────────────────
+
+    /// Records which settlement ids were claimed / completed / reset.
+    #[derive(Default)]
+    struct FakeRepo {
+        /// What `claim_settlements_for_processing` should hand back.
+        claim_returns: Mutex<Vec<Settlement>>,
+        /// (id, status, tx_hash) for every `update_settlement_status_with_event`.
+        completed_with_event: Mutex<Vec<(Uuid, String, Option<String>)>>,
+        /// (id, status, tx_hash) for every plain `update_settlement_status`.
+        completed_plain: Mutex<Vec<(Uuid, String, Option<String>)>>,
+        /// ids passed to `reset_settlements_for_retry` (flattened across calls).
+        reset_ids: Mutex<Vec<Uuid>>,
+        claim_calls: AtomicUsize,
+    }
+
+    impl FakeRepo {
+        fn with_claim(returns: Vec<Settlement>) -> Self {
+            Self {
+                claim_returns: Mutex::new(returns),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SettlementRepository for FakeRepo {
+        async fn claim_settlements_for_processing(
+            &self,
+            _ids: &[Uuid],
+        ) -> TraitResult<Vec<Settlement>> {
+            self.claim_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.claim_returns.lock().unwrap().clone())
+        }
+
+        async fn update_settlement_status_with_event(
+            &self,
+            id: Uuid,
+            status: &str,
+            tx_hash: Option<&str>,
+            _error: Option<&str>,
+            _event: &Event,
+        ) -> TraitResult<()> {
+            self.completed_with_event.lock().unwrap().push((
+                id,
+                status.to_string(),
+                tx_hash.map(str::to_string),
+            ));
+            Ok(())
+        }
+
+        async fn update_settlement_status(
+            &self,
+            id: Uuid,
+            status: &str,
+            tx_hash: Option<&str>,
+            _error: Option<&str>,
+        ) -> TraitResult<()> {
+            self.completed_plain.lock().unwrap().push((
+                id,
+                status.to_string(),
+                tx_hash.map(str::to_string),
+            ));
+            Ok(())
+        }
+
+        async fn reset_settlements_for_retry(
+            &self,
+            ids: &[Uuid],
+            _max_retries: i32,
+            _error: Option<&str>,
+        ) -> TraitResult<u64> {
+            self.reset_ids.lock().unwrap().extend_from_slice(ids);
+            Ok(0)
+        }
+
+        // ── irrelevant to settle_claimed ──
+        async fn insert_settlement(&self, _settlement: &Settlement) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn insert_settlement_with_event(
+            &self,
+            _settlement: &Settlement,
+            _event: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+            unimplemented!()
+        }
+        async fn insert_match(
+            &self,
+            _m: &OrderMatch,
+            _settlement_id: Option<Uuid>,
+            _zone_id: Option<i32>,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn insert_match_with_event(
+            &self,
+            _m: &OrderMatch,
+            _settlement_id: Option<Uuid>,
+            _zone_id: Option<i32>,
+            _event: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_settlement(&self, _id: Uuid) -> TraitResult<Option<Settlement>> {
+            unimplemented!()
+        }
+        async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> {
+            unimplemented!()
+        }
+        async fn reclaim_stale_processing(
+            &self,
+            _stale_after_secs: i64,
+            _max_retries: i32,
+        ) -> TraitResult<u64> {
+            unimplemented!()
+        }
+        async fn list_settlements_for_user(
+            &self,
+            _user_id: Uuid,
+            _limit: i64,
+            _offset: i64,
+        ) -> TraitResult<(Vec<Settlement>, i64)> {
+            unimplemented!()
+        }
+        async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> {
+            unimplemented!()
+        }
+    }
+
+    // ── Fake BlockchainGateway ───────────────────────────────────────────────
+
+    enum BatchResult {
+        Ok(Vec<SettlementTransaction>),
+        Err(String),
+    }
+
+    struct FakeChain {
+        batch: Mutex<Option<BatchResult>>,
+        batch_calls: AtomicUsize,
+    }
+
+    impl FakeChain {
+        fn ok(results: Vec<SettlementTransaction>) -> Self {
+            Self {
+                batch: Mutex::new(Some(BatchResult::Ok(results))),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            Self {
+                batch: Mutex::new(Some(BatchResult::Err(msg.to_string()))),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlockchainGateway for FakeChain {
+        async fn execute_batched_settlements(
+            &self,
+            _settlements: Vec<Settlement>,
+        ) -> TraitResult<Vec<SettlementTransaction>> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            match self.batch.lock().unwrap().take() {
+                Some(BatchResult::Ok(r)) => Ok(r),
+                Some(BatchResult::Err(m)) => Err(ApiError::Blockchain(m)),
+                None => Ok(Vec::new()),
+            }
+        }
+
+        // ── irrelevant ──
+        async fn is_user_registered(&self, _user_id: Uuid) -> TraitResult<bool> {
+            unimplemented!()
+        }
+        async fn get_user_wallet(&self, _user_id: Uuid) -> TraitResult<Option<String>> {
+            unimplemented!()
+        }
+        async fn get_token_balance(&self, _wallet_address: &str) -> TraitResult<u64> {
+            unimplemented!()
+        }
+        async fn get_zone_config(
+            &self,
+            _zone_id: i32,
+        ) -> TraitResult<trading_core::models::ZoneConfig> {
+            unimplemented!()
+        }
+        async fn issue_erc(
+            &self,
+            _user_id: Uuid,
+            _meter_id: &str,
+            _energy_amount: Decimal,
+        ) -> TraitResult<String> {
+            unimplemented!()
+        }
+        async fn sync_total_supply(&self) -> TraitResult<String> {
+            unimplemented!()
+        }
+        async fn execute_create_order(
+            &self,
+            _user_id: Uuid,
+            _market_pubkey: &str,
+            _amount: u64,
+            _price: u64,
+            _order_side: &str,
+            _erc_id: Option<&str>,
+            _zone_id: u32,
+        ) -> TraitResult<(String, String, u64)> {
+            unimplemented!()
+        }
+    }
+
+    // ── Fake AuditLog ────────────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct FakeAudit {
+        actions: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl AuditLog for FakeAudit {
+        async fn log_action(
+            &self,
+            _user_id: Uuid,
+            action: &str,
+            _details: &str,
+        ) -> TraitResult<()> {
+            self.actions.lock().unwrap().push(action.to_string());
+            Ok(())
+        }
+    }
+
+    fn service(
+        repo: Arc<FakeRepo>,
+        chain: Arc<FakeChain>,
+        audit: Arc<FakeAudit>,
+    ) -> SettlementService {
+        SettlementService::new(repo, chain, audit, Uuid::nil())
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────────────
+
+    /// 1. Minted settlement → marked Completed (with event) carrying the signature.
+    #[tokio::test]
+    async fn minted_settlement_marked_completed_with_signature() {
+        let id = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim(vec![make_settlement(id)]));
+        let chain = Arc::new(FakeChain::ok(vec![tx_for(id, "SIG_OK")]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain, audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(id)])
+            .await
+            .expect("settle should succeed");
+
+        assert_eq!(out.len(), 1);
+        let completed = repo.completed_with_event.lock().unwrap();
+        assert_eq!(completed.len(), 1, "exactly one completion write");
+        assert_eq!(completed[0].0, id);
+        assert_eq!(completed[0].1, SettlementStatus::Completed.to_string());
+        assert_eq!(completed[0].2.as_deref(), Some("SIG_OK"));
+        // A minted settlement is never reset for retry.
+        assert!(repo.reset_ids.lock().unwrap().is_empty());
+    }
+
+    /// 2. A claimed settlement absent from the chain's tx_results is released for
+    ///    retry — never completed, never stranded in processing.
+    #[tokio::test]
+    async fn unminted_claimed_settlement_released_for_retry() {
+        let minted = Uuid::new_v4();
+        let unminted = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim(vec![
+            make_settlement(minted),
+            make_settlement(unminted),
+        ]));
+        // Chain mints only `minted`.
+        let chain = Arc::new(FakeChain::ok(vec![tx_for(minted, "SIG_M")]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain, audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![
+                make_settlement(minted),
+                make_settlement(unminted),
+            ])
+            .await
+            .expect("settle should succeed (partial mint)");
+
+        assert_eq!(out.len(), 1);
+        // Only the minted one is completed.
+        let completed = repo.completed_with_event.lock().unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].0, minted);
+        // The unminted one (and only it) is reset for retry.
+        let reset = repo.reset_ids.lock().unwrap();
+        assert_eq!(*reset, vec![unminted]);
+    }
+
+    /// 3. Blockchain error → whole claimed batch reset, settle returns Err, nothing
+    ///    marked completed.
+    #[tokio::test]
+    async fn blockchain_error_resets_batch_and_returns_err() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim(vec![
+            make_settlement(a),
+            make_settlement(b),
+        ]));
+        let chain = Arc::new(FakeChain::err("rpc down"));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain, audit);
+
+        let err = svc
+            .execute_batched_settlements(vec![make_settlement(a), make_settlement(b)])
+            .await
+            .expect_err("blockchain failure must propagate");
+        assert!(matches!(err, ApiError::Blockchain(_)));
+
+        // Nothing completed.
+        assert!(repo.completed_with_event.lock().unwrap().is_empty());
+        assert!(repo.completed_plain.lock().unwrap().is_empty());
+        // Whole claimed batch reset.
+        let mut reset = repo.reset_ids.lock().unwrap().clone();
+        reset.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(reset, expected);
+    }
+
+    /// 4. Empty input → Ok(empty), no claim attempted.
+    #[tokio::test]
+    async fn empty_input_returns_empty_without_claiming() {
+        let repo = Arc::new(FakeRepo::with_claim(vec![]));
+        let chain = Arc::new(FakeChain::ok(vec![]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![])
+            .await
+            .expect("empty input is Ok");
+
+        assert!(out.is_empty());
+        assert_eq!(repo.claim_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(chain.batch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// 5. Claim returns empty → Ok(empty), no blockchain call.
+    #[tokio::test]
+    async fn empty_claim_returns_empty_without_blockchain_call() {
+        // Non-empty input so the claim path runs, but claim hands back nothing.
+        let repo = Arc::new(FakeRepo::with_claim(vec![]));
+        let chain = Arc::new(FakeChain::ok(vec![]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(Uuid::new_v4())])
+            .await
+            .expect("empty claim is Ok");
+
+        assert!(out.is_empty());
+        assert_eq!(repo.claim_calls.load(Ordering::SeqCst), 1, "claim attempted");
+        assert_eq!(
+            chain.batch_calls.load(Ordering::SeqCst),
+            0,
+            "no blockchain call on empty claim"
+        );
+    }
+}
