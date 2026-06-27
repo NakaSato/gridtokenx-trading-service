@@ -149,7 +149,9 @@ place**: `ServiceBuilder::build` (`bin/trading-service/src/builder.rs`), which r
 
 | Worker | Cadence | Role |
 | :--- | :--- | :--- |
-| `MatcherWorker` | every 1s | drains/matches orders via `MatcherService` → `trading-engine` |
+| `MatcherWorker` | every 1s | drains/matches realtime orders via `MatcherService` → `trading-engine` (CDA) |
+| `ClearingWorker` | every 60s | uniform-price clears + closes interval epochs whose 15-min window elapsed |
+| `ReaperWorker` | every 10s | flips orders past `expires_at` to `Expired`; sole expiry mechanism (the active-order queries no longer filter on `expires_at`), supervised with respawn + a 2×-cadence DB-call timeout |
 | `SettlementWorker` | every 10s, batch 10 | settles through Chain Bridge |
 | `SupplySyncWorker` | polling interval | syncs tokenized supply from blockchain; graceful-degrades |
 | `OracleConsumer` | event-driven | consumes oracle readings off the EventBus, feeds settlement |
