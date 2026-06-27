@@ -52,6 +52,23 @@ pub struct TradingOrder {
     pub market_segment: MarketSegment,
 }
 
+impl TradingOrder {
+    /// Whether the order has passed its `expires_at` as of `now`. Orders with no
+    /// `expires_at` never expire. This is the single source of truth for the
+    /// expiry predicate used by read paths that the DB query no longer filters
+    /// (the `expires_at > NOW()` SQL bound was dropped in favour of the reaper).
+    #[must_use]
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|exp| exp <= now)
+    }
+
+    /// Inverse of [`Self::is_expired`]: the order is still matchable as of `now`.
+    #[must_use]
+    pub fn is_live(&self, now: DateTime<Utc>) -> bool {
+        !self.is_expired(now)
+    }
+}
+
 // ── Escrow ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

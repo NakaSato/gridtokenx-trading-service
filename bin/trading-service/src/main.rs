@@ -66,13 +66,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Expiry reaper — marks open orders past their expires_at as Expired. Its own
-    // worker (not the matcher) so it runs in every role; 30s cadence.
-    let reaper_worker = trading_logic::ReaperWorker::new(
-        infra.order_repo.clone(),
-        tokio::time::Duration::from_secs(30),
-    );
+    // worker (not the matcher) so it runs in every role. Since the active-order
+    // queries no longer filter expired rows at the DB level, this is the ONLY
+    // mechanism that drops expired orders from the active set, so: (1) a tight 10s
+    // cadence keeps the expired backlog the matcher re-fetches small, and (2) it
+    // is supervised — if the loop ever panics it is respawned (with a short
+    // backoff) instead of silently stopping all expiry.
+    let reaper_repo = infra.order_repo.clone();
     tokio::spawn(async move {
-        reaper_worker.run().await;
+        loop {
+            let repo = reaper_repo.clone();
+            let handle = tokio::spawn(async move {
+                trading_logic::ReaperWorker::new(repo, tokio::time::Duration::from_secs(10))
+                    .run()
+                    .await;
+            });
+            match handle.await {
+                // run() loops forever; a clean return is unexpected but harmless.
+                Ok(()) => break,
+                Err(e) => {
+                    error!("ReaperWorker task terminated unexpectedly ({e}); respawning");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
     });
 
     let settlement_worker = trading_logic::SettlementWorker::new(

@@ -993,9 +993,8 @@ fn build_matching_status(
     sells: &[TradingOrder],
     now: chrono::DateTime<chrono::Utc>,
 ) -> MatchingStatusResponse {
-    let is_live = |o: &&TradingOrder| o.expires_at.is_none_or(|exp| exp > now);
-    let buys: Vec<&TradingOrder> = buys.iter().filter(is_live).collect();
-    let sells: Vec<&TradingOrder> = sells.iter().filter(is_live).collect();
+    let buys: Vec<&TradingOrder> = buys.iter().filter(|o| o.is_live(now)).collect();
+    let sells: Vec<&TradingOrder> = sells.iter().filter(|o| o.is_live(now)).collect();
 
     let buy_min = buys.iter().map(|o| o.price_per_kwh).min();
     let buy_max = buys.iter().map(|o| o.price_per_kwh).max();
