@@ -8,6 +8,20 @@ use trading_core::types::TimeInForce;
 /// Minimum amount of energy to allow a trade.
 pub const MIN_TRADE_AMOUNT: Decimal = rust_decimal_macros::dec!(0.001);
 
+/// One fill step's decision, shared by the FOK pre-check simulation and the real
+/// drain loop so the per-sell fill rule cannot drift between them. Given the
+/// buy's remaining `need` and a candidate sell's `avail`, returns the amount to
+/// match, or `None` if the sell is below the tradeable minimum (skip it).
+/// Callers independently stop once `need` itself drops below `MIN_TRADE_AMOUNT`.
+#[inline]
+fn fill_take(need: Decimal, avail: Decimal) -> Option<Decimal> {
+    if avail < MIN_TRADE_AMOUNT {
+        None
+    } else {
+        Some(need.min(avail))
+    }
+}
+
 /// Discount applied to intra-zone trades to encourage local balancing.
 pub const INTRA_ZONE_DISCOUNT: Decimal = rust_decimal_macros::dec!(0.05);
 
@@ -265,13 +279,12 @@ impl MatchingEngine {
             if buy.time_in_force == TimeInForce::Fok {
                 let mut need = buy.remaining_amount();
                 for c in candidates.iter() {
-                    let avail = sell_orders[c.sell_idx].remaining_amount();
-                    if avail < MIN_TRADE_AMOUNT {
-                        continue;
-                    }
-                    need -= need.min(avail);
-                    if need < MIN_TRADE_AMOUNT {
-                        break;
+                    if let Some(take) = fill_take(need, sell_orders[c.sell_idx].remaining_amount())
+                    {
+                        need -= take;
+                        if need < MIN_TRADE_AMOUNT {
+                            break;
+                        }
                     }
                 }
                 if need > Decimal::ZERO {
@@ -296,11 +309,11 @@ impl MatchingEngine {
                 } = c;
 
                 let sell = &mut sell_orders[sell_idx];
-                if sell.remaining_amount() < MIN_TRADE_AMOUNT {
+                let Some(match_amount) =
+                    fill_take(buy.remaining_amount(), sell.remaining_amount())
+                else {
                     continue;
-                }
-
-                let match_amount = buy.remaining_amount().min(sell.remaining_amount());
+                };
                 let buy_meta_idx = buy.metadata_index;
                 let sell_meta_idx = sell.metadata_index;
 
