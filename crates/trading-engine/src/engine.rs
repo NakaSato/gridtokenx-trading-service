@@ -333,6 +333,8 @@ impl MatchingEngine {
                     sell_metadata_index: sell_meta_idx,
                     match_amount,
                     match_price: landed_cost_fp.to_decimal(),
+                    seller_price: sell.price.to_decimal(),
+                    buyer_price: buy.price.to_decimal(),
                     total_energy_cost: match_amount * landed_cost_fp.to_decimal(),
                     wheeling_charge: match_amount * wheeling_fp.to_decimal(),
                     loss_factor: loss_fp.to_decimal(),

@@ -98,45 +98,71 @@ pub(crate) async fn persist_matches(
         let match_id = Uuid::new_v4();
         let settlement_id = Uuid::new_v4();
 
-        // Settlement first (order_matches.settlement_id FKs to it). On failure,
-        // record the match with a NULL link rather than dropping the ledger row.
-        let settlement_link = match settlement_repo
-            .insert_settlement(&trading_core::models::Settlement {
-                id: settlement_id,
-                trade_id: Some(Uuid::new_v4()),
-                epoch_id: m.epoch_id,
-                buyer_id: m.buyer_id,
-                seller_id: m.seller_id,
-                buy_order_id: m.buy_order_id,
-                sell_order_id: m.sell_order_id,
-                energy_amount: m.match_amount,
-                price: m.match_price,
-                total_amount: m.total_energy_cost,
-                fee_amount: rust_decimal_macros::dec!(0),
-                net_amount: m.total_energy_cost,
-                status: trading_core::models::SettlementStatus::Pending,
-                blockchain_tx: None,
-                created_at: gridtokenx_telemetry::time::now(),
-                confirmed_at: None,
-                wheeling_charge: Some(m.wheeling_charge),
-                loss_factor: Some(m.loss_factor),
-                loss_cost: Some(m.loss_cost),
-                effective_energy: Some(m.match_amount),
-                buyer_zone_id: m.buyer_zone_id,
-                seller_zone_id: m.seller_zone_id,
-                buyer_session_token: buy_meta.session_token.as_ref().map(|s| s.to_string()),
-                seller_session_token: sell_meta.session_token.as_ref().map(|s| s.to_string()),
-                erc_certificate_id: None,
-                erc_transfer_tx: None,
-                retry_count: 0,
-                error_message: None,
-            })
-            .await
-        {
-            Ok(()) => Some(settlement_id),
-            Err(e) => {
-                tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist settlement row; recording order_matches without settlement link");
-                None
+        // On-chain settlement executes at the SELLER'S ASK, not the discounted
+        // landed `match_price`. The intra-zone discount lowers the buyer's landed
+        // cost below the ask to help the trade cross, but the on-chain
+        // `execute_atomic_settlement` enforces `price >= sell_order.price_per_kwh`
+        // (seller protection) — so settling at the discounted price always fails
+        // (Custom 6024 SlippageExceeded). Settle at the ask: the seller is made
+        // whole and the guard holds. The discount stays a matching/crossing
+        // incentive only, not a payout.
+        let settle_price = m.seller_price;
+
+        // A match where the seller's ask exceeds the buyer's bid only crossed
+        // because the discount rescued an above-bid local sell. No price satisfies
+        // `sell_ask <= price <= buy_bid`, so it cannot settle on-chain — record the
+        // ledger row but skip the settlement (no on-chain attempt).
+        let settlement_link = if m.seller_price > m.buyer_price {
+            tracing::warn!(
+                buy_order_id = %m.buy_order_id,
+                sell_order_id = %m.sell_order_id,
+                seller_price = %m.seller_price,
+                buyer_price = %m.buyer_price,
+                "Discount-rescued match (sell_ask > buy_bid): no valid on-chain settle price; recording order_matches without on-chain settlement"
+            );
+            None
+        } else {
+            // Settlement first (order_matches.settlement_id FKs to it). On failure,
+            // record the match with a NULL link rather than dropping the ledger row.
+            let total_at_ask = m.match_amount * settle_price;
+            match settlement_repo
+                .insert_settlement(&trading_core::models::Settlement {
+                    id: settlement_id,
+                    trade_id: Some(Uuid::new_v4()),
+                    epoch_id: m.epoch_id,
+                    buyer_id: m.buyer_id,
+                    seller_id: m.seller_id,
+                    buy_order_id: m.buy_order_id,
+                    sell_order_id: m.sell_order_id,
+                    energy_amount: m.match_amount,
+                    price: settle_price,
+                    total_amount: total_at_ask,
+                    fee_amount: rust_decimal_macros::dec!(0),
+                    net_amount: total_at_ask,
+                    status: trading_core::models::SettlementStatus::Pending,
+                    blockchain_tx: None,
+                    created_at: gridtokenx_telemetry::time::now(),
+                    confirmed_at: None,
+                    wheeling_charge: Some(m.wheeling_charge),
+                    loss_factor: Some(m.loss_factor),
+                    loss_cost: Some(m.loss_cost),
+                    effective_energy: Some(m.match_amount),
+                    buyer_zone_id: m.buyer_zone_id,
+                    seller_zone_id: m.seller_zone_id,
+                    buyer_session_token: buy_meta.session_token.as_ref().map(|s| s.to_string()),
+                    seller_session_token: sell_meta.session_token.as_ref().map(|s| s.to_string()),
+                    erc_certificate_id: None,
+                    erc_transfer_tx: None,
+                    retry_count: 0,
+                    error_message: None,
+                })
+                .await
+            {
+                Ok(()) => Some(settlement_id),
+                Err(e) => {
+                    tracing::warn!(error = %e, buy_order_id = %m.buy_order_id, sell_order_id = %m.sell_order_id, "Failed to persist settlement row; recording order_matches without settlement link");
+                    None
+                }
             }
         };
 

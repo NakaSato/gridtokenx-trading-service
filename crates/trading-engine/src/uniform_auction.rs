@@ -242,6 +242,8 @@ impl UniformAuction {
                 sell_metadata_index: sell.metadata_index,
                 match_amount: amount,
                 match_price: p_star,
+                seller_price: sell.price.to_decimal(),
+                buyer_price: buy.price.to_decimal(),
                 total_energy_cost: amount * p_star,
                 wheeling_charge: amount * wheeling_unit,
                 loss_factor,

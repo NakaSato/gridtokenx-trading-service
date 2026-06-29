@@ -56,6 +56,16 @@ pub struct MatchResult {
     pub sell_metadata_index: usize,
     pub match_amount: Decimal,
     pub match_price: Decimal,
+    /// Seller's limit (ask) price. The intra-zone discount can pull `match_price`
+    /// (the buyer's landed cost) below this; on-chain settlement executes at the
+    /// seller's ask (seller made whole), so the on-chain `price >= sell_ask` guard
+    /// holds. See `clearing_support::persist_matches`.
+    pub seller_price: Decimal,
+    /// Buyer's limit (bid) price. When `seller_price > buyer_price` the match only
+    /// crossed because the discount rescued an above-bid local sell — no price
+    /// satisfies `sell_ask <= price <= buy_bid`, so such matches are not settled
+    /// on-chain.
+    pub buyer_price: Decimal,
     pub total_energy_cost: Decimal,
     pub wheeling_charge: Decimal,
     pub loss_factor: Decimal,
