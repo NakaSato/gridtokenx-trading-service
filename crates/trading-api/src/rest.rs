@@ -431,6 +431,20 @@ pub async fn list_orders(
             )
         })?;
 
+    // `params.status` was previously accepted but never read — every cancelled/filled
+    // order kept showing in `?status=active` callers (e.g. the trading UI's "My
+    // Orders" list) forever. Filtered post-fetch since get_orders_by_user has no
+    // status-aware query variant; note this applies after the repo's limit/offset, so
+    // a page can return fewer than `limit` matches once a user has enough non-matching
+    // orders to span pages — acceptable for the common (small, mostly-active) case.
+    let orders: Vec<_> = match params.status.as_deref() {
+        Some(status) => orders
+            .into_iter()
+            .filter(|o| o.status.as_str() == status)
+            .collect(),
+        None => orders,
+    };
+
     let data = orders.iter().map(OrderData::from_order).collect::<Vec<_>>();
 
     let total = data.len();
