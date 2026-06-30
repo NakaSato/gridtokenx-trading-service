@@ -228,6 +228,7 @@ mod tests {
         async fn get_orders_by_user(&self, _u: Uuid, _l: i64, _o: i64) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
         async fn get_active_orders_by_zone(&self, _z: i32) -> TraitResult<Vec<OrderBookEntry>> { unimplemented!() }
         async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
+        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> { unimplemented!() }
         async fn update_filled_amount(&self, _id: Uuid, _f: Decimal, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
         async fn update_filled_amount_with_event(&self, _id: Uuid, _f: Decimal, _s: OrderStatus, _e: &Event) -> TraitResult<()> { unimplemented!() }
         async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }

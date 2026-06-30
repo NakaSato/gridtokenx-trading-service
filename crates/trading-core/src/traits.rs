@@ -67,6 +67,10 @@ pub trait OrderRepository: Send + Sync {
     /// Update order status.
     async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()>;
 
+    /// Persist the on-chain order PDA + index after custodial placement.
+    async fn update_order_pda(&self, id: Uuid, order_pda: &str, order_index: i64)
+        -> TraitResult<()>;
+
     /// Update filled amount on an order.
     async fn update_filled_amount(
         &self,
@@ -467,6 +471,23 @@ pub trait BlockchainGateway: Send + Sync {
         &self,
         settlements: Vec<crate::models::Settlement>,
     ) -> TraitResult<Vec<crate::models::SettlementTransaction>>;
+
+    /// Custodial order placement (Option A): record the order PDA + fund its escrow
+    /// on the user's behalf, platform-signed. Returns (signature, order_pda). Default
+    /// is unsupported so mock/non-chain gateways need no override.
+    async fn place_order_on_chain(
+        &self,
+        _user_id: Uuid,
+        _is_buy: bool,
+        _energy_amount: Decimal,
+        _price_per_kwh: Decimal,
+        _zone_id: i32,
+        _order_id_seed: u64,
+    ) -> TraitResult<(String, String)> {
+        Err(ApiError::Internal(
+            "place_order_on_chain not supported by this gateway".to_string(),
+        ))
+    }
 
     /// Issue an ERC certificate on-chain.
     async fn issue_erc(

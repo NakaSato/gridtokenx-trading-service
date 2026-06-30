@@ -90,6 +90,7 @@ impl OrderRepository for MockSystem {
             .collect())
     }
     async fn update_order_status(&self, _id: Uuid, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
+    async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> { Ok(()) }
     async fn update_filled_amount(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
     async fn update_filled_amount_with_event(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus, _event: &Event) -> TraitResult<()> { Ok(()) }
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {

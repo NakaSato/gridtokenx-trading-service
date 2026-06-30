@@ -144,27 +144,65 @@ impl BlockchainSettlementProvider {
         )
         .unwrap_or(0);
 
-        let signature = self
+        // `execute_atomic_settlement` sources funds from escrow accounts owned by
+        // `escrow_authority` (= the platform key the bridge signs as, which also ==
+        // market.authority). So the escrows are the PLATFORM's pooled ATAs, not the
+        // parties' ATAs. (Per-user `fund_escrow_custodial` PDAs target the separate
+        // settle_offchain model — not this instruction.) The receiver ATAs (seller
+        // currency, buyer energy) must exist; custodial parties have none, so create
+        // them idempotently in the same tx. escrow_authority == market_authority ==
+        // platform → one bridge signature satisfies both signer slots.
+        let platform = platform_authority.pubkey();
+        let energy_tp = spl_token_2022::id();
+        let buyer_currency_escrow = self
             .blockchain
-            .execute_atomic_settlement(
-                &platform_authority,
-                &platform_authority,
-                &market_pda,
-                buy_order_pda,
-                sell_order_pda,
-                &buyer_currency_ata,
-                &seller_energy_ata,
-                &seller_currency_ata,
-                &buyer_energy_ata,
-                &fee_collector_ata,
-                &wheeling_collector_ata,
-                &loss_collector_ata,
-                &energy_mint,
-                &currency_mint,
+            .calculate_ata_address_with_program(&platform, &currency_mint, &currency_tp)?;
+        let seller_energy_escrow = self
+            .blockchain
+            .calculate_ata_address_with_program(&platform, &energy_mint, &energy_tp)?;
+        let _ = (buyer_currency_ata, seller_energy_ata); // party ATAs unused for this model
+
+        let create_seller_currency =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &platform, seller_pubkey, &currency_mint, &currency_tp,
+            );
+        let create_buyer_energy =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &platform, buyer_pubkey, &energy_mint, &energy_tp,
+            );
+
+        let settle_ix = self
+            .blockchain
+            .instruction_builder()
+            .build_execute_atomic_settlement_instruction(
+                market_pda,
+                *buy_order_pda,
+                *sell_order_pda,
+                buyer_currency_escrow,
+                seller_energy_escrow,
+                seller_currency_ata,
+                buyer_energy_ata,
+                fee_collector_ata,
+                wheeling_collector_ata,
+                loss_collector_ata,
+                energy_mint,
+                currency_mint,
+                platform,
+                platform,
                 amount_atomic,
                 price_atomic,
                 wheeling_val,
                 loss_val,
+                // Per-match id (settlement row UUID) → on-chain TradeNullifier replay guard (F3c).
+                *settlement.id.as_bytes(),
+            )
+            .map_err(|e| ApiError::Internal(format!("build settle ix: {}", e)))?;
+
+        let signature = self
+            .blockchain
+            .execute_batched_instructions(
+                &[&platform_authority],
+                vec![create_seller_currency, create_buyer_energy, settle_ix],
             )
             .await?;
 
@@ -285,17 +323,42 @@ impl BlockchainSettlementProvider {
             .blockchain
             .calculate_ata_address_with_program(&loss_collector, &currency_mint, &currency_tp)?;
 
+        // `execute_atomic_settlement` sources funds from escrows owned by
+        // `escrow_authority` (= the platform key the bridge signs as, also ==
+        // market.authority). So escrows are the PLATFORM's pooled ATAs, not the
+        // parties'. escrow_authority == market_authority == platform → one bridge
+        // signature satisfies both signer slots.
+        let platform = platform_authority.pubkey();
+        let energy_tp = spl_token_2022::id();
+        let buyer_currency_escrow = self
+            .blockchain
+            .calculate_ata_address_with_program(&platform, &currency_mint, &currency_tp)?;
+        let seller_energy_escrow = self
+            .blockchain
+            .calculate_ata_address_with_program(&platform, &energy_mint, &energy_tp)?;
+
         let mut instructions = Vec::new();
         let mut settlement_ids = Vec::new();
 
         for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs {
-            // Party ATAs (currency = classic SPL Token, energy = Token-2022).
+            // Receiver ATAs (seller gets currency, buyer gets energy). Custodial
+            // parties may have none, so create them idempotently in the same tx.
             let TradeAtas {
-                buyer_currency_ata,
-                seller_energy_ata,
+                buyer_currency_ata: _,
+                seller_energy_ata: _,
                 seller_currency_ata,
                 buyer_energy_ata,
             } = self.derive_trade_atas(&energy_mint, &currency_mint, &buyer_pubkey, &seller_pubkey)?;
+            instructions.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &platform, &seller_pubkey, &currency_mint, &currency_tp,
+                ),
+            );
+            instructions.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &platform, &buyer_pubkey, &energy_mint, &energy_tp,
+                ),
+            );
 
             // Amounts in atomic units - using direct conversion
             let amount_atomic = (settlement.energy_amount * Decimal::from(1_000_000_000i64))
@@ -323,8 +386,8 @@ impl BlockchainSettlementProvider {
                     market_pda,
                     buy_order_pda,
                     sell_order_pda,
-                    buyer_currency_ata,
-                    seller_energy_ata,
+                    buyer_currency_escrow,
+                    seller_energy_escrow,
                     seller_currency_ata,
                     buyer_energy_ata,
                     fee_collector_ata,
@@ -338,6 +401,9 @@ impl BlockchainSettlementProvider {
                     price_atomic,
                     wheeling_val,
                     loss_val,
+                    // Per-match id = the settlement row UUID. Stable across re-signed retries,
+                    // so the on-chain TradeNullifier rejects a replay that already landed (F3c).
+                    *settlement.id.as_bytes(),
                 )
                 .map_err(|e| ApiError::Internal(format!("Failed to build instruction: {}", e)))?;
 
@@ -357,6 +423,34 @@ impl BlockchainSettlementProvider {
             .execute_batched_instructions(&[&platform_authority], instructions)
             .await
             .map_err(|e| ApiError::Internal(format!("Batch settlement execution failed: {}", e)))?;
+
+        // F3a: gate completion on FINALITY, not the bridge's RPC-accept. A generic submit
+        // returns as soon as Chain Bridge accepts the tx (fire-and-forget, slot 0); the tx
+        // may never finalize. Poll until confirmed — if it doesn't land, return Err so the
+        // caller resets the batch for retry instead of marking it Completed (silent loss).
+        // Retry is safe: the on-chain TradeNullifier (F3c) no-ops a replay of a settle that
+        // already landed, so a lost-reply retry cannot double-settle.
+        let confirm_timeout = std::env::var("SETTLEMENT_CONFIRM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        match self
+            .blockchain
+            .wait_for_confirmation(&signature, confirm_timeout)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ApiError::Internal(format!(
+                    "settlement batch {signature} not confirmed within {confirm_timeout}s; releasing for retry"
+                )))
+            }
+            Err(e) => {
+                return Err(ApiError::Internal(format!(
+                    "settlement batch {signature} confirmation check failed: {e}; releasing for retry"
+                )))
+            }
+        }
 
         let slot = self.blockchain.get_slot().await.unwrap_or(0);
 

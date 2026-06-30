@@ -286,6 +286,72 @@ impl BlockchainService {
         Ok(pda)
     }
 
+    /// Custodial order placement (Option A): record the order PDA + fund the relevant
+    /// escrow on the user's behalf, all platform-signed (no user signature). A buy
+    /// order funds the buyer's CURRENCY escrow (GRX, classic SPL); a sell order funds
+    /// the seller's ENERGY escrow (GRID, Token-2022). `funder_source` is the platform's
+    /// ATA for that mint (must be pre-funded). Returns (signature, order_pda).
+    pub async fn place_order_on_chain(
+        &self,
+        user_wallet: &Pubkey,
+        order_id: u64,
+        is_buy: bool,
+        energy_amount_atomic: u64,
+        price_atomic: u64,
+        zone_id: u32,
+    ) -> Result<(Signature, Pubkey)> {
+        use std::str::FromStr;
+        let authority = self.get_authority_keypair().await?;
+        let funder = authority.pubkey();
+        let trading_program_id = Pubkey::from_str(&self.core.program_ids.trading_program_id)?;
+        let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
+        let order_pda = self.derive_order_pda(user_wallet, order_id)?;
+
+        let record_ix = self.core.instruction_builder.build_record_order_custodial_instruction(
+            &market_pda,
+            order_pda,
+            order_id,
+            user_wallet,
+            is_buy,
+            energy_amount_atomic,
+            price_atomic,
+            funder,
+            zone_id,
+        )?;
+
+        // Pick the mint/program/amount for the escrow this side must fund.
+        let (mint, token_program, fund_amount) = if is_buy {
+            let currency_mint = Pubkey::from_str(
+                &std::env::var("CURRENCY_TOKEN_MINT")
+                    .map_err(|_| anyhow::anyhow!("CURRENCY_TOKEN_MINT unset"))?,
+            )?;
+            // GRX (6-dec) owed = energy(kWh, 9-dec atomic) * price(6-dec atomic) / 1e9.
+            let amount = (energy_amount_atomic as u128)
+                .saturating_mul(price_atomic as u128)
+                / 1_000_000_000u128;
+            (currency_mint, spl_token::id(), amount as u64)
+        } else {
+            let energy_mint = self.core.instruction_builder.get_mint_pda()?;
+            (energy_mint, spl_token_2022::id(), energy_amount_atomic)
+        };
+
+        let funder_source =
+            self.calculate_ata_address_with_program(&funder, &mint, &token_program)?;
+        let fund_ix = self.core.instruction_builder.build_fund_escrow_custodial_instruction(
+            funder,
+            &mint,
+            funder_source,
+            user_wallet,
+            fund_amount,
+            token_program,
+        )?;
+
+        let signature = self
+            .execute_batched_instructions(&[&authority], vec![record_ix, fund_ix])
+            .await?;
+        Ok((signature, order_pda))
+    }
+
     /// Execute on-chain create_order
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_create_order(
@@ -498,6 +564,8 @@ impl BlockchainService {
         price: u64,
         wheeling_charge: u64,
         loss_cost: u64,
+        // Per-match id (settlement row UUID) → on-chain TradeNullifier replay guard (F3c).
+        trade_id: [u8; 16],
     ) -> Result<Signature> {
         self.core
             .execute_atomic_settlement(
@@ -519,6 +587,7 @@ impl BlockchainService {
                 price,
                 wheeling_charge,
                 loss_cost,
+                trade_id,
                 None, // Default priority
             )
             .await
@@ -560,6 +629,8 @@ impl BlockchainService {
         price: u64,
         wheeling_charge: u64,
         loss_cost: u64,
+        // Per-match id (settlement row UUID) → on-chain TradeNullifier replay guard (F3c).
+        trade_id: [u8; 16],
     ) -> Result<Instruction> {
         self.core
             .instruction_builder
@@ -582,6 +653,7 @@ impl BlockchainService {
                 price,
                 wheeling_charge,
                 loss_cost,
+                trade_id,
             )
     }
 

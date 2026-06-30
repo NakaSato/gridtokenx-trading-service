@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::{error, info};
+use tracing::info;
 use trading_core::models::{
     NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder, Settlement,
     SettlementStats, TradingOrder,
@@ -280,36 +280,30 @@ pub async fn submit_order(
         market_segment,
     };
 
-    // ── Optional On-Chain Execution ───────
-    if req.custodial_sign.unwrap_or(false) {
-        info!("🔗 On-chain order creation requested for user {}", user.user_id);
-        
-        let market_pubkey = &state.config.solana_programs.trading_market_id;
-        let amount_u64 = (amount * Decimal::from(1_000_000_000i64)).to_u64().unwrap_or(0);
-        let price_u64 = (price * Decimal::from(1_000_000i64)).to_u64().unwrap_or(0);
-        
-        match state.blockchain.execute_create_order(
-            user.user_id,
-            market_pubkey,
-            amount_u64,
-            price_u64,
-            &side.to_string(),
-            None,
-            req.zone_id as u32,
-        ).await {
-            Ok((sig, pda, index)) => {
-                info!("✅ On-chain order created. Sig: {}, PDA: {}", sig, pda);
+    // ── Custodial On-Chain Placement (Option A) ───────
+    // Record the order PDA + fund its escrow on the user's behalf (platform-signed,
+    // no user signature). Fires when settlement is enabled or explicitly requested.
+    // Best-effort: a failure leaves order_pda NULL so the settlement worker skips it
+    // (unchanged behaviour) — it never fails the API.
+    if state.config.trade_settlement_enabled || req.custodial_sign.unwrap_or(false) {
+        let seed = u64::from_le_bytes(
+            order.id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes"),
+        );
+        let is_buy = matches!(side, OrderSide::Buy);
+        match state
+            .blockchain
+            .place_order_on_chain(user.user_id, is_buy, amount, price, req.zone_id, seed)
+            .await
+        {
+            Ok((sig, pda)) => {
+                info!("✅ On-chain order placed. Sig: {}, PDA: {}", sig, pda);
                 order.order_pda = Some(pda);
-                order.order_index = Some(index as i64);
+                order.order_index = Some(seed as i64);
                 order.blockchain_tx_hash = Some(sig);
                 order.blockchain_status = Some("confirmed".to_string());
             }
             Err(e) => {
-                error!("❌ On-chain order creation failed: {}", e);
-                return Err((
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("On-chain execution failed: {}", e),
-                ));
+                tracing::warn!("order {}: on-chain placement failed (left for retry): {}", order.id, e);
             }
         }
     }

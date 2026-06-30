@@ -69,6 +69,41 @@ impl BlockchainGateway for BlockchainService {
         Ok(pubkey.map(|p| p.to_string()))
     }
 
+    async fn place_order_on_chain(
+        &self,
+        user_id: Uuid,
+        is_buy: bool,
+        energy_amount: rust_decimal::Decimal,
+        price_per_kwh: rust_decimal::Decimal,
+        zone_id: i32,
+        order_id_seed: u64,
+    ) -> TraitResult<(String, String)> {
+        use rust_decimal::prelude::ToPrimitive;
+        use trading_core::error::ApiError;
+
+        let wallet = self
+            .get_user_primary_wallet(&user_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("resolve wallet: {}", e)))?
+            .ok_or_else(|| ApiError::Validation(format!("no on-chain wallet for user {user_id}")))?;
+
+        // GRID energy = 9-dec atomic; currency price = 6-dec atomic.
+        let energy_atomic = (energy_amount * rust_decimal::Decimal::from(1_000_000_000i64))
+            .trunc()
+            .to_u64()
+            .ok_or_else(|| ApiError::Validation("energy amount out of range".to_string()))?;
+        let price_atomic = (price_per_kwh * rust_decimal::Decimal::from(1_000_000i64))
+            .trunc()
+            .to_u64()
+            .ok_or_else(|| ApiError::Validation("price out of range".to_string()))?;
+
+        let (sig, pda) = self
+            .place_order_on_chain(&wallet, order_id_seed, is_buy, energy_atomic, price_atomic, zone_id as u32)
+            .await
+            .map_err(|e| ApiError::Internal(format!("place_order_on_chain: {}", e)))?;
+        Ok((sig.to_string(), pda.to_string()))
+    }
+
     async fn get_token_balance(&self, wallet_address: &str) -> TraitResult<u64> {
         use std::str::FromStr;
         let owner = solana_sdk::pubkey::Pubkey::from_str(wallet_address)

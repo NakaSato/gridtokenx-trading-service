@@ -195,6 +195,46 @@ impl TradingService for TradingGrpcService {
                 ConnectError::new(ErrorCode::Internal, "Failed to insert order")
             })?;
 
+        // Custodial on-chain order placement (Option A). Best-effort and gated by the
+        // settlement feature flag: a failure leaves order_pda NULL so the settlement
+        // worker skips it (unchanged behaviour) — it never fails the API call. Only
+        // when enabled + on-chain succeeds does the order become settle-eligible.
+        if self.state.config.trade_settlement_enabled {
+            let seed = u64::from_le_bytes(
+                order.id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes"),
+            );
+            let is_buy = matches!(order.side, trading_core::types::OrderSide::Buy);
+            match self
+                .state
+                .blockchain
+                .place_order_on_chain(
+                    order.user_id,
+                    is_buy,
+                    order.energy_amount,
+                    order.price_per_kwh,
+                    order.zone_id.unwrap_or(0),
+                    seed,
+                )
+                .await
+            {
+                Ok((sig, pda)) => {
+                    if let Err(e) = self
+                        .state
+                        .order_repo
+                        .update_order_pda(order.id, &pda, seed as i64)
+                        .await
+                    {
+                        tracing::warn!("order {}: persist order_pda failed: {}", order.id, e);
+                    } else {
+                        info!("order {} placed on-chain: pda={} sig={}", order.id, pda, sig);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("order {}: on-chain placement failed (left for retry): {}", order.id, e)
+                }
+            }
+        }
+
         let mut res = TradingResponse::default();
         res.success = true;
         res.message = "Order submitted successfully".to_string();

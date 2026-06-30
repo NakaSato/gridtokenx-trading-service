@@ -272,6 +272,18 @@ impl OrderRepository for PostgresOrderRepository {
         Ok(())
     }
 
+    async fn update_order_pda(&self, id: Uuid, order_pda: &str, order_index: i64) -> TraitResult<()> {
+        sqlx::query(
+            "UPDATE trading_orders SET order_pda = $1, order_index = $2, updated_at = NOW() WHERE id = $3",
+        )
+        .bind(order_pda)
+        .bind(order_index)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn update_filled_amount(
         &self,
         id: Uuid,

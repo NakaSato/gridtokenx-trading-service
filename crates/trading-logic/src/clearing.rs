@@ -324,6 +324,9 @@ mod tests {
         async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> {
             unimplemented!()
         }
+        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> {
+            unimplemented!()
+        }
         async fn update_filled_amount(
             &self,
             _id: Uuid,
