@@ -156,7 +156,7 @@ pub async fn submit_order(
     Json(req): Json<SubmitOrderRequest>,
 ) -> Result<Json<SubmitOrderResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     tracing::info!("Submit order request: {:?}", req);
 
@@ -363,7 +363,7 @@ pub async fn get_order_book(
     Path(zone_id): Path<i32>,
 ) -> Result<Json<OrderBookResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let entries = state
         .order_repo
@@ -416,7 +416,7 @@ pub async fn list_orders(
     Query(params): Query<ListOrdersParams>,
 ) -> Result<Json<ListOrdersResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
 
@@ -465,7 +465,7 @@ pub async fn get_order_by_id(
     Path(id): Path<Uuid>,
 ) -> Result<Json<OrderData>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let order = state
         .order_repo
@@ -502,7 +502,7 @@ pub async fn cancel_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     state
         .order_repo
@@ -526,7 +526,7 @@ pub async fn create_quote(
     Json(_req): Json<QuoteRequest>,
 ) -> Result<Json<QuoteResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     let qid = format!("q_{}", &Uuid::new_v4().to_string()[..8]);
     // Mock for now to match the redesign spec
     Ok(Json(QuoteResponse {
@@ -561,7 +561,7 @@ pub async fn get_market_stats(
     role: ServiceRole,
 ) -> Result<Json<MarketStatsResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     Ok(Json(MarketStatsResponse {
         timestamp: gridtokenx_telemetry::time::now(),
         total_volume_24h_kwh: "12500.50".to_string(),
@@ -581,7 +581,7 @@ pub async fn get_futures_products(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<trading_core::models::FuturesProduct>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let products = state.futures_repo.get_products().await.map_err(|e| {
         (
@@ -608,7 +608,7 @@ pub async fn create_futures_order(
     Json(_req): Json<CreateFuturesOrderRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     Ok(Json(serde_json::json!({
         "order_id": Uuid::new_v4().to_string(),
         "status": "open",
@@ -621,7 +621,7 @@ pub async fn get_futures_positions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<trading_core::models::FuturesPosition>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let positions = state
         .futures_repo
@@ -643,7 +643,7 @@ pub async fn get_futures_orders(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<trading_core::models::FuturesOrder>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let orders = state
         .futures_repo
@@ -666,7 +666,7 @@ pub async fn close_futures_position(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     state.futures_repo.close_position(id).await.map_err(|e| {
         (
@@ -685,7 +685,7 @@ pub async fn get_futures_candles(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     Ok(Json(serde_json::json!([])))
 }
 
@@ -693,7 +693,7 @@ pub async fn get_futures_order_book(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
     Ok(Json(serde_json::json!({
         "asks": [],
         "bids": [],
@@ -711,7 +711,7 @@ pub async fn get_wallet_balance(
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let balance_raw = state
         .blockchain
@@ -743,7 +743,7 @@ pub async fn get_user_analytics_stats(
     State(state): State<AppState>,
 ) -> Result<Json<trading_core::models::UserAnalytics>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let stats = state
         .analytics_repo
@@ -763,7 +763,7 @@ pub async fn get_user_analytics_history(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "history": []
@@ -776,7 +776,7 @@ pub async fn get_user_transactions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<trading_core::models::TransactionData>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let txs = state
         .analytics_repo
@@ -802,7 +802,7 @@ pub async fn get_carbon_balance(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let balance = state
         .carbon_repo
@@ -829,7 +829,7 @@ pub async fn get_carbon_history(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<trading_core::models::CarbonCredit>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let history = state
         .carbon_repo
@@ -849,7 +849,7 @@ pub async fn get_carbon_transactions(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     Ok(Json(serde_json::json!([])))
 }
@@ -859,7 +859,7 @@ pub async fn transfer_carbon_credits(
     Json(_req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "transaction_id": Uuid::new_v4().to_string(),
@@ -918,7 +918,7 @@ pub async fn get_market_config(
     State(state): State<AppState>,
 ) -> Result<Json<MarketConfigResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let m = &state.config.market;
     Ok(Json(MarketConfigResponse {
@@ -937,7 +937,7 @@ pub async fn get_p2p_market_prices(
     State(state): State<AppState>,
 ) -> Result<Json<P2PMarketPricesResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let m = &state.config.market;
     let mut wheeling_charges = HashMap::new();
@@ -963,7 +963,7 @@ pub async fn get_matching_status(
     State(state): State<AppState>,
 ) -> Result<Json<MatchingStatusResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let buys = state.order_repo.get_active_buy_orders().await.map_err(|e| {
         (
@@ -1109,7 +1109,7 @@ pub async fn get_settlement_stats(
     State(state): State<AppState>,
 ) -> Result<Json<SettlementStatsResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let stats = state.settlement_repo.get_settlement_stats().await.map_err(|e| {
         (
@@ -1149,7 +1149,7 @@ pub async fn get_clearing_epochs(
     axum::extract::Query(q): axum::extract::Query<ClearingEpochsQuery>,
 ) -> Result<Json<Vec<ClearingEpochResponse>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
     let epochs = state
@@ -1186,7 +1186,7 @@ pub async fn get_p2p_orderbook(
     State(state): State<AppState>,
 ) -> Result<Json<P2POrderBookResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let entries = state.order_repo.get_all_active_orders().await.map_err(|e| {
         (
@@ -1352,7 +1352,7 @@ pub async fn get_trades(
     Query(params): Query<TradesQuery>,
 ) -> Result<Json<TradesListResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -1379,7 +1379,7 @@ pub async fn export_trades(
     Query(params): Query<TradesQuery>,
 ) -> Result<Response, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     // Export the full history (capped) rather than a single page.
     let limit = params.limit.unwrap_or(10_000).clamp(1, 50_000);
@@ -1464,7 +1464,7 @@ pub async fn create_price_alert(
     Json(req): Json<CreatePriceAlertRequest>,
 ) -> Result<Json<PriceAlertResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let target_price = Decimal::from_str(req.target_price.trim()).map_err(|_| {
         (
@@ -1516,7 +1516,7 @@ pub async fn list_price_alerts(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PriceAlertResponse>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let alerts = state
         .price_alert_repo
@@ -1540,7 +1540,7 @@ pub async fn delete_price_alert(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let deleted = state
         .price_alert_repo
@@ -1675,7 +1675,7 @@ pub async fn create_recurring_order(
     Json(req): Json<CreateRecurringRequest>,
 ) -> Result<Json<RecurringOrderWire>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let side = parse_side(&req.side)?;
     let interval_type = parse_interval(&req.interval_type)?;
@@ -1740,7 +1740,7 @@ pub async fn list_recurring_orders(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<RecurringOrderWire>>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let orders = state
         .recurring_repo
@@ -1764,7 +1764,7 @@ pub async fn get_recurring_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<RecurringOrderWire>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let order = state
         .recurring_repo
@@ -1794,7 +1794,7 @@ pub async fn delete_recurring_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let deleted = state
         .recurring_repo
@@ -1853,7 +1853,7 @@ pub async fn pause_recurring_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     set_recurring_status_handler(&state, id, user.user_id, RecurringStatus::Paused).await
 }
@@ -1866,7 +1866,7 @@ pub async fn resume_recurring_order(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
-        .map_err(|(_code, msg)| (axum::http::StatusCode::UNAUTHORIZED, msg.to_string()))?;
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     set_recurring_status_handler(&state, id, user.user_id, RecurringStatus::Active).await
 }
