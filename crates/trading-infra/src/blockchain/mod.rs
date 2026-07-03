@@ -238,10 +238,17 @@ impl BlockchainGateway for BlockchainService {
         // Format certificate ID: ERC-{meter_id}-{timestamp}
         let cert_id = format!("ERC-{}-{}", meter_id, gridtokenx_telemetry::time::now().timestamp());
 
-        // Convert decimal to u64 (9 decimals for GRX/ERC)
+        // Convert decimal to u64 (9 decimals for GRX/ERC). Negative or
+        // out-of-range amounts must fail loudly — silently minting a
+        // certificate for 0 energy would issue a valid-looking ERC for
+        // nothing.
         let amount_u64 = (energy_amount * rust_decimal::Decimal::from(1_000_000_000i64))
             .to_u64()
-            .unwrap_or(0);
+            .ok_or_else(|| {
+                trading_core::error::ApiError::Validation(format!(
+                    "energy_amount {energy_amount} is out of range for ERC issuance"
+                ))
+            })?;
 
         // Sovereign path: Trading holds only the owner Pubkey; Chain Bridge signs.
         let signature = self
