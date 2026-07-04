@@ -382,7 +382,25 @@ impl BlockchainService {
         let signature = self
             .execute_batched_instructions(&[&authority], vec![record_ix, fund_ix])
             .await?;
-        Ok((signature, order_pda))
+
+        // Submission only proves the bridge accepted the tx for broadcast, not that
+        // record_order_custodial actually ran — the caller (rest.rs) stamps
+        // blockchain_status="confirmed" off this Ok, so an unconfirmed/failed tx
+        // must not be reported as success (the order_pda would then point at an
+        // account that was never created on-chain).
+        let confirm_timeout = std::env::var("ORDER_CONFIRM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        match self.wait_for_confirmation(&signature, confirm_timeout).await {
+            Ok(true) => Ok((signature, order_pda)),
+            Ok(false) => Err(anyhow::anyhow!(
+                "order placement {signature} not confirmed within {confirm_timeout}s"
+            )),
+            Err(e) => Err(anyhow::anyhow!(
+                "order placement {signature} confirmation failed: {e}"
+            )),
+        }
     }
 
     /// Execute on-chain create_order
