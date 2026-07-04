@@ -109,8 +109,13 @@ impl BlockchainGateway for BlockchainService {
         let owner = solana_sdk::pubkey::Pubkey::from_str(wallet_address)
             .map_err(|e| trading_core::error::ApiError::Validation(e.to_string()))?;
 
-        // Use a dummy mint for now or make it configurable
-        let mint = solana_sdk::pubkey::Pubkey::default();
+        let mint_str = std::env::var("ENERGY_TOKEN_MINT").map_err(|_| {
+            trading_core::error::ApiError::Internal(
+                "ENERGY_TOKEN_MINT environment variable is required".to_string(),
+            )
+        })?;
+        let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str)
+            .map_err(|e| trading_core::error::ApiError::Internal(format!("invalid ENERGY_TOKEN_MINT: {}", e)))?;
 
         self.get_token_balance(&owner, &mint)
             .await

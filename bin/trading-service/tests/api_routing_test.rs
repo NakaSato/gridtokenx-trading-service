@@ -138,8 +138,9 @@ async fn test_api_routing_e2e() {
         .await
         .unwrap();
 
-    // ServiceRole: ApiGateway requires GATEWAY_SECRET_HEADER check, mismatch defaults to Unknown role, yielding 401 Unauthorized
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // ServiceRole: ApiGateway requires GATEWAY_SECRET_HEADER check; mismatch defaults to
+    // Unknown role, which require_any() denies as 403 Forbidden (blockchain-core auth.rs).
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // 9. Database Setup for Successful Operations
     let user_id = Uuid::new_v4();

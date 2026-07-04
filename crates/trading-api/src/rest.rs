@@ -733,7 +733,7 @@ pub async fn get_wallet_balance(
         "token_balance_raw": balance_raw,
         "balance_sol": 0.0, // Should be fetched from blockchain as well if needed
         "decimals": decimals,
-        "token_mint": "GridTokenMint111111111111111111111111111",
+        "token_mint": std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default(),
     })))
 }
 
