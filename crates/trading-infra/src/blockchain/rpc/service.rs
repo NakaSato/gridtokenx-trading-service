@@ -124,16 +124,49 @@ impl BlockchainService {
             .await
     }
 
-    /// Wait for transaction confirmation
+    /// Wait for transaction confirmation, polling until `timeout_secs` elapses.
+    ///
+    /// Distinguishes "landed but failed on-chain" (terminal `Err`, e.g. the
+    /// settlement's escrow/PDA constraint checks) from "not confirmed yet"
+    /// (`Ok(false)`, safe to retry) — a bridge-reported execution error is NOT
+    /// success just because the transaction was included in a block. Reusing
+    /// the old `confirm_transaction` (a single lossy `Ok(bool)` check that
+    /// discards the error) let a failed on-chain settlement be recorded as
+    /// `Completed` in the DB with a real-looking signature.
     pub async fn wait_for_confirmation(
         &self,
         signature: &Signature,
-        _timeout_secs: u64,
+        timeout_secs: u64,
     ) -> Result<bool> {
-        self.core
-            .transaction_handler
-            .confirm_transaction(&signature.to_string())
-            .await
+        use gridtokenx_blockchain_core::SignatureState;
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let poll_interval = std::time::Duration::from_millis(500);
+
+        loop {
+            match self
+                .core
+                .transaction_handler
+                .signature_state(signature)
+                .await
+            {
+                Ok(SignatureState::Confirmed) => return Ok(true),
+                Ok(SignatureState::Failed(err)) => {
+                    return Err(anyhow::anyhow!(
+                        "transaction {signature} failed on-chain: {err}"
+                    ))
+                }
+                Ok(SignatureState::Pending) => {}
+                Err(e) => {
+                    tracing::warn!("signature_state check failed for {signature}: {e}; retrying");
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Ok(false);
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 
     /// Check if an account exists
