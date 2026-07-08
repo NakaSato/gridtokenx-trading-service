@@ -104,7 +104,13 @@ impl MatchingEngine {
         }
 
         // wheeling/loss are zone-constant — passed in, not recomputed per sell.
-        let wheeling_fp = fees.wheeling;
+        // Floor wheeling at 0, symmetric with the loss floor below: wheeling is a
+        // transmission CHARGE (it can only ADD cost), so a negative value — a
+        // misconfigured topology encoding a "subsidy" as negative wheeling — must not
+        // pull landed cost below the seller's ask and book a negative charge into the
+        // settlement ledger. The live GridAwareTopology never emits negative wheeling;
+        // this is defensive.
+        let wheeling_fp = FastPrice::from_raw(fees.wheeling.raw().max(0));
         let loss_fp = fees.loss;
 
         // Line loss can only ADD cost: a loss factor below 1.0 would be a physical
@@ -697,6 +703,44 @@ mod tests {
             dec!(1.0),
             "no phantom discount from sub-unit loss"
         );
+    }
+
+    /// Negative wheeling (a misconfigured "subsidy") must be floored at 0, symmetric
+    /// with the loss floor — it must not pull landed cost below the seller's ask or
+    /// book a negative charge. Cross-zone (no discount) isolates the wheeling term.
+    struct NegativeWheelingTopology;
+    impl TopologySnapshot for NegativeWheelingTopology {
+        fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+            true
+        }
+        fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(-0.1))
+        }
+        fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(1.0))
+        }
+    }
+
+    #[test]
+    fn negative_wheeling_is_floored_at_zero() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // ask == bid so the trade crosses; cross-zone so no discount. Without the floor,
+        // wheeling -0.1 would drop landed to 0.9 (< ask) and book a -0.1 charge.
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NegativeWheelingTopology,
+            unit(),
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].match_price, dec!(1.0), "wheeling floored at 0 → landed == ask");
+        assert_eq!(matches[0].wheeling_charge, dec!(0), "no negative wheeling charge booked");
     }
 
     #[test]
