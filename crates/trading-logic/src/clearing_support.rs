@@ -160,6 +160,16 @@ pub(crate) async fn persist_matches(
             }
         };
 
+        // Record the price that actually settles on-chain (the seller's ask), NOT the
+        // discounted CDA landed `match_price`. The intra-zone discount is a crossing
+        // incentive only: the buyer is charged the ask (the pooled escrow moves
+        // `amount * ask` to the seller), so publishing `match_price` here made the
+        // OrderMatched event and order_matches ledger disagree with the wallet — the
+        // explorer showed 0.95 while 1.0 moved. Record `settle_price` so ledger,
+        // event, and on-chain transfer reconcile. (Delivering the discount to the
+        // buyer as a platform subsidy is a separate, unbuilt feature — see the
+        // custodial-accounting investigation; until then the discount does not reduce
+        // what the buyer pays.)
         let matched_event =
             trading_core::events::Event::OrderMatched(trading_core::events::OrderMatchedPayload {
                 match_id,
@@ -167,7 +177,7 @@ pub(crate) async fn persist_matches(
                 buy_order_id: m.buy_order_id,
                 sell_order_id: m.sell_order_id,
                 amount: m.match_amount,
-                price: m.match_price,
+                price: settle_price,
                 buyer_id: m.buyer_id,
                 seller_id: m.seller_id,
                 timestamp: gridtokenx_telemetry::time::now(),
@@ -181,7 +191,7 @@ pub(crate) async fn persist_matches(
                     buy_order_id: m.buy_order_id,
                     sell_order_id: m.sell_order_id,
                     matched_amount: m.match_amount,
-                    match_price: m.match_price,
+                    match_price: settle_price,
                     match_time: gridtokenx_telemetry::time::now(),
                     status: "pending".to_string(),
                 },
