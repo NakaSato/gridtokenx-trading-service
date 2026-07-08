@@ -83,6 +83,18 @@ impl MatchingEngine {
         if buy.user_id == sell.user_id {
             return None;
         }
+
+        // Settlement invariant (option-a, Case 1): the seller is always paid their
+        // full ask, funded from the buyer's escrow, which the buyer posts at their
+        // bid. So the bid MUST cover the ask. A match may clear below the ask only via
+        // the platform-subsidised intra-zone discount (or a sub-unit dynamic
+        // multiplier), which reduces the buyer's payment WITHIN a crossing match — it
+        // must never rescue a sell whose ask exceeds the bid. Such a sell can't settle
+        // without an on-chain platform top-up (buyer escrow < ask, and the on-chain
+        // guard rejects price < ask), so never match it here.
+        if sell.price > buy.price {
+            return None;
+        }
         let sell_zone_id = sell.zone_id;
 
         // Strict topology check for the actual tradeable amount.
@@ -238,31 +250,15 @@ impl MatchingEngine {
                     loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
                 };
 
-                // Range query: all sells in this zone with raw price <= upper bound.
-                // landed_cost = raw_cost * dynamic_multiplier (all zones) * intra-zone
-                // discount (buyer's own zone only). Whenever that combined factor scales
-                // cost DOWN (< 1.0), a sell priced above the raw bid can still cross, so
-                // the prune bound must widen to bid / factor — otherwise the range query
-                // drops it before the discount/multiplier is applied. `priced_candidate`
-                // still does the final landed <= bid check, so widening only over-admits.
-                let mut factor_raw = i128::from(dynamic_multiplier.raw());
-                if sell_zone_id == buy.zone_id {
-                    factor_raw =
-                        factor_raw * i128::from(intra_zone_mult.raw()) / i128::from(FastPrice::FACTOR);
-                }
-                let upper_price = if factor_raw <= 0 {
-                    // zero / misconfigured factor → cost collapses to 0, every sell crosses.
-                    FastPrice::from_raw(i64::MAX)
-                } else if factor_raw < i128::from(FastPrice::FACTOR) {
-                    // cost scaled down → widen to bid / factor. CEIL (inclusive bound) so a
-                    // sell landing exactly at the bid is kept, not dropped one ULP short.
-                    let num = i128::from(buy.price.raw()) * i128::from(FastPrice::FACTOR);
-                    let raw = (num + factor_raw - 1) / factor_raw;
-                    FastPrice::from_raw(i64::try_from(raw).unwrap_or(i64::MAX))
-                } else {
-                    // factor >= 1.0 → cost only rises, raw bid is already a safe upper bound.
-                    buy.price
-                };
+                // Range query: all sells in this zone with raw ask <= the buyer's bid.
+                // `priced_candidate` rejects any sell whose ask exceeds the bid (the
+                // Case-1 settlement invariant), so the bid is the exact, tight upper
+                // bound — no widening for the discount / dynamic multiplier is needed
+                // (they only ever reduce the buyer's payment WITHIN a crossing match,
+                // never rescue an above-bid sell). Fees (wheeling/loss) can still push a
+                // below-bid sell's landed cost over the bid; priced_candidate does that
+                // final landed <= bid check.
+                let upper_price = buy.price;
                 for (_, &sell_idx) in book.range(..=(upper_price, i64::MAX, uuid::Uuid::max())) {
                     if let Some(c) = Self::priced_candidate(
                         buy,
@@ -766,12 +762,15 @@ mod tests {
         );
     }
 
-    /// The zone-book range query is discount-aware for the buyer's own zone: a
-    /// local sell priced ABOVE the bid still crosses when the 5% discount pulls
-    /// its landed cost under the bid. Here sell=1.0, bid=0.96, discounted
-    /// landed=0.95 ≤ 0.96 → it must match and clear at 0.95.
+    /// Settlement invariant (option-a, Case 1): the intra-zone discount must NOT
+    /// rescue a local sell whose ask exceeds the bid. Here sell=1.0 > bid=0.96 in the
+    /// same zone; the discounted landed would be 0.95 ≤ 0.96, but rescuing it would
+    /// clear below the seller's ask with the buyer's escrow (posted at 0.96) unable to
+    /// pay the 1.0 ask — unsettleable without an on-chain platform top-up. So it must
+    /// NOT match. The discount only reduces the buyer's payment within an ask≤bid
+    /// crossing match (see intra_zone_discount_applied).
     #[test]
-    fn intra_zone_discount_rescues_above_bid_sell() {
+    fn intra_zone_discount_does_not_rescue_above_bid_sell() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
@@ -785,8 +784,10 @@ mod tests {
             unit(),
             200,
         );
-        assert_eq!(matches.len(), 1, "discount must rescue the above-bid local sell");
-        assert_eq!(matches[0].match_price, dec!(0.95));
+        assert!(
+            matches.is_empty(),
+            "above-bid sell must not be rescued — the seller's ask can't be paid from the buyer's escrow"
+        );
     }
 
     /// Cross-zone has NO discount, so an above-bid sell in another zone stays
@@ -808,56 +809,6 @@ mod tests {
             200,
         );
         assert!(matches.is_empty(), "no discount across zones → no rescue");
-    }
-
-    /// Regression for the CEIL-division fix at the intra-zone range bound.
-    /// Raw-constructed so `bid / (1 - discount)` is INEXACT: bid = 0.950000001,
-    /// sell = 1.000000002 (FACTOR = 1e9, discount mult = 0.95).
-    /// landed = floor(1.000000002 * 0.95) = 0.950000001 == bid → it crosses.
-    /// floor(bid/0.95) = 1.000000001 would exclude the sell from the range;
-    /// ceil(bid/0.95) = 1.000000002 keeps it. With the ceil fix it must match.
-    #[test]
-    fn intra_zone_range_bound_ceils_at_inexact_boundary() {
-        let buyer = Uuid::new_v4();
-        let seller = Uuid::new_v4();
-        let mut buys = vec![FastOrder {
-            id: Uuid::new_v4(),
-            user_id: buyer,
-            price: FastPrice::from_raw(950_000_001),
-            energy_amount: dec!(10.0),
-            filled_amount: dec!(0.0),
-            zone_id: Some(1),
-            created_at_ns: 100,
-            expires_at_ns: None,
-            time_in_force: TimeInForce::Gtc,
-            metadata_index: 0,
-        }];
-        let mut sells = vec![FastOrder {
-            id: Uuid::new_v4(),
-            user_id: seller,
-            price: FastPrice::from_raw(1_000_000_002),
-            energy_amount: dec!(10.0),
-            filled_amount: dec!(0.0),
-            zone_id: Some(1),
-            created_at_ns: 100,
-            expires_at_ns: None,
-            time_in_force: TimeInForce::Gtc,
-            metadata_index: 0,
-        }];
-        let (matches, _) = MatchingEngine::match_cycle(
-            &mut buys,
-            &mut sells,
-            &meta(1),
-            &meta(1),
-            &NoFeeTopology,
-            unit(),
-            200,
-        );
-        assert_eq!(
-            matches.len(),
-            1,
-            "ceil bound must keep the exact-boundary intra-zone sell"
-        );
     }
 
     /// Overflow must SATURATE, not wrap. Sell price 5e9 (in range of bid 5e9) times
@@ -908,12 +859,13 @@ mod tests {
         );
     }
 
-    /// A dynamic_multiplier below 1.0 lowers landed cost for ALL zones, so the
-    /// range bound must widen by 1/multiplier — otherwise an above-bid sell that
-    /// crosses post-multiplier is pruned. Cross-zone (no intra discount) isolates
-    /// the multiplier's effect: sell 1.5, bid 0.96, multiplier 0.5 → landed 0.75.
+    /// A sub-unit dynamic_multiplier must NOT rescue an above-bid sell either. Even
+    /// though multiplier 0.5 would pull sell=1.5 down to landed 0.75 ≤ bid 0.96, the
+    /// seller's 1.5 ask can't be paid from a 0.96 escrow, so the ask>bid guard rejects
+    /// it before the multiplier is applied — the multiplier only reduces the buyer's
+    /// payment within an ask≤bid crossing match.
     #[test]
-    fn dynamic_multiplier_below_one_widens_bound() {
+    fn dynamic_multiplier_below_one_does_not_rescue_above_bid_sell() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
@@ -927,8 +879,10 @@ mod tests {
             FastPrice::from(dec!(0.5)),
             200,
         );
-        assert_eq!(matches.len(), 1, "multiplier <1 must widen the prune bound");
-        assert_eq!(matches[0].match_price, dec!(0.75), "1.5 * 0.5");
+        assert!(
+            matches.is_empty(),
+            "sub-unit multiplier must not rescue an above-bid sell (unsettleable)"
+        );
     }
 
     /// A zero dynamic_multiplier must NOT collapse clearing prices to 0. Without the

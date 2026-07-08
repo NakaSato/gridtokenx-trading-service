@@ -108,20 +108,14 @@ pub(crate) async fn persist_matches(
         // incentive only, not a payout.
         let settle_price = m.seller_price;
 
-        // A match where the seller's ask exceeds the buyer's bid only crossed
-        // because the discount rescued an above-bid local sell. No price satisfies
-        // `sell_ask <= price <= buy_bid`, so it cannot settle on-chain — record the
-        // ledger row but skip the settlement (no on-chain attempt).
-        let settlement_link = if m.seller_price > m.buyer_price {
-            tracing::warn!(
-                buy_order_id = %m.buy_order_id,
-                sell_order_id = %m.sell_order_id,
-                seller_price = %m.seller_price,
-                buyer_price = %m.buyer_price,
-                "Discount-rescued match (sell_ask > buy_bid): no valid on-chain settle price; recording order_matches without on-chain settlement"
-            );
-            None
-        } else {
+        // The matching engine guarantees the seller's ask never exceeds the buyer's
+        // bid (the Case-1 settlement invariant enforced in `priced_candidate`): a sell
+        // whose ask is above the bid is no longer rescued by the intra-zone discount,
+        // because it could not be settled on-chain (buyer escrow < ask, and the swap
+        // guard rejects price < ask). So every emitted match is settleable at the ask
+        // — there is no rescued (ask > bid) case to skip. Settle at the ask; the
+        // buyer's escrow, posted at the bid (>= ask), covers it.
+        let settlement_link = {
             // Settlement first (order_matches.settlement_id FKs to it). On failure,
             // record the match with a NULL link rather than dropping the ledger row.
             let total_at_ask = m.match_amount * settle_price;
