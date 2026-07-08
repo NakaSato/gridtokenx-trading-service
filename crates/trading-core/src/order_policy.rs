@@ -21,6 +21,10 @@ pub enum OrderPriceError {
     /// Market SELL is unsupported — the matcher would clear it at its OWN ask,
     /// not the best bid, so it can't be priced correctly.
     MarketSellUnsupported,
+    /// Fill-or-kill SELL is unsupported — the buy-driven matcher fills a resting
+    /// sell incrementally across a cycle, so a FOK sell would partially fill and
+    /// then have its remainder cancelled, violating all-or-nothing.
+    FokSellUnsupported,
     /// A market order must be immediate (IOC/FOK); GTC would rest a max-price bid.
     MarketGtc,
     /// A market-buy slippage cap was supplied but is not positive.
@@ -39,6 +43,9 @@ impl OrderPriceError {
         match self {
             Self::MarketSellUnsupported => {
                 "market sell orders are not supported (the matcher prices at the resting ask); submit a limit sell"
+            }
+            Self::FokSellUnsupported => {
+                "fill-or-kill sell orders are not supported (the matcher fills a resting sell incrementally); use gtc or ioc"
             }
             Self::MarketGtc => {
                 "market orders are immediate — use ioc or fok (gtc would rest a max-price bid)"
@@ -72,6 +79,14 @@ pub fn resolve_order_price(
     time_in_force: TimeInForce,
     price_input: Option<Decimal>,
 ) -> Result<Decimal, OrderPriceError> {
+    // Fill-or-kill SELL is unsupported on either order type: the buy-driven CDA
+    // matcher fills a resting sell incrementally across a cycle, so a FOK sell
+    // would partially fill and then have its remainder swept for cancellation —
+    // the opposite of all-or-nothing. The engine enforces FOK on the buy side
+    // only, so reject FOK sells at entry rather than mis-executing them.
+    if matches!(side, OrderSide::Sell) && time_in_force == TimeInForce::Fok {
+        return Err(OrderPriceError::FokSellUnsupported);
+    }
     match order_type {
         OrderType::Market => {
             if matches!(side, OrderSide::Sell) {
@@ -130,6 +145,30 @@ mod tests {
     fn market_sell_rejected() {
         let p = resolve_order_price(OrderType::Market, OrderSide::Sell, TimeInForce::Ioc, None);
         assert_eq!(p, Err(OrderPriceError::MarketSellUnsupported));
+    }
+
+    #[test]
+    fn fok_sell_rejected_limit_and_market() {
+        // Limit FOK sell — rejected regardless of whether a price is supplied.
+        for price in [None, Some(dec!(4.5))] {
+            let p = resolve_order_price(OrderType::Limit, OrderSide::Sell, TimeInForce::Fok, price);
+            assert_eq!(p, Err(OrderPriceError::FokSellUnsupported));
+        }
+        // Market FOK sell — the FOK-sell guard fires before the market-sell arm.
+        let p = resolve_order_price(OrderType::Market, OrderSide::Sell, TimeInForce::Fok, None);
+        assert_eq!(p, Err(OrderPriceError::FokSellUnsupported));
+    }
+
+    #[test]
+    fn fok_buy_and_ioc_sell_still_ok() {
+        // FOK BUY is fine (engine enforces buy-side all-or-nothing).
+        let fok_buy =
+            resolve_order_price(OrderType::Limit, OrderSide::Buy, TimeInForce::Fok, Some(dec!(1.0)));
+        assert_eq!(fok_buy, Ok(dec!(1.0)));
+        // IOC SELL is fine (partial fill + cancel remainder is IOC's contract).
+        let ioc_sell =
+            resolve_order_price(OrderType::Limit, OrderSide::Sell, TimeInForce::Ioc, Some(dec!(0.5)));
+        assert_eq!(ioc_sell, Ok(dec!(0.5)));
     }
 
     #[test]

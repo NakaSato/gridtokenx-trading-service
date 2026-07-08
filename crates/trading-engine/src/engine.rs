@@ -156,6 +156,20 @@ impl MatchingEngine {
         let mut results: Vec<MatchResult> = Vec::new();
         let mut stats = CycleStats::default();
 
+        // Guard a non-positive dynamic_multiplier. `priced_candidate` multiplies the
+        // landed cost by this factor with `checked_mul`, which does NOT overflow on
+        // zero/negative — it just returns 0 (or a negative), collapsing every landed
+        // cost so all sells cross and settle at match_price 0 (sellers deliver energy
+        // for zero payment). A multiplier <= 0 is only ever a misconfigured oracle/
+        // config, never a real price signal, so fall back to 1.0 (no adjustment)
+        // rather than zeroing out clearing prices. The caller is expected to pass a
+        // positive multiplier; this is the last line of defence in the pure engine.
+        let dynamic_multiplier = if dynamic_multiplier.raw() <= 0 {
+            FastPrice::from_raw(FastPrice::FACTOR)
+        } else {
+            dynamic_multiplier
+        };
+
         // 0. Enforce CDA buy-side priority here, in the engine, so correctness does
         // not depend on how the caller pre-sorted: highest bid first (most
         // aggressive buyer wins scarce liquidity), ties broken by earliest arrival
@@ -194,6 +208,14 @@ impl MatchingEngine {
         // the allocation, `drain()` empties it on consume) — avoids a fresh Vec +
         // grow per buy on the hot path.
         let mut candidates: Vec<Candidate> = Vec::new();
+
+        // Per-cycle grid-flow ledger: running committed energy per (sell_zone,
+        // buy_zone) link this cycle. `can_accommodate_flow` is a per-trade check
+        // against an immutable snapshot, so without this, N buyers each passing the
+        // per-trade check independently can oversell one link N-fold. Every committed
+        // match adds to its link's total; each fill is re-checked against the running
+        // total so cumulative flow can never exceed the link rating.
+        let mut committed_flow: BTreeMap<(Option<i32>, Option<i32>), Decimal> = BTreeMap::new();
         for buy in buy_orders.iter_mut() {
             if buy.remaining_amount() < MIN_TRADE_AMOUNT || buy.is_expired(now_ns) {
                 continue;
@@ -274,13 +296,26 @@ impl MatchingEngine {
             // completely. A plain `sum >= size` check is not enough: granular fills
             // can leave a sub-MIN dust remainder that the real loop's MIN break
             // strands, which the immediate sweep then cancels — a partial fill that
-            // violates fill-or-kill. If the simulation leaves anything unfilled,
-            // kill the order (skip matching; the sweep reports it for cancellation).
+            // violates fill-or-kill. The simulation must also mirror the drain's
+            // grid-capacity skip (against a COPY of committed_flow so the real ledger
+            // is untouched) — otherwise a FOK buy could pass a capacity-blind
+            // simulation, then partial-fill in the real drain when a link is full and
+            // get its remainder swept: exactly the partial-fill FOK violates. If the
+            // simulation leaves anything unfilled, kill the order (skip matching; the
+            // sweep reports it for cancellation).
             if buy.time_in_force == TimeInForce::Fok {
                 let mut need = buy.remaining_amount();
+                let mut sim_flow = committed_flow.clone();
                 for c in candidates.iter() {
-                    if let Some(take) = fill_take(need, sell_orders[c.sell_idx].remaining_amount())
-                    {
+                    let sim_sell = &sell_orders[c.sell_idx];
+                    if let Some(take) = fill_take(need, sim_sell.remaining_amount()) {
+                        let key = (sim_sell.zone_id, buy.zone_id);
+                        let already = sim_flow.get(&key).copied().unwrap_or(Decimal::ZERO);
+                        if !topology.can_accommodate_flow(sim_sell.zone_id, buy.zone_id, already + take)
+                        {
+                            continue;
+                        }
+                        *sim_flow.entry(key).or_insert(Decimal::ZERO) += take;
                         need -= take;
                         if need < MIN_TRADE_AMOUNT {
                             break;
@@ -316,6 +351,21 @@ impl MatchingEngine {
                 let Some(match_amount) = fill_take(need, sell.remaining_amount()) else {
                     continue;
                 };
+
+                // Grid-capacity gate (see `committed_flow`): re-check the link with the
+                // running committed total for this (sell_zone, buy_zone) pair PLUS this
+                // fill. If the grid can't carry the aggregate, skip this fill — the sell
+                // stays available for another pair / a later cycle rather than being
+                // over-committed now. Conservative: the topology API is boolean (no
+                // remaining-headroom readout), so a fill that would only partially fit is
+                // skipped whole, not trimmed to the remaining capacity.
+                let flow_key = (sell.zone_id, buy.zone_id);
+                let already = committed_flow.get(&flow_key).copied().unwrap_or(Decimal::ZERO);
+                if !topology.can_accommodate_flow(sell.zone_id, buy.zone_id, already + match_amount)
+                {
+                    continue;
+                }
+
                 let buy_meta_idx = buy.metadata_index;
                 let sell_meta_idx = sell.metadata_index;
 
@@ -348,6 +398,7 @@ impl MatchingEngine {
 
                 buy.filled_amount += match_amount;
                 sell.filled_amount += match_amount;
+                *committed_flow.entry(flow_key).or_insert(Decimal::ZERO) += match_amount;
                 stats.matches_created += 1;
                 stats.total_volume += match_amount;
 
@@ -878,6 +929,144 @@ mod tests {
         );
         assert_eq!(matches.len(), 1, "multiplier <1 must widen the prune bound");
         assert_eq!(matches[0].match_price, dec!(0.75), "1.5 * 0.5");
+    }
+
+    /// A zero dynamic_multiplier must NOT collapse clearing prices to 0. Without the
+    /// guard, `landed.checked_mul(0)` returns 0 for every sell (checked_mul doesn't
+    /// overflow on zero), so all sells cross and settle at match_price 0 — sellers
+    /// deliver energy for zero payment. The guard falls back to 1.0, so the trade
+    /// clears at the real ask.
+    #[test]
+    fn zero_dynamic_multiplier_does_not_zero_clearing_price() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        // Cross-zone (no intra discount) so landed cost == sell price at multiplier 1.0.
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            FastPrice::from(dec!(0)), // adversarial: zero multiplier
+            200,
+        );
+        assert_eq!(matches.len(), 1, "trade must still clear");
+        assert_eq!(
+            matches[0].match_price,
+            dec!(0.5),
+            "zero multiplier must fall back to 1.0, clearing at the real ask — not 0"
+        );
+        assert!(
+            matches[0].total_energy_cost > dec!(0),
+            "seller must be paid, not zeroed out"
+        );
+    }
+
+    /// A negative dynamic_multiplier is likewise clamped to 1.0 rather than producing
+    /// negative clearing prices.
+    #[test]
+    fn negative_dynamic_multiplier_is_clamped() {
+        let buyer = Uuid::new_v4();
+        let seller = Uuid::new_v4();
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let (matches, _) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &NoFeeTopology,
+            FastPrice::from_raw(-1_000_000_000), // adversarial: negative multiplier
+            200,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].match_price, dec!(0.5), "negative multiplier clamped to 1.0");
+    }
+
+    /// Enforces a hard per-link flow cap so the per-cycle capacity ledger can be
+    /// exercised: `can_accommodate_flow` returns true only while `amount <= cap`.
+    struct CapTopology {
+        cap: Decimal,
+    }
+    impl TopologySnapshot for CapTopology {
+        fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, amount: Decimal) -> bool {
+            amount <= self.cap
+        }
+        fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(0))
+        }
+        fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+            FastPrice::from(dec!(1.0))
+        }
+    }
+
+    /// Grid capacity is enforced cumulatively across a cycle. Two buyers each want the
+    /// full 100 kWh link capacity from one large sell, but the link carries only 100 kWh
+    /// total. Without the committed_flow ledger each buyer passes the per-trade
+    /// can_accommodate_flow independently and the engine oversells the link to 200 kWh.
+    /// With it, the higher-priority buyer fills 100 and the second is capacity-blocked.
+    #[test]
+    fn per_cycle_capacity_is_not_oversold() {
+        let seller = Uuid::new_v4();
+        let buyer_a = Uuid::new_v4();
+        let buyer_b = Uuid::new_v4();
+        // One big cross-zone sell (zone 1) — liquidity is NOT the binding constraint.
+        let mut sells = vec![order(seller, dec!(0.5), dec!(200.0), 1, 100, TimeInForce::Gtc, 0)];
+        // Two zone-2 buyers, each wanting 100 kWh. Same bid; A earlier → higher priority.
+        let mut buys = vec![
+            order(buyer_a, dec!(1.0), dec!(100.0), 2, 100, TimeInForce::Gtc, 0),
+            order(buyer_b, dec!(1.0), dec!(100.0), 2, 200, TimeInForce::Gtc, 1),
+        ];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(2),
+            &meta(1),
+            &CapTopology { cap: dec!(100.0) },
+            unit(),
+            300,
+        );
+        assert_eq!(matches.len(), 1, "link carries only one 100 kWh fill, not two");
+        assert_eq!(
+            matches[0].buyer_id, buyer_a,
+            "higher-priority buyer wins the scarce link capacity"
+        );
+        assert_eq!(matches[0].match_amount, dec!(100.0));
+        assert_eq!(
+            stats.total_volume,
+            dec!(100.0),
+            "cumulative flow must not exceed the 100 kWh link rating"
+        );
+    }
+
+    /// A FOK buy that would need more than a link can carry must be killed whole, not
+    /// partially filled. Buyer wants 150 kWh FOK across a 100 kWh-capped link with ample
+    /// liquidity (200 kWh sell). The capacity-aware FOK simulation sees only 100 kWh is
+    /// reachable → kills the order; nothing fills.
+    #[test]
+    fn fok_buy_blocked_by_capacity_is_killed_whole() {
+        let seller = Uuid::new_v4();
+        let buyer = Uuid::new_v4();
+        let mut sells = vec![order(seller, dec!(0.5), dec!(200.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(buyer, dec!(1.0), dec!(150.0), 2, 100, TimeInForce::Fok, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(1),
+            &CapTopology { cap: dec!(100.0) },
+            unit(),
+            200,
+        );
+        assert!(matches.is_empty(), "FOK buy exceeding link capacity must fill nothing");
+        assert_eq!(buys[0].filled_amount, dec!(0.0));
+        assert_eq!(
+            stats.ioc_cancellations,
+            vec![buys[0].id],
+            "killed FOK must be swept for cancellation"
+        );
     }
 
     #[test]
