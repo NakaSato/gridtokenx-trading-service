@@ -6,8 +6,10 @@ use trading_api::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Setup telemetry
-    trading_infra::init_telemetry("trading-service");
+    // 1. Setup telemetry. Bind the guard for the whole process so a graceful
+    // shutdown flushes buffered spans; the service.name matches the gridtokenx-*
+    // convention used by the other services in Tempo.
+    let _telemetry = trading_infra::init_telemetry("gridtokenx-trading");
 
     // Install the Prometheus recorder BEFORE any worker spawns or `record_*` fires —
     // metrics emitted before the global recorder is set go to a no-op sink and are lost.
