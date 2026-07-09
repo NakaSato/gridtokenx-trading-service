@@ -233,6 +233,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", axum::routing::get(health_check))
         .route("/health/ready", axum::routing::get(health_check))
         .route("/metrics", axum::routing::get(metrics_handler))
-        .layer(TraceLayer::new_for_http())
+        // INFO-level request span so traces export to Tempo (the default
+        // make_span is DEBUG and is filtered out under the standard `info` env).
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri().path(),
+                )
+            },
+        ))
         .with_state(state)
 }
