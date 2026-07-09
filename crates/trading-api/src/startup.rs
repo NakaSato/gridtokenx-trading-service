@@ -73,7 +73,7 @@ async fn health_check() -> impl IntoResponse {
 }
 
 async fn metrics_handler() -> impl IntoResponse {
-    (StatusCode::OK, "trading_active_orders 0\n")
+    (StatusCode::OK, trading_infra::metrics::render())
 }
 
 pub fn build_router(state: AppState) -> Router {

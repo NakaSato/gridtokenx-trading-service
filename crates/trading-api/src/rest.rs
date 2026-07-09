@@ -158,6 +158,7 @@ pub async fn submit_order(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
+    let submit_started = std::time::Instant::now();
     tracing::info!("Submit order request: {:?}", req);
 
     let amount = Decimal::from_str(&req.energy_amount_kwh).map_err(|e| {
@@ -339,16 +340,24 @@ pub async fn submit_order(
         created_at: order.created_at,
     });
 
-    state
+    let insert_res = state
         .order_repo
         .insert_order_with_event(&order, &event)
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .await;
+
+    trading_infra::metrics::record_order_submission(
+        &order.order_type.to_string(),
+        &order.side.to_string(),
+        insert_res.is_ok(),
+        submit_started.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    insert_res.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
     Ok(Json(SubmitOrderResponse {
         id: order.id,

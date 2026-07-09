@@ -9,6 +9,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup telemetry
     trading_infra::init_telemetry("trading-service");
 
+    // Install the Prometheus recorder BEFORE any worker spawns or `record_*` fires —
+    // metrics emitted before the global recorder is set go to a no-op sink and are lost.
+    trading_infra::metrics::install_recorder();
+
     // External NTP server (Cloudflare primary, Google fallback) as primary wall-clock
     // source — order/match/settlement timestamps now use agreed time, not a drifting
     // container clock. Background poller; `time::now()` is non-blocking, degrades to OS clock.

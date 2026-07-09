@@ -24,8 +24,13 @@ impl MatcherWorker {
         loop {
             ticker.tick().await;
 
+            let cycle_started = std::time::Instant::now();
             match self.service.run_matching_cycle().await {
                 Ok(count) => {
+                    trading_infra::metrics::record_matching_cycle_result(
+                        cycle_started.elapsed().as_secs_f64() * 1000.0,
+                        count as u64,
+                    );
                     if count > 0 {
                         info!(
                             "Successfully processed matching cycle with {} matches",

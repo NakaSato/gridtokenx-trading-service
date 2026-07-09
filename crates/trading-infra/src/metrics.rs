@@ -8,8 +8,51 @@
 //! - Blockchain operations
 
 use metrics::{counter, gauge, histogram};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
+use std::sync::OnceLock;
 use std::time::Instant;
+
+/// Process-global Prometheus handle. Set once by [`install_recorder`]; read by
+/// [`render`] to serve `/metrics`.
+static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
+/// Install the global Prometheus recorder.
+///
+/// Must be called **once, at startup, before any `record_*`/`counter!` emission**:
+/// metrics emitted before a recorder is installed go to the no-op recorder and are
+/// lost forever. Idempotent — a second call is a no-op. Non-fatal on failure
+/// (metrics degrade to empty) so a recorder problem never takes down the service.
+pub fn install_recorder() {
+    if PROMETHEUS_HANDLE.get().is_some() {
+        return;
+    }
+    match PrometheusBuilder::new().install_recorder() {
+        Ok(handle) => {
+            let _ = PROMETHEUS_HANDLE.set(handle);
+        }
+        Err(e) => {
+            tracing::error!("failed to install Prometheus recorder: {e}");
+        }
+    }
+}
+
+/// Render metrics in Prometheus text-exposition format. Empty string if
+/// [`install_recorder`] was never called (or failed).
+pub fn render() -> String {
+    PROMETHEUS_HANDLE
+        .get()
+        .map(PrometheusHandle::render)
+        .unwrap_or_default()
+}
+
+/// Records a completed matching cycle: wall-clock duration and matches produced.
+/// Distinct metric name from [`record_order_match`] to avoid a label-set clash on
+/// `trading_orders_matched_total`.
+pub fn record_matching_cycle_result(duration_ms: f64, matches: u64) {
+    histogram!("trading_matching_cycle_duration_ms").record(duration_ms);
+    counter!("trading_matches_produced_total").increment(matches);
+}
 
 /// Records order submission metrics
 pub fn record_order_submission(order_type: &str, side: &str, success: bool, duration_ms: f64) {
