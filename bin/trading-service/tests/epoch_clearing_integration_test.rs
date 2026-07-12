@@ -14,6 +14,15 @@ use trading_core::traits::OrderRepository;
 use trading_persistence::repositories::PostgresOrderRepository;
 use uuid::Uuid;
 
+/// A unique, positive `epoch_number` derived from the row's own UUID. The column
+/// is UNIQUE; sourcing it from a wall-clock timestamp (as before) let two tests
+/// running in parallel pick the same base nanos and collide (23505). A random
+/// UUID gives per-row uniqueness with no clock dependency.
+fn epoch_number_for(id: Uuid) -> i64 {
+    let bytes: [u8; 8] = id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes");
+    (i64::from_be_bytes(bytes) & i64::MAX).max(1)
+}
+
 #[tokio::test]
 async fn test_epoch_clearing_lifecycle_e2e() {
     let db_url = std::env::var("DATABASE_URL")
@@ -28,10 +37,8 @@ async fn test_epoch_clearing_lifecycle_e2e() {
     let now = Utc::now();
     let past = now - Duration::minutes(20);
     let future = now + Duration::minutes(20);
-    // Unique epoch_number base (column is UNIQUE) — offset per row.
-    let base = now.timestamp_nanos_opt().unwrap_or(0);
 
-    let insert = |id: Uuid, num_off: i64, status: &'static str, end: chrono::DateTime<Utc>| {
+    let insert = |id: Uuid, status: &'static str, end: chrono::DateTime<Utc>| {
         let pool = pool.clone();
         async move {
             sqlx::query(
@@ -39,7 +46,7 @@ async fn test_epoch_clearing_lifecycle_e2e() {
                  VALUES ($1, $2, $3, $4, $5::epoch_status)",
             )
             .bind(id)
-            .bind(base + num_off)
+            .bind(epoch_number_for(id))
             .bind(end - Duration::minutes(15))
             .bind(end)
             .bind(status)
@@ -52,9 +59,9 @@ async fn test_epoch_clearing_lifecycle_e2e() {
     // E1: active + window elapsed → due. E2: active but future → not due.
     // E3: already cleared → not due.
     let (e1, e2, e3) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-    insert(e1, 0, "active", past).await;
-    insert(e2, 1, "active", future).await;
-    insert(e3, 2, "cleared", past).await;
+    insert(e1, "active", past).await;
+    insert(e2, "active", future).await;
+    insert(e3, "cleared", past).await;
 
     let repo = PostgresOrderRepository::new(pool.clone());
 
@@ -130,9 +137,8 @@ async fn test_list_recent_cleared_epochs_e2e() {
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let now = Utc::now();
-    let base = now.timestamp_nanos_opt().unwrap_or(0);
 
-    let insert = |id: Uuid, off: i64, end: chrono::DateTime<Utc>| {
+    let insert = |id: Uuid, end: chrono::DateTime<Utc>| {
         let pool = pool.clone();
         async move {
             sqlx::query(
@@ -140,7 +146,7 @@ async fn test_list_recent_cleared_epochs_e2e() {
                  VALUES ($1, $2, $3, $4, 'active'::epoch_status)",
             )
             .bind(id)
-            .bind(base + off)
+            .bind(epoch_number_for(id))
             .bind(end - Duration::minutes(15))
             .bind(end)
             .execute(&pool)
@@ -152,8 +158,8 @@ async fn test_list_recent_cleared_epochs_e2e() {
     // c1: elapsed, then closed with a summary → must be listed. a1: still active
     // (future) → must NOT be listed.
     let (c1, a1) = (Uuid::new_v4(), Uuid::new_v4());
-    insert(c1, 0, now - Duration::minutes(20)).await;
-    insert(a1, 1, now + Duration::minutes(20)).await;
+    insert(c1, now - Duration::minutes(20)).await;
+    insert(a1, now + Duration::minutes(20)).await;
 
     let repo = PostgresOrderRepository::new(pool.clone());
     repo.mark_epoch_cleared(c1, Some(dec!(1.25)), dec!(42.0), 3)
