@@ -385,6 +385,8 @@ impl MatchingEngine {
                     sell_metadata_index: sell_meta_idx,
                     match_amount,
                     match_price: landed_cost_fp.to_decimal(),
+                    // CDA settles at the seller's ask (see settle_price docs).
+                    settle_price: sell.price.to_decimal(),
                     seller_price: sell.price.to_decimal(),
                     buyer_price: buy.price.to_decimal(),
                     total_energy_cost: match_amount * landed_cost_fp.to_decimal(),

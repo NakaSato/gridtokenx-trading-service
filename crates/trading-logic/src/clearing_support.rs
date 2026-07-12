@@ -98,15 +98,15 @@ pub(crate) async fn persist_matches(
         let match_id = Uuid::new_v4();
         let settlement_id = Uuid::new_v4();
 
-        // On-chain settlement executes at the SELLER'S ASK, not the discounted
-        // landed `match_price`. The intra-zone discount lowers the buyer's landed
-        // cost below the ask to help the trade cross, but the on-chain
-        // `execute_atomic_settlement` enforces `price >= sell_order.price_per_kwh`
-        // (seller protection) — so settling at the discounted price always fails
-        // (Custom 6024 SlippageExceeded). Settle at the ask: the seller is made
-        // whole and the guard holds. The discount stays a matching/crossing
-        // incentive only, not a payout.
-        let settle_price = m.seller_price;
+        // The price the trade settles/records at, chosen by the producing engine
+        // (`MatchResult::settle_price`): the seller's ask for CDA, the uniform
+        // clearing price `p_star` for the interval auction. Both are
+        // `>= sell_order.price_per_kwh`, so the on-chain
+        // `execute_atomic_settlement` guard (`price >= ask`, Custom 6024
+        // SlippageExceeded otherwise) holds. The CDA intra-zone discount lowers the
+        // buyer's landed `match_price` below the ask to help a trade cross, but it
+        // is a crossing incentive only — never what settles.
+        let settle_price = m.settle_price;
 
         // The matching engine guarantees the seller's ask never exceeds the buyer's
         // bid (the Case-1 settlement invariant enforced in `priced_candidate`): a sell

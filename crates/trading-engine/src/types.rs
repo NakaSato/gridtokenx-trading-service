@@ -56,9 +56,19 @@ pub struct MatchResult {
     pub sell_metadata_index: usize,
     pub match_amount: Decimal,
     pub match_price: Decimal,
+    /// The price the trade actually settles/records at — what `persist_matches`
+    /// writes to the settlement, `order_matches` ledger, and `OrderMatched` event.
+    /// The two markets differ, so each engine sets it explicitly:
+    /// - **CDA** (`engine.rs`): the seller's **ask**. The intra-zone discount pulls
+    ///   `match_price` (landed cost) below the ask, but on-chain settlement moves
+    ///   `amount * ask` from escrow to the seller, so the ask is what reconciles.
+    /// - **Uniform auction** (`uniform_auction.rs`): the **clearing price** `p_star`.
+    ///   It is `>= ask`, so the on-chain `price >= sell_ask` guard still holds and
+    ///   the seller receives the auction outcome, not just the ask.
+    pub settle_price: Decimal,
     /// Seller's limit (ask) price. The intra-zone discount can pull `match_price`
-    /// (the buyer's landed cost) below this; on-chain settlement executes at the
-    /// seller's ask (seller made whole), so the on-chain `price >= sell_ask` guard
+    /// (the buyer's landed cost) below this; on-chain settlement executes at
+    /// [`Self::settle_price`] (`>= ask`), so the on-chain `price >= sell_ask` guard
     /// holds. See `clearing_support::persist_matches`.
     pub seller_price: Decimal,
     /// Buyer's limit (bid) price. When `seller_price > buyer_price` the match only
