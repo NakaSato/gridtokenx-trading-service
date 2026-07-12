@@ -38,6 +38,10 @@ async fn test_api_routing_e2e() {
     std::env::set_var("SOLANA_RPC_URL", "http://localhost:8899");
     std::env::set_var("SOLANA_WS_URL", "ws://localhost:8900");
 
+    // Install the Prometheus recorder so /metrics renders emitted metrics
+    // (mirrors main.rs; without it render() returns an empty string).
+    trading_infra::metrics::install_recorder();
+
     let config = std::sync::Arc::new(trading_core::config::Config::from_env().expect("Failed to load config"));
 
     // 3. Build system components (with real DB and Redis connection, no mock repositories)
@@ -96,8 +100,44 @@ async fn test_api_routing_e2e() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let metrics_str = std::str::from_utf8(&body).unwrap();
-    assert!(metrics_str.contains("trading_active_orders"));
+    // The recorder only renders metrics after their first emission, so at this
+    // point the body just has to be valid text; content is asserted at step 12b
+    // once an order submission has emitted trading_orders_submitted_total.
+    std::str::from_utf8(&body).unwrap();
+
+    // 6b. Test Case 2b: GET /api-docs/openapi.json + /docs (Public, OpenAPI)
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api-docs/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(spec["paths"]["/api/v1/orders"].is_object());
+    assert!(spec["paths"]["/health"].is_object());
+
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/docs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // SwaggerUi serves the page at /docs (or redirects to /docs/).
+    assert!(
+        response.status() == StatusCode::OK || response.status().is_redirection(),
+        "unexpected /docs status: {}",
+        response.status()
+    );
 
     // 7. Test Case 3: POST /api/v1/orders (Fails: Missing Auth/Role Headers)
     let payload = json!({
@@ -239,6 +279,26 @@ async fn test_api_routing_e2e() {
     let cancel_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(cancel_resp["status"], "cancelled");
     assert_eq!(cancel_resp["order_id"], order_id_str);
+
+    // 12b. Test Case 7b: GET /metrics now carries the submission counter emitted
+    // by the successful POST /api/v1/orders above.
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let metrics_str = std::str::from_utf8(&body).unwrap();
+    assert!(
+        metrics_str.contains("trading_orders_submitted_total"),
+        "submission counter missing from /metrics"
+    );
 
     // 13. Teardown Database
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();

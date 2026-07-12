@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::info;
+use utoipa::{IntoParams, ToSchema};
 use trading_core::models::{
     NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder, Settlement,
     SettlementStats, TradingOrder,
@@ -22,7 +23,7 @@ use trading_core::types::{
 };
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitOrderRequest {
     pub side: String,
     pub order_type: String,
@@ -41,14 +42,14 @@ pub struct SubmitOrderRequest {
     pub market_segment: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SubmitOrderResponse {
     pub id: Uuid,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OrderBookResponse {
     pub zone_id: i32,
     pub last_update_id: u64,
@@ -56,20 +57,20 @@ pub struct OrderBookResponse {
     pub bids: Vec<[String; 2]>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct ListOrdersParams {
     pub status: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ListOrdersResponse {
     pub data: Vec<OrderData>,
     pub pagination: Pagination,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OrderData {
     pub id: Uuid,
     pub zone_id: i32,
@@ -107,14 +108,14 @@ impl OrderData {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Pagination {
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct QuoteRequest {
     pub buyer_zone_id: i32,
     pub seller_zone_id: i32,
@@ -122,7 +123,7 @@ pub struct QuoteRequest {
     pub agreed_price: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QuoteResponse {
     pub quote_id: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
@@ -130,7 +131,7 @@ pub struct QuoteResponse {
     pub grid_metrics: GridMetrics,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QuoteBreakdown {
     pub energy_cost: String,
     pub wheeling_charge: String,
@@ -138,7 +139,7 @@ pub struct QuoteBreakdown {
     pub total_cost: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct GridMetrics {
     pub effective_energy_kwh: String,
     pub loss_factor: String,
@@ -149,6 +150,21 @@ pub struct GridMetrics {
 use crate::auth::UserContext;
 use gridtokenx_blockchain_core::auth::ServiceRole;
 
+/// Submit a spot order (limit or market) into the CDA or interval market.
+#[utoipa::path(
+    post,
+    path = "/api/v1/orders",
+    tag = "orders",
+    request_body = SubmitOrderRequest,
+    responses(
+        (status = 200, description = "Order accepted (status `open`)", body = SubmitOrderResponse),
+        (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination", body = String),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database or epoch resolution error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn submit_order(
     role: ServiceRole,
     user: UserContext,
@@ -366,6 +382,19 @@ pub async fn submit_order(
     }))
 }
 
+/// Zone order book: remaining energy aggregated by price level.
+#[utoipa::path(
+    get,
+    path = "/api/v1/zones/{zone_id}/book",
+    tag = "orders",
+    params(("zone_id" = i32, Path, description = "Grid zone id")),
+    responses(
+        (status = 200, description = "Price-level book; asks ascend, bids descend; entries are [price, amount] decimal strings", body = OrderBookResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_order_book(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -418,6 +447,20 @@ pub async fn get_order_book(
     }))
 }
 
+/// List the authenticated user's orders (optionally filtered by status).
+#[utoipa::path(
+    get,
+    path = "/api/v1/orders",
+    tag = "orders",
+    params(ListOrdersParams),
+    responses(
+        (status = 200, description = "Page of the user's orders (status filter applies after pagination)", body = ListOrdersResponse),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn list_orders(
     role: ServiceRole,
     user: UserContext,
@@ -467,6 +510,21 @@ pub async fn list_orders(
     }))
 }
 
+/// Fetch one order. Non-admin callers only see their own orders (404 otherwise).
+#[utoipa::path(
+    get,
+    path = "/api/v1/orders/{id}",
+    tag = "orders",
+    params(("id" = Uuid, Path, description = "Order id")),
+    responses(
+        (status = 200, description = "The order", body = OrderData),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_order_by_id(
     role: ServiceRole,
     user: UserContext,
@@ -504,6 +562,20 @@ pub async fn get_order_by_id(
     Ok(Json(OrderData::from_order(&order)))
 }
 
+/// Cancel an order owned by the authenticated user.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/orders/{id}",
+    tag = "orders",
+    params(("id" = Uuid, Path, description = "Order id")),
+    responses(
+        (status = 200, description = "`{\"status\": \"cancelled\", \"order_id\": ...}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn cancel_order(
     role: ServiceRole,
     user: UserContext,
@@ -530,6 +602,18 @@ pub async fn cancel_order(
     })))
 }
 
+/// Price quote with wheeling/loss breakdown. Currently returns MOCK data.
+#[utoipa::path(
+    post,
+    path = "/api/v1/quotes",
+    tag = "quotes",
+    request_body = QuoteRequest,
+    responses(
+        (status = 200, description = "Quote (mock values; request body currently unused)", body = QuoteResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn create_quote(
     role: ServiceRole,
     Json(_req): Json<QuoteRequest>,
@@ -556,7 +640,7 @@ pub async fn create_quote(
     }))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MarketStatsResponse {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub total_volume_24h_kwh: String,
@@ -566,6 +650,17 @@ pub struct MarketStatsResponse {
     pub renewable_ratio: String,
 }
 
+/// 24h market statistics. Currently returns MOCK data.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Market stats (mock values)", body = MarketStatsResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_market_stats(
     role: ServiceRole,
 ) -> Result<Json<MarketStatsResponse>, (axum::http::StatusCode, String)> {
@@ -585,6 +680,18 @@ pub async fn get_market_stats(
 // Futures Mock Handlers
 // =============================================================================
 
+/// List futures products.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/products",
+    tag = "futures",
+    responses(
+        (status = 200, description = "All futures products", body = Vec<trading_core::models::FuturesProduct>),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_futures_products(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -602,7 +709,7 @@ pub async fn get_futures_products(
     Ok(Json(products))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateFuturesOrderRequest {
     pub product_id: String,
     pub side: String,
@@ -612,6 +719,18 @@ pub struct CreateFuturesOrderRequest {
     pub leverage: u32,
 }
 
+/// Create a futures order. STUB — body accepted but ignored; response is mock.
+#[utoipa::path(
+    post,
+    path = "/api/v1/futures/orders",
+    tag = "futures",
+    request_body = CreateFuturesOrderRequest,
+    responses(
+        (status = 200, description = "`{\"order_id\": ..., \"status\": \"open\"}` (mock)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn create_futures_order(
     role: ServiceRole,
     Json(_req): Json<CreateFuturesOrderRequest>,
@@ -624,6 +743,19 @@ pub async fn create_futures_order(
     })))
 }
 
+/// List the authenticated user's futures positions.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/positions",
+    tag = "futures",
+    responses(
+        (status = 200, description = "User's futures positions", body = Vec<trading_core::models::FuturesPosition>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_futures_positions(
     role: ServiceRole,
     user: UserContext,
@@ -646,6 +778,19 @@ pub async fn get_futures_positions(
     Ok(Json(positions))
 }
 
+/// List the authenticated user's futures orders.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/orders",
+    tag = "futures",
+    responses(
+        (status = 200, description = "User's futures orders", body = Vec<trading_core::models::FuturesOrder>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_futures_orders(
     role: ServiceRole,
     user: UserContext,
@@ -668,6 +813,20 @@ pub async fn get_futures_orders(
     Ok(Json(orders))
 }
 
+/// Close a futures position by id.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/futures/positions/{id}",
+    tag = "futures",
+    params(("id" = Uuid, Path, description = "Position id")),
+    responses(
+        (status = 200, description = "`{\"status\": \"closed\", \"position_id\": ...}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn close_futures_position(
     role: ServiceRole,
     _user: UserContext,
@@ -690,6 +849,17 @@ pub async fn close_futures_position(
     })))
 }
 
+/// Futures candles. STUB — always returns an empty array.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/candles",
+    tag = "futures",
+    responses(
+        (status = 200, description = "Empty array (stub)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_futures_candles(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -698,6 +868,17 @@ pub async fn get_futures_candles(
     Ok(Json(serde_json::json!([])))
 }
 
+/// Futures order book. STUB — always returns empty asks/bids.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/book",
+    tag = "futures",
+    responses(
+        (status = 200, description = "`{\"asks\": [], \"bids\": []}` (stub)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_futures_order_book(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -713,6 +894,20 @@ pub async fn get_futures_order_book(
 // User Data Handlers (Modernized)
 // =============================================================================
 
+/// GRID token balance for a wallet address (via Chain Bridge).
+#[utoipa::path(
+    get,
+    path = "/api/v1/wallets/{address}/balance",
+    tag = "wallets",
+    params(("address" = String, Path, description = "Solana wallet address")),
+    responses(
+        (status = 200, description = "Token balance (decimal string + raw), mint and decimals", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Blockchain error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_wallet_balance(
     role: ServiceRole,
     _user: UserContext,
@@ -746,6 +941,19 @@ pub async fn get_wallet_balance(
     })))
 }
 
+/// Aggregate trading analytics for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/api/v1/analytics/stats",
+    tag = "analytics",
+    responses(
+        (status = 200, description = "User trading analytics", body = trading_core::models::UserAnalytics),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_user_analytics_stats(
     role: ServiceRole,
     user: UserContext,
@@ -768,6 +976,17 @@ pub async fn get_user_analytics_stats(
     Ok(Json(stats))
 }
 
+/// Analytics history. STUB — always returns `{"history": []}`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/analytics/history",
+    tag = "analytics",
+    responses(
+        (status = 200, description = "`{\"history\": []}` (stub)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_user_analytics_history(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -779,6 +998,19 @@ pub async fn get_user_analytics_history(
     })))
 }
 
+/// Transaction history for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/api/v1/transactions",
+    tag = "analytics",
+    responses(
+        (status = 200, description = "User's transactions", body = Vec<trading_core::models::TransactionData>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_user_transactions(
     role: ServiceRole,
     user: UserContext,
@@ -805,6 +1037,19 @@ pub async fn get_user_transactions(
 // Carbon / ESG Handlers (Modernized)
 // =============================================================================
 
+/// Carbon credit balance for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/api/v1/carbon/balance",
+    tag = "carbon",
+    responses(
+        (status = 200, description = "Total/available/retired credits (decimal strings; retired always \"0.0\")", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_carbon_balance(
     role: ServiceRole,
     user: UserContext,
@@ -832,6 +1077,19 @@ pub async fn get_carbon_balance(
     })))
 }
 
+/// Carbon credit history for the authenticated user.
+#[utoipa::path(
+    get,
+    path = "/api/v1/carbon/history",
+    tag = "carbon",
+    responses(
+        (status = 200, description = "User's carbon credits", body = Vec<trading_core::models::CarbonCredit>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_carbon_history(
     role: ServiceRole,
     user: UserContext,
@@ -854,6 +1112,17 @@ pub async fn get_carbon_history(
     Ok(Json(history))
 }
 
+/// Carbon transactions. STUB — always returns an empty array.
+#[utoipa::path(
+    get,
+    path = "/api/v1/carbon/transactions",
+    tag = "carbon",
+    responses(
+        (status = 200, description = "Empty array (stub)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_carbon_transactions(
     role: ServiceRole,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
@@ -863,6 +1132,18 @@ pub async fn get_carbon_transactions(
     Ok(Json(serde_json::json!([])))
 }
 
+/// Transfer carbon credits. STUB — body accepted but ignored; response is mock.
+#[utoipa::path(
+    post,
+    path = "/api/v1/carbon/transfers",
+    tag = "carbon",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "`{\"transaction_id\": ..., \"status\": \"pending\"}` (mock)", body = serde_json::Value),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn transfer_carbon_credits(
     role: ServiceRole,
     Json(_req): Json<serde_json::Value>,
@@ -884,7 +1165,7 @@ fn dec_f64(d: Decimal) -> f64 {
     d.to_f64().unwrap_or(0.0)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MarketConfigResponse {
     pub base_price_thb_kwh: f64,
     pub grid_import_price_thb_kwh: f64,
@@ -894,7 +1175,7 @@ pub struct MarketConfigResponse {
     pub max_price_per_kwh: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct P2PMarketPricesResponse {
     pub base_price_thb_kwh: f64,
     pub grid_import_price_thb_kwh: f64,
@@ -904,13 +1185,13 @@ pub struct P2PMarketPricesResponse {
     pub loss_factors: HashMap<String, f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PriceRange {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MatchingStatusResponse {
     pub pending_buy_orders: usize,
     pub pending_sell_orders: usize,
@@ -921,7 +1202,17 @@ pub struct MatchingStatusResponse {
     pub match_reason: String,
 }
 
-/// GET /api/v1/markets/config — static market pricing parameters.
+/// Static market pricing parameters. NOTE: real JSON floats, not decimal strings.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/config",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Market pricing config", body = MarketConfigResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_market_config(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -940,7 +1231,17 @@ pub async fn get_market_config(
     }))
 }
 
-/// GET /api/v1/markets/p2p/market-prices — P2P pricing + wheeling/loss schedules.
+/// P2P pricing + wheeling/loss schedules. NOTE: real JSON floats, not decimal strings.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/p2p/market-prices",
+    tag = "markets",
+    responses(
+        (status = 200, description = "P2P prices with intra/cross-zone wheeling charges and loss factors", body = P2PMarketPricesResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_p2p_market_prices(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -966,7 +1267,18 @@ pub async fn get_p2p_market_prices(
     }))
 }
 
-/// GET /api/v1/markets/matching-status — live order-book crossing summary.
+/// Live order-book crossing summary (expired-but-unreaped orders excluded).
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/matching-status",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Pending counts, price ranges, crossability", body = MatchingStatusResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_matching_status(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -1059,7 +1371,7 @@ fn build_matching_status(
 // Markets — Settlement Stats + P2P Order Book (Phase 2, read-only)
 // =============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SettlementStatsResponse {
     pub pending_count: i64,
     pub processing_count: i64,
@@ -1068,7 +1380,7 @@ pub struct SettlementStatsResponse {
     pub total_settled_value: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct P2POrderBookResponse {
     pub asks: Vec<[String; 2]>,
     pub bids: Vec<[String; 2]>,
@@ -1112,7 +1424,18 @@ fn build_p2p_orderbook(entries: &[OrderBookEntry]) -> P2POrderBookResponse {
     }
 }
 
-/// GET /api/v1/markets/settlement-stats — settlement counts by status.
+/// Settlement counts by status.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/settlement-stats",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Settlement pipeline counters", body = SettlementStatsResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_settlement_stats(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -1129,7 +1452,7 @@ pub async fn get_settlement_stats(
     Ok(Json(build_settlement_stats_response(&stats)))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct ClearingEpochsQuery {
     /// Max rows (default 20, clamped to 1..=100).
     pub limit: Option<i64>,
@@ -1137,7 +1460,7 @@ pub struct ClearingEpochsQuery {
 
 /// One uniform-price clearing result. Decimal fields are stringified to avoid
 /// float drift, matching the trade/stats responses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClearingEpochResponse {
     pub epoch_id: Uuid,
     pub epoch_number: i64,
@@ -1150,8 +1473,19 @@ pub struct ClearingEpochResponse {
     pub matched_orders: Option<i64>,
 }
 
-/// GET /api/v1/markets/clearing-epochs — recent uniform-price (Interval) clearing
-/// results, newest first.
+/// Recent uniform-price (Interval) clearing results, newest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/clearing-epochs",
+    tag = "markets",
+    params(ClearingEpochsQuery),
+    responses(
+        (status = 200, description = "Cleared epochs (decimal fields as strings)", body = Vec<ClearingEpochResponse>),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_clearing_epochs(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -1189,7 +1523,18 @@ pub async fn get_clearing_epochs(
     Ok(Json(out))
 }
 
-/// GET /api/v1/markets/orderbook — cross-zone P2P aggregate order book.
+/// Cross-zone P2P aggregate order book.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/orderbook",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Aggregate book; entries are [price, amount] decimal strings", body = P2POrderBookResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_p2p_orderbook(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -1215,7 +1560,7 @@ pub async fn get_p2p_orderbook(
 // total, fees and zones. Always scoped to the authenticated user (buyer OR
 // seller); `role`/`counterparty_id` are computed relative to that user.
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct TradesQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -1227,7 +1572,7 @@ pub struct TradesQuery {
 /// `role`/`counterparty_id`, `executed_at`) plus aliases consumed by
 /// `getTradeHistory` (`buyer_id`, `seller_id`, `energy_amount`,
 /// `price_per_kwh`, `fee_amount`, `transaction_hash`, `created_at`).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TradeRecordResponse {
     pub id: Uuid,
     pub buyer_id: Uuid,
@@ -1253,7 +1598,7 @@ pub struct TradeRecordResponse {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TradesListResponse {
     pub trades: Vec<TradeRecordResponse>,
     /// `getTrades` (TradeHistory) reads `total_count`.
@@ -1353,7 +1698,20 @@ fn trades_to_csv(records: &[TradeRecordResponse]) -> String {
     out
 }
 
-/// GET /api/v1/trades — authenticated user's trade history (newest first).
+/// Authenticated user's trade history (newest first). A trade = a settlement row.
+#[utoipa::path(
+    get,
+    path = "/api/v1/trades",
+    tag = "trades",
+    params(TradesQuery),
+    responses(
+        (status = 200, description = "Page of trades scoped to the user (buyer or seller)", body = TradesListResponse),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_trades(
     role: ServiceRole,
     user: UserContext,
@@ -1380,7 +1738,20 @@ pub async fn get_trades(
     Ok(Json(build_trades_response(&settlements, total, user.user_id)))
 }
 
-/// GET /api/v1/trades/export — same data as CSV (or JSON via `?format=json`).
+/// Export trade history as CSV (default) or JSON (`?format=json`).
+#[utoipa::path(
+    get,
+    path = "/api/v1/trades/export",
+    tag = "trades",
+    params(TradesQuery),
+    responses(
+        (status = 200, description = "CSV attachment `trades.csv`, or a JSON array of trades when format=json", content_type = "text/csv", body = String),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn export_trades(
     role: ServiceRole,
     user: UserContext,
@@ -1431,7 +1802,7 @@ pub async fn export_trades(
 
 /// POST body for creating a price alert. Frontend sends `symbol` (no DB column —
 /// stored in `note`), `target_price` (string decimal), `condition` (above/below).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePriceAlertRequest {
     pub symbol: Option<String>,
     pub target_price: String,
@@ -1440,7 +1811,7 @@ pub struct CreatePriceAlertRequest {
 
 /// Wire shape matching frontend `PriceAlert` (`types/features.ts`): `symbol`
 /// echoed from `note`, `is_active` derived from status, decimals as strings.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PriceAlertResponse {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -1465,7 +1836,21 @@ pub fn build_price_alert_response(a: &PriceAlert) -> PriceAlertResponse {
     }
 }
 
-/// POST /api/v1/price-alerts — create an alert for the authenticated user.
+/// Create a price alert for the authenticated user.
+#[utoipa::path(
+    post,
+    path = "/api/v1/price-alerts",
+    tag = "price-alerts",
+    request_body = CreatePriceAlertRequest,
+    responses(
+        (status = 200, description = "Created alert", body = PriceAlertResponse),
+        (status = 400, description = "Invalid target_price or condition", body = String),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn create_price_alert(
     role: ServiceRole,
     user: UserContext,
@@ -1518,7 +1903,19 @@ pub async fn create_price_alert(
     Ok(Json(build_price_alert_response(&alert)))
 }
 
-/// GET /api/v1/price-alerts — list the authenticated user's alerts (newest first).
+/// List the authenticated user's price alerts (newest first).
+#[utoipa::path(
+    get,
+    path = "/api/v1/price-alerts",
+    tag = "price-alerts",
+    responses(
+        (status = 200, description = "User's alerts", body = Vec<PriceAlertResponse>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn list_price_alerts(
     role: ServiceRole,
     user: UserContext,
@@ -1541,7 +1938,21 @@ pub async fn list_price_alerts(
     Ok(Json(alerts.iter().map(build_price_alert_response).collect()))
 }
 
-/// DELETE /api/v1/price-alerts/{id} — delete an alert owned by the user.
+/// Delete a price alert owned by the user.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/price-alerts/{id}",
+    tag = "price-alerts",
+    params(("id" = Uuid, Path, description = "Alert id")),
+    responses(
+        (status = 200, description = "`{\"success\": true}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Alert not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn delete_price_alert(
     role: ServiceRole,
     user: UserContext,
@@ -1578,7 +1989,7 @@ pub async fn delete_price_alert(
 /// parsed manually (the workspace `rust_decimal` uses `serde-float`, so a JSON
 /// string would otherwise fail to deserialize). `session_token` is accepted for
 /// forward-compat with auto-trading but not persisted by the CRUD path.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateRecurringRequest {
     pub side: String,
     pub energy_amount: String,
@@ -1595,7 +2006,7 @@ pub struct CreateRecurringRequest {
 /// Wire shape mirroring frontend `RecurringOrder` (`types/features.ts:99`).
 /// Decimals are emitted as strings for an exact contract match (the float
 /// serialization would otherwise drop trailing zeros / vary by locale).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RecurringOrderWire {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -1676,7 +2087,21 @@ fn parse_opt_decimal(
     }
 }
 
-/// POST /api/v1/orders/recurring — create a recurring order for the user.
+/// Create a recurring order for the authenticated user.
+#[utoipa::path(
+    post,
+    path = "/api/v1/orders/recurring",
+    tag = "recurring-orders",
+    request_body = CreateRecurringRequest,
+    responses(
+        (status = 200, description = "Created recurring order", body = RecurringOrderWire),
+        (status = 400, description = "Invalid side/interval/amount/price or interval_value < 1", body = String),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn create_recurring_order(
     role: ServiceRole,
     user: UserContext,
@@ -1742,7 +2167,19 @@ pub async fn create_recurring_order(
     Ok(Json(build_recurring_response(&order)))
 }
 
-/// GET /api/v1/orders/recurring — list the user's recurring orders (newest first).
+/// List the user's recurring orders (newest first).
+#[utoipa::path(
+    get,
+    path = "/api/v1/orders/recurring",
+    tag = "recurring-orders",
+    responses(
+        (status = 200, description = "User's recurring orders", body = Vec<RecurringOrderWire>),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn list_recurring_orders(
     role: ServiceRole,
     user: UserContext,
@@ -1765,7 +2202,21 @@ pub async fn list_recurring_orders(
     Ok(Json(orders.iter().map(build_recurring_response).collect()))
 }
 
-/// GET /api/v1/orders/recurring/{id} — fetch one recurring order owned by the user.
+/// Fetch one recurring order owned by the user.
+#[utoipa::path(
+    get,
+    path = "/api/v1/orders/recurring/{id}",
+    tag = "recurring-orders",
+    params(("id" = Uuid, Path, description = "Recurring order id")),
+    responses(
+        (status = 200, description = "The recurring order", body = RecurringOrderWire),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_recurring_order(
     role: ServiceRole,
     user: UserContext,
@@ -1795,7 +2246,21 @@ pub async fn get_recurring_order(
     }
 }
 
-/// DELETE /api/v1/orders/recurring/{id} — delete a recurring order owned by the user.
+/// Delete a recurring order owned by the user.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/orders/recurring/{id}",
+    tag = "recurring-orders",
+    params(("id" = Uuid, Path, description = "Recurring order id")),
+    responses(
+        (status = 200, description = "`{\"success\": true}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn delete_recurring_order(
     role: ServiceRole,
     user: UserContext,
@@ -1854,7 +2319,21 @@ async fn set_recurring_status_handler(
     }
 }
 
-/// POST /api/v1/orders/recurring/{id}/pause — set status to `paused`.
+/// Pause a recurring order (status → `paused`).
+#[utoipa::path(
+    post,
+    path = "/api/v1/orders/recurring/{id}/pause",
+    tag = "recurring-orders",
+    params(("id" = Uuid, Path, description = "Recurring order id")),
+    responses(
+        (status = 200, description = "`{\"success\": true}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn pause_recurring_order(
     role: ServiceRole,
     user: UserContext,
@@ -1867,7 +2346,21 @@ pub async fn pause_recurring_order(
     set_recurring_status_handler(&state, id, user.user_id, RecurringStatus::Paused).await
 }
 
-/// POST /api/v1/orders/recurring/{id}/resume — set status to `active`.
+/// Resume a paused recurring order (status → `active`).
+#[utoipa::path(
+    post,
+    path = "/api/v1/orders/recurring/{id}/resume",
+    tag = "recurring-orders",
+    params(("id" = Uuid, Path, description = "Recurring order id")),
+    responses(
+        (status = 200, description = "`{\"success\": true}`", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 404, description = "Not found (or owned by another user)", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn resume_recurring_order(
     role: ServiceRole,
     user: UserContext,

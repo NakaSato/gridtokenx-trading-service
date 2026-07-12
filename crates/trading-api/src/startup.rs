@@ -65,19 +65,39 @@ pub async fn run(
     Ok(())
 }
 
-async fn health_check() -> impl IntoResponse {
+/// Liveness/readiness probe. Also served at `/health/ready`.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "system",
+    responses((status = 200, description = "`{\"status\": \"ok\", \"service\": \"trading\"}`", body = serde_json::Value)),
+)]
+pub(crate) async fn health_check() -> impl IntoResponse {
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "ok", "service": "trading"})),
     )
 }
 
-async fn metrics_handler() -> impl IntoResponse {
+/// Prometheus metrics in text exposition format.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    tag = "system",
+    responses((status = 200, description = "Prometheus text format", content_type = "text/plain", body = String)),
+)]
+pub(crate) async fn metrics_handler() -> impl IntoResponse {
     (StatusCode::OK, trading_infra::metrics::render())
 }
 
 pub fn build_router(state: AppState) -> Router {
+    use utoipa::OpenApi;
     Router::new()
+        // OpenAPI: Swagger UI at /docs, raw spec at /api-docs/openapi.json.
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/docs")
+                .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi()),
+        )
         // Spot / Core Orders
         .route(
             "/api/v1/orders",

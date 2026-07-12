@@ -70,7 +70,7 @@ regex.workspace = true
 dotenvy.workspace = true
 rand = "0.8"
 ipnetwork = "0.20"
-utoipa = { version = "4", features = ["chrono", "uuid", "decimal"] }
+utoipa.workspace = true
 
 [lints]
 workspace = true
