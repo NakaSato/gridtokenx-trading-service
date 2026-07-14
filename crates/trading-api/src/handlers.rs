@@ -374,9 +374,63 @@ impl TradingService for TradingGrpcService {
     async fn get_order_book(
         &self,
         _ctx: Context,
-        _req: OwnedView<GetOrderBookRequestView<'static>>,
+        request: OwnedView<GetOrderBookRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
-        Ok((ListOrdersResponse::default(), _ctx))
+        // Zone-partitioned book: active orders for one grid zone, mirroring the
+        // REST `/api/v1/zones/{zone_id}/book` surface (rest.rs get_order_book).
+        let zone_id = request
+            .zone_id
+            .ok_or_else(|| ConnectError::new(ErrorCode::InvalidArgument, "zone_id is required"))?;
+
+        // Optional side filter (buy|sell). Compared as lowercase strings to keep
+        // this independent of OrderSide's trait impls.
+        let side_filter: Option<String> = match request.side.as_deref().map(str::to_lowercase) {
+            None => None,
+            Some(s) if s == "buy" || s == "sell" => Some(s),
+            Some(_) => {
+                return Err(ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    "Invalid side (expected buy|sell)",
+                ))
+            }
+        };
+
+        let entries = self
+            .state
+            .order_repo
+            .get_active_orders_by_zone(zone_id)
+            .await
+            .map_err(|_| ConnectError::new(ErrorCode::Internal, "Database error"))?;
+
+        let orders = entries
+            .into_iter()
+            .filter(|e| match &side_filter {
+                Some(s) => e.side.to_string().to_lowercase() == *s,
+                None => true,
+            })
+            .map(|e| {
+                let mut or = OrderResponse::default();
+                or.id = e.order_id.to_string();
+                or.user_id = e.user_id.to_string();
+                // energy_amount is the remaining (unfilled) quantity; original_amount
+                // is the total the order was placed with.
+                or.energy_amount = e.energy_amount.to_f64().unwrap_or_default();
+                or.price_per_kwh = e.price_per_kwh.to_f64().unwrap_or_default();
+                or.filled_amount = (e.original_amount - e.energy_amount)
+                    .to_f64()
+                    .unwrap_or_default();
+                or.side = e.side.to_string().to_lowercase();
+                or.status = "open".to_string();
+                or.created_at = e.created_at.to_rfc3339();
+                or.zone_id = e.zone_id;
+                or
+            })
+            .collect();
+
+        let mut res = ListOrdersResponse::default();
+        res.orders = orders;
+
+        Ok((res, _ctx))
     }
     async fn list_trades(
         &self,

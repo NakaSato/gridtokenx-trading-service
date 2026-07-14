@@ -122,6 +122,16 @@ impl BlockchainGateway for BlockchainService {
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 
+    async fn get_sol_balance(&self, wallet_address: &str) -> TraitResult<f64> {
+        use std::str::FromStr;
+        let owner = solana_sdk::pubkey::Pubkey::from_str(wallet_address)
+            .map_err(|e| trading_core::error::ApiError::Validation(e.to_string()))?;
+
+        self.get_balance_sol(&owner, false)
+            .await
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+    }
+
     async fn execute_batched_settlements(
         &self,
         settlements: Vec<trading_core::models::Settlement>,

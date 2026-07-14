@@ -1,5 +1,6 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
 use std::sync::Arc;
@@ -337,10 +338,10 @@ impl BlockchainSettlementProvider {
             .blockchain
             .calculate_ata_address_with_program(&platform, &energy_mint, &energy_tp)?;
 
-        let mut instructions = Vec::new();
-        let mut settlement_ids = Vec::new();
+        let mut groups = Vec::new();
 
         for (settlement, buy_order_pda, sell_order_pda, buyer_pubkey, seller_pubkey) in inputs {
+            let mut instructions: Vec<Instruction> = Vec::with_capacity(3);
             // Receiver ATAs (seller gets currency, buyer gets energy). Custodial
             // parties may have none, so create them idempotently in the same tx.
             let TradeAtas {
@@ -408,61 +409,77 @@ impl BlockchainSettlementProvider {
                 .map_err(|e| ApiError::Internal(format!("Failed to build instruction: {}", e)))?;
 
             instructions.push(instruction);
-            settlement_ids.push(settlement.id);
+            groups.push((instructions, settlement.id));
         }
-
-        // Add priority fee if provided
-        if priority_fee > 0 {
-            self.blockchain
-                .add_priority_fee_to_instructions(&mut instructions, "settlement")
-                .await?;
-        }
-
-        let signature = self
-            .blockchain
-            .execute_batched_instructions(&[&platform_authority], instructions)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Batch settlement execution failed: {}", e)))?;
 
         // F3a: gate completion on FINALITY, not the bridge's RPC-accept. A generic submit
         // returns as soon as Chain Bridge accepts the tx (fire-and-forget, slot 0); the tx
-        // may never finalize. Poll until confirmed — if it doesn't land, return Err so the
-        // caller resets the batch for retry instead of marking it Completed (silent loss).
-        // Retry is safe: the on-chain TradeNullifier (F3c) no-ops a replay of a settle that
-        // already landed, so a lost-reply retry cannot double-settle.
+        // may never finalize. Retry is safe: the on-chain TradeNullifier (F3c) no-ops a
+        // replay of a settle that already landed, so a lost-reply retry cannot double-settle.
         let confirm_timeout = std::env::var("SETTLEMENT_CONFIRM_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
-        match self
-            .blockchain
-            .wait_for_confirmation(&signature, confirm_timeout)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(ApiError::Internal(format!(
-                    "settlement batch {signature} not confirmed within {confirm_timeout}s; releasing for retry"
-                )))
+
+        // Each settlement is 3 instructions (~460 raw bytes); a Solana tx caps at 1232 raw
+        // bytes, so packing the whole worker batch into one tx overflows (-32602 "too large").
+        // Chunk settlements across txs — default 2 (~960B/tx); tune via SETTLEMENT_TX_CHUNK.
+        let chunk = std::env::var("SETTLEMENT_TX_CHUNK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(2);
+
+        let mut tx_results = Vec::new();
+        for group in groups.chunks(chunk) {
+            let mut instructions: Vec<Instruction> =
+                group.iter().flat_map(|(ix, _)| ix.iter().cloned()).collect();
+
+            // Add priority fee if provided
+            if priority_fee > 0 {
+                self.blockchain
+                    .add_priority_fee_to_instructions(&mut instructions, "settlement")
+                    .await?;
             }
-            Err(e) => {
-                return Err(ApiError::Internal(format!(
-                    "settlement batch {signature} confirmation check failed: {e}; releasing for retry"
-                )))
+
+            let signature = self
+                .blockchain
+                .execute_batched_instructions(&[&platform_authority], instructions)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(format!("Batch settlement execution failed: {}", e))
+                })?;
+
+            // Poll until confirmed — if it doesn't land, return Err so the caller resets the
+            // batch for retry instead of marking it Completed (silent loss).
+            match self
+                .blockchain
+                .wait_for_confirmation(&signature, confirm_timeout)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(ApiError::Internal(format!(
+                        "settlement batch {signature} not confirmed within {confirm_timeout}s; releasing for retry"
+                    )))
+                }
+                Err(e) => {
+                    return Err(ApiError::Internal(format!(
+                        "settlement batch {signature} confirmation check failed: {e}; releasing for retry"
+                    )))
+                }
+            }
+
+            let slot = self.blockchain.get_slot().await.unwrap_or(0);
+            for (_, id) in group {
+                tx_results.push(SettlementTransaction {
+                    settlement_id: *id,
+                    signature: signature.to_string(),
+                    slot,
+                    confirmation_status: "confirmed".to_string(),
+                });
             }
         }
-
-        let slot = self.blockchain.get_slot().await.unwrap_or(0);
-
-        let tx_results = settlement_ids
-            .into_iter()
-            .map(|id| SettlementTransaction {
-                settlement_id: id,
-                signature: signature.to_string(),
-                slot,
-                confirmation_status: "confirmed".to_string(),
-            })
-            .collect();
 
         Ok(tx_results)
     }

@@ -602,40 +602,100 @@ pub async fn cancel_order(
     })))
 }
 
-/// Price quote with wheeling/loss breakdown. Currently returns MOCK data.
+/// Price quote with wheeling/loss breakdown, computed from the request and the
+/// service market config (`state.config.market`) — the same schedule surfaced by
+/// `/api/v1/markets/p2p/market-prices`.
+///
+/// Model (per kWh, THB):
+/// - `energy_cost   = energy * price`  (price defaults to `base_price` when ≤ 0)
+/// - `wheeling      = energy * wheeling_rate`  (intra- vs cross-zone)
+/// - `loss_fraction = loss_factor - 1`  (config stores 1.01 / 1.03 multipliers)
+/// - `loss_cost     = energy_cost * loss_fraction`
+/// - `effective_kwh = energy * (1 - loss_fraction)`
+/// - `total         = energy_cost + wheeling + loss_cost`
+///
+/// `zone_distance_km` is a 10 km-per-zone-hop heuristic (config carries no grid
+/// topology). `is_grid_compliant` = price within `[min_price, max_price]`.
 #[utoipa::path(
     post,
     path = "/api/v1/quotes",
     tag = "quotes",
     request_body = QuoteRequest,
     responses(
-        (status = 200, description = "Quote (mock values; request body currently unused)", body = QuoteResponse),
+        (status = 200, description = "Computed quote for the requested trade", body = QuoteResponse),
+        (status = 400, description = "Invalid energy amount", body = String),
         (status = 403, description = "Caller role not allowed", body = String),
     ),
     security(("gateway_role" = [])),
 )]
 pub async fn create_quote(
     role: ServiceRole,
-    Json(_req): Json<QuoteRequest>,
+    State(state): State<AppState>,
+    Json(req): Json<QuoteRequest>,
 ) -> Result<Json<QuoteResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
+
+    let m = &state.config.market;
+
+    let energy = Decimal::from_str(req.energy_amount_kwh.trim()).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid energy_amount_kwh: {e}"),
+        )
+    })?;
+    if energy <= Decimal::ZERO {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "energy_amount_kwh must be positive".to_string(),
+        ));
+    }
+
+    // An absent/zero agreed price falls back to the configured base price.
+    let mut price = Decimal::from_str(req.agreed_price.trim()).unwrap_or(Decimal::ZERO);
+    if price <= Decimal::ZERO {
+        price = m.base_price_thb_kwh;
+    }
+
+    let same_zone = req.buyer_zone_id == req.seller_zone_id;
+    let wheeling_rate = if same_zone {
+        m.intra_zone_wheeling_charge
+    } else {
+        m.cross_zone_wheeling_charge
+    };
+    let loss_mult = if same_zone {
+        m.intra_zone_loss_factor
+    } else {
+        m.cross_zone_loss_factor
+    };
+    let loss_fraction = loss_mult - Decimal::ONE;
+
+    let energy_cost = energy * price;
+    let wheeling_charge = energy * wheeling_rate;
+    let loss_cost = energy_cost * loss_fraction;
+    let total_cost = energy_cost + wheeling_charge + loss_cost;
+    let effective_energy = energy * (Decimal::ONE - loss_fraction);
+
+    let zone_gap = (req.buyer_zone_id - req.seller_zone_id).abs();
+    let zone_distance_km = Decimal::from(zone_gap) * Decimal::from(10);
+
+    let is_grid_compliant = price >= m.min_price_per_kwh && price <= m.max_price_per_kwh;
+
     let qid = format!("q_{}", &Uuid::new_v4().to_string()[..8]);
-    // Mock for now to match the redesign spec
     Ok(Json(QuoteResponse {
         quote_id: qid,
         expires_at: gridtokenx_telemetry::time::now() + chrono::Duration::minutes(5),
         breakdown: QuoteBreakdown {
-            energy_cost: "450.00".to_string(),
-            wheeling_charge: "12.50".to_string(),
-            loss_cost: "5.20".to_string(),
-            total_cost: "467.70".to_string(),
+            energy_cost: format!("{:.2}", dec_f64(energy_cost)),
+            wheeling_charge: format!("{:.2}", dec_f64(wheeling_charge)),
+            loss_cost: format!("{:.2}", dec_f64(loss_cost)),
+            total_cost: format!("{:.2}", dec_f64(total_cost)),
         },
         grid_metrics: GridMetrics {
-            effective_energy_kwh: "98.50".to_string(),
-            loss_factor: "0.015".to_string(),
-            zone_distance_km: "15.2".to_string(),
-            is_grid_compliant: true,
+            effective_energy_kwh: format!("{:.4}", dec_f64(effective_energy)),
+            loss_factor: format!("{:.4}", dec_f64(loss_fraction)),
+            zone_distance_km: format!("{:.1}", dec_f64(zone_distance_km)),
+            is_grid_compliant,
         },
     }))
 }
@@ -931,11 +991,21 @@ pub async fn get_wallet_balance(
     let decimals = 9;
     let balance_decimal = Decimal::new(balance_raw as i64, decimals);
 
+    // Native SOL is a best-effort read: a chain hiccup here must not fail the
+    // whole balance call, so fall back to 0.0 and log rather than 500.
+    let balance_sol = match state.blockchain.get_sol_balance(&address).await {
+        Ok(sol) => sol,
+        Err(e) => {
+            tracing::warn!("Failed to read native SOL for {}: {}", address, e);
+            0.0
+        }
+    };
+
     Ok(Json(serde_json::json!({
         "wallet_address": address,
         "token_balance": balance_decimal.to_string(),
         "token_balance_raw": balance_raw,
-        "balance_sol": 0.0, // Should be fetched from blockchain as well if needed
+        "balance_sol": balance_sol,
         "decimals": decimals,
         "token_mint": std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default(),
     })))

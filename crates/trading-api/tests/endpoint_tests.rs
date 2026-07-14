@@ -1740,3 +1740,94 @@ async fn test_market_order_semantics() {
     })).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST, "limit needs a price");
 }
+
+// ── Quote computation ────────────────────────────────────────────────────────
+
+async fn post_quote_json(app: axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let res = request(app, "POST", "/api/v1/quotes", Uuid::new_v4(), Body::from(body.to_string())).await;
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    // 400s return a bare string body, not JSON — tolerate that.
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn create_quote_computes_cross_zone_breakdown_from_config() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    // 100 kWh, Zone 1 -> Zone 2 (cross-zone), agreed ฿4.50.
+    // Default MarketConfig: cross wheeling 0.02/kWh, cross loss factor 1.03.
+    //   energy_cost = 100 * 4.50           = 450.00
+    //   wheeling    = 100 * 0.02           =   2.00
+    //   loss_cost   = 450.00 * 0.03        =  13.50
+    //   total       = 450 + 2 + 13.50      = 465.50
+    //   effective   = 100 * (1 - 0.03)     =  97.0000
+    //   distance    = |1 - 2| * 10         =  10.0
+    let (status, body) = post_quote_json(app, json!({
+        "buyer_zone_id": 1,
+        "seller_zone_id": 2,
+        "energy_amount_kwh": "100",
+        "agreed_price": "4.50"
+    })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["breakdown"]["energy_cost"], "450.00");
+    assert_eq!(body["breakdown"]["wheeling_charge"], "2.00");
+    assert_eq!(body["breakdown"]["loss_cost"], "13.50");
+    assert_eq!(body["breakdown"]["total_cost"], "465.50");
+    assert_eq!(body["grid_metrics"]["effective_energy_kwh"], "97.0000");
+    assert_eq!(body["grid_metrics"]["loss_factor"], "0.0300");
+    assert_eq!(body["grid_metrics"]["zone_distance_km"], "10.0");
+    assert_eq!(body["grid_metrics"]["is_grid_compliant"], true);
+}
+
+#[tokio::test]
+async fn create_quote_same_zone_has_no_wheeling_and_low_loss() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    // Same zone: intra wheeling 0.00, intra loss factor 1.01 (0.01 fraction).
+    //   energy_cost = 10 * 5.00 = 50.00 ; wheeling = 0 ; loss = 50 * 0.01 = 0.50
+    let (status, body) = post_quote_json(app, json!({
+        "buyer_zone_id": 3,
+        "seller_zone_id": 3,
+        "energy_amount_kwh": "10",
+        "agreed_price": "5.00"
+    })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["breakdown"]["energy_cost"], "50.00");
+    assert_eq!(body["breakdown"]["wheeling_charge"], "0.00");
+    assert_eq!(body["breakdown"]["loss_cost"], "0.50");
+    assert_eq!(body["breakdown"]["total_cost"], "50.50");
+    assert_eq!(body["grid_metrics"]["zone_distance_km"], "0.0");
+}
+
+#[tokio::test]
+async fn create_quote_defaults_price_to_base_when_zero() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    // agreed_price "0.00" -> falls back to base_price 4.50 -> energy_cost 10*4.50=45.00
+    let (status, body) = post_quote_json(app, json!({
+        "buyer_zone_id": 1,
+        "seller_zone_id": 1,
+        "energy_amount_kwh": "10",
+        "agreed_price": "0.00"
+    })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["breakdown"]["energy_cost"], "45.00");
+}
+
+#[tokio::test]
+async fn create_quote_rejects_non_positive_energy() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    let (status, _) = post_quote_json(app.clone(), json!({
+        "buyer_zone_id": 1, "seller_zone_id": 2,
+        "energy_amount_kwh": "0", "agreed_price": "4.50"
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "zero energy rejected");
+
+    let (status, _) = post_quote_json(app, json!({
+        "buyer_zone_id": 1, "seller_zone_id": 2,
+        "energy_amount_kwh": "abc", "agreed_price": "4.50"
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "non-numeric energy rejected");
+}

@@ -124,6 +124,50 @@ through an `Arc<dyn BlockchainGateway>` whose concrete impl is `BlockchainServic
 (`trading-infra/src/blockchain/`), which talks to **Chain Bridge** (`CHAIN_BRIDGE_URL`, default
 `http://127.0.0.1:5040`). Supply-sync reads tokenized supply through the same gateway.
 
+### Match → settlement pipeline (end-to-end, verified)
+
+A trade travels two independent worker loops. The matcher persists intent; the settlement drain
+mints it on-chain. Every stage is crash-safe and replay-safe.
+
+**1. Match → persist** — same matcher cycle, every 1s. `MatcherWorker` →
+`MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:28`). The CDA
+engine `MatchingEngine::match_cycle` returns matches (pure, no I/O); `clearing_support::persist_matches`
+(`crates/trading-logic/src/clearing_support.rs:71`) writes **atomically per match**: order fill
+deltas → `PartiallyFilled`/`Filled` (`:214`), a match row (`insert_match_with_event`, status
+pending, `:187`), and a `Settlement` row status `Pending` (`insert_settlement`, `:123`). IOC
+remainders are cancelled last.
+
+**2. Drain loop** — `SettlementWorker`, every 10s, batch 10 (`crates/trading-logic/src/workers/settlement.rs:34`).
+`reclaim_stale_settlements` runs **first** — recovers rows orphaned in `processing` beyond
+`STALE_PROCESSING_SECS` (300s, `settlement.rs:244`; crash between claim and finalize) — then
+`SettlementService::process_pending_settlements` (`settlement.rs:45`).
+
+**3. Claim → on-chain** (`crates/trading-logic/src/settlement.rs`). `get_pending_settlements(limit)`
+then the atomic `claim_settlements_for_processing` flips `Pending → Processing` (`:54`). Concurrent
+workers / RPC get disjoint subsets → no double-mint. `settle_claimed` (`:101`) →
+`blockchain.execute_batched_settlements(claimed)`.
+
+**4. On-chain atomic swap** (`crates/trading-infra/src/blockchain/settlement.rs:266`). Builds **one
+batched tx**: per match a `build_atomic_settlement_instruction` (trading program atomic settlement —
+a **swap, never a mint**). Funds source = platform pooled escrow ATAs (`buyer_currency_escrow`,
+`seller_energy_escrow`); `escrow_authority == market.authority == platform` → single bridge
+signature (`:148-153`). Idempotent create-ATA for seller-currency + buyer-energy receivers. Amounts:
+energy `*1e9`, price/wheeling/loss `*1e6` atomic (`:131`, `:135`, `:138`, `:143`). Per-match id =
+settlement UUID → on-chain `TradeNullifier` (F3c) rejects replay (`:196`, `:405`, `:431`). Submitted
+via `execute_batched_instructions` → Chain Bridge (no direct Solana RPC). **F3a**: gates on
+**finality** — `wait_for_confirmation` (default 30s, `:439`), not bridge RPC-accept; timeout → `Err`.
+
+**5. Finalize** (`settle_claimed`). Minted (in `tx_results`) → `Completed` + tx sig,
+`SettlementProcessed` outbox event, audit log (`:150-181`); oracle-direct settlements (no
+`trade_id`) also get ERC issued. Batch call errored → nothing minted → whole batch
+`reset_settlements_for_retry` back to `Pending` (or `permanently_failed` after
+`MAX_SETTLEMENT_RETRIES = 5`, `:240`) via `:122`. Claimed but absent from results → never minted →
+released for retry (`:225`). **Post-mint DB write fails → does NOT reset to pending** (would
+double-mint); forces the row out of `processing` via a plain status write, logs loud (`:169-193`).
+
+Events ride the transactional outbox (below) → `OutboxWorker` → `EventBus` (Redis always, Kafka if
+`KAFKA_EVENTS_ENABLED`).
+
 ### Transactional outbox for events
 
 Domain events are written to a DB **outbox** in the same transaction as state changes

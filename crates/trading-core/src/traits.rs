@@ -463,6 +463,12 @@ pub trait BlockchainGateway: Send + Sync {
     /// Get on-chain token balance for a user.
     async fn get_token_balance(&self, wallet_address: &str) -> TraitResult<u64>;
 
+    /// Get native SOL balance (in SOL, not lamports) for a wallet address.
+    /// Default returns 0.0 so mock/non-chain gateways need no override.
+    async fn get_sol_balance(&self, _wallet_address: &str) -> TraitResult<f64> {
+        Ok(0.0)
+    }
+
     /// Get on-chain zone configuration (multiplier, etc).
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<crate::models::ZoneConfig>;
 
