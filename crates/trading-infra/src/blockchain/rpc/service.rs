@@ -865,6 +865,11 @@ impl BlockchainService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
 
+        // TODO(db-split): cross-domain READ of IAM `user_wallets`. Phase 1 keeps this
+        // SQL in place; at cutover switch to the Trading-owned local read-model
+        // `iam_wallet_read_model` (fed by IAM `user.wallet.*` NATS events + boot backfill),
+        // e.g. `SELECT wallet_address FROM iam_wallet_read_model WHERE user_id = $1 AND is_primary`.
+        // See migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md.
         let wallet_address: Option<String> = sqlx::query_scalar(
             "SELECT wallet_address FROM user_wallets WHERE user_id = $1 AND is_primary = true",
         )

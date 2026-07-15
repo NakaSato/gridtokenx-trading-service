@@ -545,6 +545,69 @@ pub trait IdentityGateway: Send + Sync {
     ) -> TraitResult<Vec<u8>>;
 }
 
+// ── Read-model records (DB-per-service Phase 1) ──────────────────────────────
+
+/// One row to upsert into the Trading-owned `iam_wallet_read_model` — a local
+/// mirror of the columns of IAM `user_wallets` that Trading needs to resolve a
+/// signer. Fed by IAM wallet NATS events (+ boot backfill).
+#[derive(Debug, Clone)]
+pub struct WalletReadModelRecord {
+    pub user_id: Uuid,
+    pub wallet_address: String,
+    pub is_primary: bool,
+    pub blockchain_registered: bool,
+    pub user_account_pda: Option<String>,
+    pub shard_id: Option<i16>,
+}
+
+/// One row to upsert into the Trading-owned `meter_read_model` — a local mirror
+/// of the columns of metering `meters` that the VPP membership join needs. Fed
+/// by meter NATS events (+ boot backfill). `rated_power_kw` / `rated_capacity_kwh`
+/// have no source on the metering `meters` table and are left NULL.
+#[derive(Debug, Clone)]
+pub struct MeterReadModelRecord {
+    pub serial_number: String,
+    pub meter_id: Uuid,
+    pub user_id: Uuid,
+    pub zone_id: Option<i32>,
+    pub status: Option<String>,
+}
+
+/// Local read-model of IAM `user_wallets` (`iam_wallet_read_model`).
+#[async_trait]
+pub trait WalletReadModelRepository: Send + Sync {
+    /// Upsert a wallet row (last-writer-wins on `updated_at`). When the record
+    /// is marked primary, sibling wallets for the same user are demoted in the
+    /// same transaction so the `(user_id) WHERE is_primary` unique index holds.
+    async fn upsert_wallet(&self, rec: &WalletReadModelRecord) -> TraitResult<()>;
+
+    /// Flip only the primary flag for an existing (user, wallet) pair — an
+    /// UPDATE, not an upsert, so the other mirrored columns are never clobbered
+    /// by a partial primary-changed event. Demotes siblings when promoting.
+    async fn set_wallet_primary(
+        &self,
+        user_id: Uuid,
+        wallet_address: &str,
+        is_primary: bool,
+    ) -> TraitResult<()>;
+
+    /// One-shot boot backfill: snapshot the current `user_wallets` into the
+    /// read-model. Idempotent (`ON CONFLICT DO NOTHING`). Returns rows inserted.
+    async fn backfill_wallets(&self) -> TraitResult<u64>;
+}
+
+/// Local read-model of metering `meters` (`meter_read_model`).
+#[async_trait]
+pub trait MeterReadModelRepository: Send + Sync {
+    /// Upsert a meter row (last-writer-wins on `updated_at`). Leaves
+    /// `rated_power_kw` / `rated_capacity_kwh` untouched (no event source).
+    async fn upsert_meter(&self, rec: &MeterReadModelRecord) -> TraitResult<()>;
+
+    /// One-shot boot backfill: snapshot the current `meters` into the
+    /// read-model. Idempotent (`ON CONFLICT DO NOTHING`). Returns rows inserted.
+    async fn backfill_meters(&self) -> TraitResult<u64>;
+}
+
 /// Virtual Power Plant (VPP) persistence.
 #[async_trait]
 pub trait VppRepository: Send + Sync {

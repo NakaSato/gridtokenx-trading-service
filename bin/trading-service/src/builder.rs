@@ -29,6 +29,10 @@ pub struct Infrastructure {
     pub audit: Arc<dyn AuditLog>,
     pub events: Arc<dyn EventPublisher>,
     pub event_bus: Arc<dyn EventPublisher>,
+    /// Read-model feed worker (DB-per-service Phase 1). `Some` only when
+    /// `TRADING_READMODEL_FEED` is on; `main.rs` spawns it. Boot backfill has
+    /// already run by the time this is populated.
+    pub readmodel_feed_worker: Option<trading_logic::ReadModelFeedWorker>,
 }
 
 /// Container for all domain services
@@ -131,6 +135,36 @@ impl ServiceBuilder {
             trading_infra::events::OutboxPublisher::new(outbox_repo.clone())
         );
 
+        // Read-model feed (DB-per-service Phase 1). OFF unless TRADING_READMODEL_FEED=true;
+        // when off nothing is constructed and no worker spawns (zero behavior change).
+        // When on: build the two read-model repos, run the one-shot boot backfill from
+        // the still-reachable source tables, then hand the worker to main.rs to spawn.
+        let readmodel_feed_worker = if config.readmodel_feed_enabled {
+            let wallet_rm: Arc<dyn WalletReadModelRepository> = Arc::new(
+                trading_persistence::repositories::PgWalletReadModelRepository::new(db_pool.clone()),
+            );
+            let meter_rm: Arc<dyn MeterReadModelRepository> = Arc::new(
+                trading_persistence::repositories::PgMeterReadModelRepository::new(db_pool.clone()),
+            );
+            match wallet_rm.backfill_wallets().await {
+                Ok(n) => tracing::info!("read-model boot backfill: {n} wallet rows"),
+                Err(e) => tracing::error!("read-model wallet backfill failed: {e}"),
+            }
+            match meter_rm.backfill_meters().await {
+                Ok(n) => tracing::info!("read-model boot backfill: {n} meter rows"),
+                Err(e) => tracing::error!("read-model meter backfill failed: {e}"),
+            }
+            Some(trading_logic::ReadModelFeedWorker::new(
+                wallet_rm,
+                meter_rm,
+                config.kafka_bootstrap_servers.clone(),
+                config.readmodel_iam_topic.clone(),
+                config.readmodel_meter_topic.clone(),
+            ))
+        } else {
+            None
+        };
+
         let infra = Infrastructure {
             db: db_pool,
             order_repo: order_repo.clone(),
@@ -148,6 +182,7 @@ impl ServiceBuilder {
             audit: audit.clone(),
             events: events.clone(),
             event_bus: event_bus.clone(),
+            readmodel_feed_worker,
         };
 
         // 2. Services

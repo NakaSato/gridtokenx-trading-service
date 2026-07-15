@@ -153,6 +153,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trigger_worker.run().await;
     });
 
+    // Read-model feed worker (DB-per-service Phase 1). Present only when
+    // TRADING_READMODEL_FEED=true; the boot backfill already ran in the builder.
+    // When the flag is off this is None and nothing spawns (zero behavior change).
+    if let Some(readmodel_worker) = infra.readmodel_feed_worker {
+        tokio::spawn(async move {
+            readmodel_worker.run().await;
+        });
+    }
+
     // 7. Start API Server
     let state = AppState {
         config: config.clone(),

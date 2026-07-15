@@ -45,8 +45,12 @@ impl VppRepository for PostgresVppRepository {
     }
 
     async fn get_member_association(&self, meter_id: &str) -> TraitResult<Option<VppMember>> {
+        // TODO(db-split): cross-domain JOIN to metering `meters`. Phase 1 keeps this SQL;
+        // at cutover replace `LEFT JOIN meters met ON m.meter_id = met.serial_number` with
+        // a JOIN to the Trading-owned `meter_read_model` (fed by meter NATS events + backfill).
+        // See migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md.
         let member = sqlx::query_as::<_, VppMember>(
-            r#"SELECT m.id, m.cluster_id, m.meter_id, m.contribution_weight, 
+            r#"SELECT m.id, m.cluster_id, m.meter_id, m.contribution_weight,
                m.is_active, m.joined_at, met.rated_power_kw, met.rated_capacity_kwh
                FROM vpp_cluster_members m
                LEFT JOIN meters met ON m.meter_id = met.serial_number
@@ -60,8 +64,12 @@ impl VppRepository for PostgresVppRepository {
     }
 
     async fn get_cluster_members(&self, cluster_id: &str) -> TraitResult<Vec<VppMember>> {
+        // TODO(db-split): cross-domain JOIN to metering `meters`. Phase 1 keeps this SQL;
+        // at cutover replace `LEFT JOIN meters met ON m.meter_id = met.serial_number` with
+        // a JOIN to the Trading-owned `meter_read_model` (fed by meter NATS events + backfill).
+        // See migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md.
         let members = sqlx::query_as::<_, VppMember>(
-            r#"SELECT m.id, m.cluster_id, m.meter_id, m.contribution_weight, 
+            r#"SELECT m.id, m.cluster_id, m.meter_id, m.contribution_weight,
                m.is_active, m.joined_at, met.rated_power_kw, met.rated_capacity_kwh
                FROM vpp_cluster_members m
                LEFT JOIN meters met ON m.meter_id = met.serial_number

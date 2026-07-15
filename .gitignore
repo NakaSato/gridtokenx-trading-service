@@ -115,6 +115,9 @@ docker-compose.override.yml
 backups/
 *.sql
 *.dump
+# DB-per-service Phase 1: Trading now owns its schema migrations — keep these
+# tracked despite the blanket *.sql ignore above.
+!migrations/*.sql
 
 # Testing
 coverage/

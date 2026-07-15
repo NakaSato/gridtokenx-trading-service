@@ -44,7 +44,9 @@ impl AuditLogger {
         };
         let created_at = gridtokenx_telemetry::time::now();
 
-        // Use user_activities table (unified schema)
+        // TODO(db-split): cross-domain WRITE to IAM `user_activities`. Phase 1 keeps this SQL;
+        // at cutover repoint to Trading-owned `trading_user_activities`
+        // (migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md).
         sqlx::query(
             r#"
             INSERT INTO user_activities (activity_type, user_id, ip_address, metadata, created_at)
@@ -103,6 +105,8 @@ impl AuditLogger {
             created_at_list.push(now);
         }
 
+        // TODO(db-split): cross-domain WRITE to IAM `user_activities` (batch). Repoint to
+        // Trading-owned `trading_user_activities` at cutover.
         sqlx::query(
             r#"
             INSERT INTO user_activities (activity_type, user_id, ip_address, metadata, created_at)

@@ -43,6 +43,14 @@ pub struct Config {
     /// default: the swap path sends real energy↔currency transfers and must be
     /// validated against a live validator/simnet before being enabled.
     pub trade_settlement_enabled: bool,
+    /// Enable the read-model feed worker (DB-per-service Phase 1): backfill +
+    /// project IAM wallet / metering meter events into the local read-model
+    /// tables. Off by default (zero behavior change when unset).
+    pub readmodel_feed_enabled: bool,
+    /// Kafka topic carrying IAM wallet domain events (default: "user_events").
+    pub readmodel_iam_topic: String,
+    /// Kafka topic carrying metering meter domain events (default: "meter_events").
+    pub readmodel_meter_topic: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +274,14 @@ impl Config {
                     }
                 },
             },
+            readmodel_feed_enabled: env::var("TRADING_READMODEL_FEED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false),
+            readmodel_iam_topic: env::var("READMODEL_IAM_TOPIC")
+                .unwrap_or_else(|_| "user_events".to_string()),
+            readmodel_meter_topic: env::var("READMODEL_METER_TOPIC")
+                .unwrap_or_else(|_| "meter_events".to_string()),
         })
     }
 }
