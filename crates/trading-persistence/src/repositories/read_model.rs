@@ -33,9 +33,22 @@ impl PgWalletReadModelRepository {
     }
 }
 
-/// Last-writer-wins upsert. `updated_at` is stamped `now()` on every write; the
-/// `ON CONFLICT` guard only overwrites when the incoming write is at least as
-/// new as the stored row, so an out-of-order redelivery can never regress state.
+/// Upsert one wallet row.
+///
+/// ORDERING INVARIANT — read carefully: the `ON CONFLICT … WHERE updated_at <=
+/// EXCLUDED.updated_at` clause is **NOT** out-of-order protection. `updated_at` is
+/// stamped `now()` on every write (`VALUES (…, now())`, and `EXCLUDED.updated_at`
+/// is that same `now()`), so the comparison is `now()`-vs-`now()` and always
+/// passes — it can never reject a stale redelivery. Correctness rests entirely on
+/// IAM keying every wallet event by `user_id` (`iam .../event_bus/kafka.rs`
+/// `.key(user_id)`) ⇒ one partition per user ⇒ per-user delivery order is
+/// preserved, including on the boot `earliest` replay (a partition re-delivers a
+/// user's events in produced order, so the FINAL state converges). A transient
+/// wrong-primary window can exist mid-replay, but it self-corrects as the later
+/// events re-apply, and recipient resolution is fail-closed on a missing primary
+/// (`rpc/service.rs::get_user_primary_wallet`). If IAM's per-user keying ever
+/// changes, this needs a real event-time/version guard here AND on
+/// `WALLET_DEMOTE_SIBLINGS` (which is currently unguarded).
 const WALLET_UPSERT: &str = r#"
     INSERT INTO iam_wallet_read_model
         (user_id, wallet_address, is_primary, blockchain_registered,
