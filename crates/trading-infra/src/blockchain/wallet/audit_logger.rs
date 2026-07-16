@@ -117,12 +117,10 @@ impl WalletAuditLogger {
         error_message: Option<String>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
-        // TODO(db-split): cross-domain WRITE to IAM `wallet_audit_log`. Phase 1 keeps this SQL;
-        // at cutover repoint to the Trading-owned `trading_wallet_audit_log`
-        // (migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md).
+        // db-split cutover: Trading-owned wallet-audit table, not IAM's wallet_audit_log.
         let result = sqlx::query(
             r#"
-            INSERT INTO wallet_audit_log
+            INSERT INTO trading_wallet_audit_log
                 (user_id, operation, success, ip_address, user_agent, error_message, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
@@ -172,7 +170,7 @@ impl WalletAuditLogger {
                 error_message,
                 metadata,
                 created_at
-            FROM wallet_audit_log
+            FROM trading_wallet_audit_log
             WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT $2

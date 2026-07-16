@@ -44,12 +44,10 @@ impl AuditLogger {
         };
         let created_at = gridtokenx_telemetry::time::now();
 
-        // TODO(db-split): cross-domain WRITE to IAM `user_activities`. Phase 1 keeps this SQL;
-        // at cutover repoint to Trading-owned `trading_user_activities`
-        // (migrations/20260715000001_trading_phase1_local_models.sql + docs/db-split-phase1.md).
+        // db-split cutover: write to the Trading-owned audit table, not IAM's user_activities.
         sqlx::query(
             r#"
-            INSERT INTO user_activities (activity_type, user_id, ip_address, metadata, created_at)
+            INSERT INTO trading_user_activities (activity_type, user_id, ip_address, metadata, created_at)
             VALUES ($1, $2, $3, $4, $5)
             "#,
         )
@@ -105,11 +103,10 @@ impl AuditLogger {
             created_at_list.push(now);
         }
 
-        // TODO(db-split): cross-domain WRITE to IAM `user_activities` (batch). Repoint to
-        // Trading-owned `trading_user_activities` at cutover.
+        // db-split cutover: Trading-owned audit table (batch).
         sqlx::query(
             r#"
-            INSERT INTO user_activities (activity_type, user_id, ip_address, metadata, created_at)
+            INSERT INTO trading_user_activities (activity_type, user_id, ip_address, metadata, created_at)
             SELECT * FROM UNNEST($1::text[], $2::uuid[], $3::inet[], $4::jsonb[], $5::timestamptz[])
             "#,
         )
@@ -141,7 +138,7 @@ impl AuditLogger {
         let records = sqlx::query_as::<_, AuditEventRecord>(
             r#"
             SELECT id, activity_type as event_type, user_id, ip_address, metadata as event_data, created_at
-            FROM user_activities
+            FROM trading_user_activities
             WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT $2
