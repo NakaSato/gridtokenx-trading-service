@@ -47,7 +47,7 @@ pub struct Config {
     /// project IAM wallet / metering meter events into the local read-model
     /// tables. Off by default (zero behavior change when unset).
     pub readmodel_feed_enabled: bool,
-    /// Kafka topic carrying IAM wallet domain events (default: "user_events").
+    /// Kafka topic carrying IAM wallet domain events (default: "iam.user.events").
     pub readmodel_iam_topic: String,
     /// Kafka topic carrying metering meter domain events (default: "meter_events").
     pub readmodel_meter_topic: String,
@@ -279,7 +279,9 @@ impl Config {
                 .parse()
                 .unwrap_or(false),
             readmodel_iam_topic: env::var("READMODEL_IAM_TOPIC")
-                .unwrap_or_else(|_| "user_events".to_string()),
+                // IAM publishes to KafkaTopics `{prefix}.user.events` (default `iam.user.events`),
+                // NOT a bare "user_events" — matching the aggregator's fixed default.
+                .unwrap_or_else(|_| "iam.user.events".to_string()),
             readmodel_meter_topic: env::var("READMODEL_METER_TOPIC")
                 .unwrap_or_else(|_| "meter_events".to_string()),
         })
