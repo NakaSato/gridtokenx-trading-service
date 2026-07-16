@@ -591,6 +591,12 @@ pub trait WalletReadModelRepository: Send + Sync {
         is_primary: bool,
     ) -> TraitResult<()>;
 
+    /// Delete a mirrored wallet row for a (user, wallet) pair — revocation
+    /// propagation from an IAM `UserWalletUnlinked` event so a deleted wallet
+    /// stops resolving. Idempotent: deleting a row that is already absent is a
+    /// harmless no-op, not an error.
+    async fn delete_wallet(&self, user_id: Uuid, wallet_address: &str) -> TraitResult<()>;
+
     /// One-shot boot backfill: snapshot the current `user_wallets` into the
     /// read-model. Idempotent (`ON CONFLICT DO NOTHING`). Returns rows inserted.
     async fn backfill_wallets(&self) -> TraitResult<u64>;

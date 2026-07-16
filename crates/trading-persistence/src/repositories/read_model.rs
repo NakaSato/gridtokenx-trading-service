@@ -125,6 +125,20 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         Ok(())
     }
 
+    async fn delete_wallet(&self, user_id: Uuid, wallet_address: &str) -> TraitResult<()> {
+        // Revocation propagation (IAM UserWalletUnlinked). Idempotent — deleting
+        // a row that is already absent affects zero rows and is not an error.
+        sqlx::query(
+            r#"DELETE FROM iam_wallet_read_model
+                WHERE user_id = $1 AND wallet_address = $2"#,
+        )
+        .bind(user_id)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn backfill_wallets(&self) -> TraitResult<u64> {
         // Source `is_primary` / `blockchain_registered` are nullable on
         // `user_wallets`; COALESCE to the read-model's NOT NULL columns.

@@ -72,6 +72,13 @@ struct WalletPrimaryChangedData {
     is_primary: bool,
 }
 
+/// `data` payload for `UserWalletUnlinked` (revocation propagation).
+#[derive(Debug, Deserialize)]
+struct WalletUnlinkedData {
+    user_id: Uuid,
+    wallet_address: String,
+}
+
 /// `data` payload for `MeterRegistered` / `MeterUpdated`.
 #[derive(Debug, Deserialize)]
 struct MeterData {
@@ -97,6 +104,11 @@ enum FeedAction {
         user_id: Uuid,
         wallet_address: String,
         is_primary: bool,
+    },
+    /// Route to `WalletReadModelRepository::delete_wallet` (revocation).
+    DeleteWallet {
+        user_id: Uuid,
+        wallet_address: String,
     },
     /// Route to `MeterReadModelRepository::upsert_meter`.
     UpsertMeter(MeterReadModelRecord),
@@ -143,6 +155,16 @@ fn classify(event: FeedEvent) -> FeedAction {
                 },
             }
         }
+        "UserWalletUnlinked" => match serde_json::from_value::<WalletUnlinkedData>(data) {
+            Ok(d) => FeedAction::DeleteWallet {
+                user_id: d.user_id,
+                wallet_address: d.wallet_address,
+            },
+            Err(e) => FeedAction::BadPayload {
+                event_type,
+                error: e.to_string(),
+            },
+        },
         "MeterRegistered" | "MeterUpdated" => match serde_json::from_value::<MeterData>(data) {
             Ok(d) => FeedAction::UpsertMeter(MeterReadModelRecord {
                 serial_number: d.serial_number,
@@ -255,6 +277,14 @@ impl ReadModelFeedWorker {
                     .await
                 {
                     error!("ReadModelFeedWorker: wallet primary update failed: {e}");
+                }
+            }
+            FeedAction::DeleteWallet {
+                user_id,
+                wallet_address,
+            } => {
+                if let Err(e) = self.wallet_repo.delete_wallet(user_id, &wallet_address).await {
+                    error!("ReadModelFeedWorker: wallet delete failed: {e}");
                 }
             }
             FeedAction::UpsertMeter(rec) => {
@@ -469,6 +499,50 @@ mod tests {
             action,
             FeedAction::BadPayload { event_type, .. } if event_type == "UserWalletPrimaryChanged"
         ));
+    }
+
+    // ── Unlinked / revocation routing (UserWalletUnlinked) ───────────────────
+
+    #[test]
+    fn user_wallet_unlinked_routes_to_delete_wallet() {
+        let uid = Uuid::new_v4();
+        let action = classify_envelope(json!({
+            "event_type": "UserWalletUnlinked",
+            "data": { "user_id": uid, "wallet_address": "WGone" }
+        }));
+        match action {
+            FeedAction::DeleteWallet {
+                user_id,
+                wallet_address,
+            } => {
+                assert_eq!(user_id, uid);
+                assert_eq!(wallet_address, "WGone");
+            }
+            other => panic!("expected DeleteWallet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unlinked_missing_wallet_is_bad_payload() {
+        // wallet_address is required (no serde default) — omitting it must NOT
+        // panic; it becomes BadPayload carrying the source event_type.
+        let action = classify_envelope(json!({
+            "event_type": "UserWalletUnlinked",
+            "data": { "user_id": Uuid::new_v4() }
+        }));
+        assert!(matches!(
+            action,
+            FeedAction::BadPayload { event_type, .. } if event_type == "UserWalletUnlinked"
+        ));
+    }
+
+    #[test]
+    fn unlinked_malformed_uuid_is_bad_payload() {
+        let action = classify_envelope(json!({
+            "event_type": "UserWalletUnlinked",
+            "data": { "user_id": "not-a-uuid", "wallet_address": "WGone" }
+        }));
+        assert!(matches!(action, FeedAction::BadPayload { .. }));
     }
 
     // ── Meter routing (MeterRegistered / MeterUpdated) ───────────────────────
