@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -612,6 +613,23 @@ pub trait MeterReadModelRepository: Send + Sync {
     /// One-shot boot backfill: snapshot the current `meters` into the
     /// read-model. Idempotent (`ON CONFLICT DO NOTHING`). Returns rows inserted.
     async fn backfill_meters(&self) -> TraitResult<u64>;
+}
+
+/// Meter identity lookups.
+///
+/// Two id spaces exist for one meter and they are NOT interchangeable:
+/// `trading_orders.meter_id` holds the metering `meters.id`, while everything
+/// user-facing (the grid map's node ids, telemetry keys, grid-flow endpoints)
+/// keys on `meters.serial_number`. Callers that only hold a serial must
+/// translate here before touching `trading_orders`.
+#[async_trait]
+pub trait MeterRepository: Send + Sync {
+    /// `meters.id` for a serial, or `None` when no such meter is registered.
+    async fn resolve_id_by_serial(&self, serial: &str) -> TraitResult<Option<Uuid>>;
+
+    /// `meters.id` → `serial_number` for the given ids. Ids with no meter row
+    /// are absent from the map rather than erroring.
+    async fn get_serials_for_ids(&self, ids: &[Uuid]) -> TraitResult<HashMap<Uuid, String>>;
 }
 
 /// Virtual Power Plant (VPP) persistence.

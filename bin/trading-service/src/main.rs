@@ -166,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         config: config.clone(),
         order_repo: infra.order_repo,
+        meter_repo: infra.meter_repo,
         settlement_repo: infra.settlement_repo,
         futures_repo: infra.futures_repo,
         carbon_repo: infra.carbon_repo,

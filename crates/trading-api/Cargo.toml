@@ -33,7 +33,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Blockchain (for ServiceRole auth)
-gridtokenx-blockchain-core.workspace = true
+gridtokenx-blockchain-auth = { workspace = true, features = ["axum"] }
 solana-sdk.workspace = true
 
 # Observability

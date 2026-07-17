@@ -33,7 +33,13 @@ pub struct SubmitOrderRequest {
     /// default ceiling. A market buy still fills at the resting ask, not this value.
     pub price_per_kwh: Option<String>,
     pub zone_id: i32,
+    /// The metering `meters.id`. Callers holding a `serial_number` (the grid
+    /// map's node id) must send `meter_serial` instead — the two id spaces are
+    /// not interchangeable and `trading_orders.meter_id` FKs to `meters.id`.
     pub meter_id: Option<Uuid>,
+    /// The meter's `serial_number`, resolved server-side to `meters.id`.
+    /// Takes precedence over `meter_id` when both are sent.
+    pub meter_serial: Option<String>,
     pub custodial_sign: Option<bool>,
     /// Time-in-force: "gtc" (default), "ioc", or "fok".
     pub time_in_force: Option<String>,
@@ -55,6 +61,28 @@ pub struct OrderBookResponse {
     pub last_update_id: u64,
     pub asks: Vec<[String; 2]>,
     pub bids: Vec<[String; 2]>,
+}
+
+/// One meter that currently has at least one resting order, and on which sides.
+///
+/// Deliberately minimal: no user id, amount or price. It answers "is this meter
+/// trading right now, and which way" — enough for the map to filter markers —
+/// without turning a map read into an order-flow feed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ActiveOrderMeter {
+    /// The metering `meters.id` the order was placed against.
+    pub meter_id: Uuid,
+    /// The same meter's `serial_number` — the id the grid map keys its nodes on.
+    /// Clients matching against map nodes must use this, not `meter_id`.
+    pub meter_serial: String,
+    pub zone_id: i32,
+    pub has_open_buy: bool,
+    pub has_open_sell: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ActiveOrderMetersResponse {
+    pub data: Vec<ActiveOrderMeter>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -148,7 +176,7 @@ pub struct GridMetrics {
 }
 
 use crate::auth::UserContext;
-use gridtokenx_blockchain_core::auth::ServiceRole;
+use gridtokenx_blockchain_auth::ServiceRole;
 
 /// Submit a spot order (limit or market) into the CDA or interval market.
 #[utoipa::path(
@@ -270,6 +298,31 @@ pub async fn submit_order(
         ));
     }
 
+    // `meter_serial` is the id space every user-facing surface holds (the grid
+    // map's node ids). Resolve it to `meters.id` here — sending a serial through
+    // as `meter_id` violates `trading_orders_meter_id_fkey`.
+    let meter_id = match req.meter_serial.as_deref() {
+        Some(serial) => {
+            let resolved = state
+                .meter_repo
+                .resolve_id_by_serial(serial)
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Database error: {}", e),
+                    )
+                })?;
+            Some(resolved.ok_or_else(|| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("unknown meter_serial: {serial}"),
+                )
+            })?)
+        }
+        None => req.meter_id,
+    };
+
     let mut order = TradingOrder {
         id: Uuid::new_v4(),
         user_id: user.user_id,
@@ -284,7 +337,7 @@ pub async fn submit_order(
         filled_at: None,
         epoch_id: None,
         zone_id: Some(req.zone_id),
-        meter_id: req.meter_id,
+        meter_id,
         refund_tx_signature: None,
         order_pda: None,
         order_index: None,
@@ -445,6 +498,93 @@ pub async fn get_order_book(
         asks,
         bids,
     }))
+}
+
+/// Meters that currently have resting orders, market-wide, grouped by meter.
+///
+/// The map uses this to show only meters that are actually trading, matching on
+/// `meter_serial` (its node id space), not `meter_id`.
+///
+/// Orders carry a meter only when placed against a specific one (the map's node
+/// form) — orders without one are simply absent here, so a meter silent on this
+/// endpoint is not proof it has no orders at all.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/active-order-meters",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Meters with at least one resting (pending/active/partially-filled) order", body = ActiveOrderMetersResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
+pub async fn list_active_order_meters(
+    role: ServiceRole,
+    State(state): State<AppState>,
+) -> Result<Json<ActiveOrderMetersResponse>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
+
+    // `bootstrap_active_orders` is named for the matcher's warm-up path, but it is
+    // exactly this query: every order in ('pending','active','partially_filled'),
+    // as a full `TradingOrder` (so `meter_id` survives — `get_all_active_orders`
+    // projects to `OrderBookEntry`, which drops it).
+    let orders = state
+        .order_repo
+        .bootstrap_active_orders()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    // Group by meter first, then translate ids in one round-trip rather than
+    // per-order.
+    let mut sides: HashMap<Uuid, (i32, bool, bool)> = HashMap::new();
+    for o in &orders {
+        let Some(meter_id) = o.meter_id else { continue };
+        let entry = sides
+            .entry(meter_id)
+            .or_insert((o.zone_id.unwrap_or(0), false, false));
+        match o.side {
+            OrderSide::Buy => entry.1 = true,
+            OrderSide::Sell => entry.2 = true,
+        }
+    }
+
+    let ids: Vec<Uuid> = sides.keys().copied().collect();
+    let serials = state
+        .meter_repo
+        .get_serials_for_ids(&ids)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    // A meter_id with no `meters` row can't be matched to a map node, so it is
+    // dropped rather than emitted with a placeholder serial.
+    let mut data: Vec<ActiveOrderMeter> = sides
+        .into_iter()
+        .filter_map(|(meter_id, (zone_id, has_open_buy, has_open_sell))| {
+            Some(ActiveOrderMeter {
+                meter_id,
+                meter_serial: serials.get(&meter_id)?.clone(),
+                zone_id,
+                has_open_buy,
+                has_open_sell,
+            })
+        })
+        .collect();
+    // Stable order so clients can diff responses without re-sorting.
+    data.sort_by_key(|m| m.meter_id);
+
+    Ok(Json(ActiveOrderMetersResponse { data }))
 }
 
 /// List the authenticated user's orders (optionally filtered by status).
@@ -1666,6 +1806,13 @@ pub struct TradeRecordResponse {
     pub seller_zone_id: Option<i32>,
     pub executed_at: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Settlement retry attempts so far. Non-zero means the settlement
+    /// bounced at least once; at `MAX_SETTLEMENT_RETRIES` the row is
+    /// parked in `permanently_failed`.
+    pub retry_count: i32,
+    /// Why the settlement failed, verbatim from the settlement worker.
+    /// `None` unless the row failed.
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1712,6 +1859,8 @@ fn build_trade_record(s: &Settlement, user: Uuid) -> TradeRecordResponse {
         seller_zone_id: s.seller_zone_id,
         executed_at: s.created_at,
         created_at: s.created_at,
+        retry_count: s.retry_count,
+        error_message: s.error_message.clone(),
     }
 }
 
@@ -2752,6 +2901,37 @@ mod tests {
         assert_eq!(r.total_value, "12.6");
         assert_eq!(r.status, "completed");
         assert_eq!(r.transaction_hash.as_deref(), Some("sig123"));
+    }
+
+    /// A parked settlement must carry its diagnostics to the client — the
+    /// UI renders `error_message`/`retry_count` on `permanently_failed` rows.
+    #[test]
+    fn trade_record_surfaces_permanent_failure_diagnostics() {
+        use trading_core::models::SettlementStatus;
+        let me = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mut s = settlement(me, other);
+        s.status = SettlementStatus::PermanentlyFailed;
+        s.retry_count = 5;
+        s.error_message = Some("chain bridge: blockhash expired".to_string());
+
+        let r = build_trade_record(&s, me);
+
+        assert_eq!(r.status, "permanently_failed");
+        assert_eq!(r.retry_count, 5);
+        assert_eq!(
+            r.error_message.as_deref(),
+            Some("chain bridge: blockhash expired")
+        );
+    }
+
+    /// A healthy settlement reports no failure reason.
+    #[test]
+    fn trade_record_healthy_has_no_error_message() {
+        let me = Uuid::new_v4();
+        let r = build_trade_record(&settlement(me, Uuid::new_v4()), me);
+        assert_eq!(r.retry_count, 0);
+        assert!(r.error_message.is_none());
     }
 
     #[test]

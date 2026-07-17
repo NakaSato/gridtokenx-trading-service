@@ -9,7 +9,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 /// Registers the gateway header schemes. Auth is header-based: APISIX injects
-/// `x-gridtokenx-role` (RBAC, see `gridtokenx_blockchain_core::auth`) and
+/// `x-gridtokenx-role` (RBAC, see `gridtokenx_blockchain_auth`) and
 /// `x-gridtokenx-user-id` (the JWT-resolved user, see `auth::UserContext`).
 struct SecurityAddon;
 
@@ -19,7 +19,7 @@ impl Modify for SecurityAddon {
         components.add_security_scheme(
             "gateway_role",
             SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
-                gridtokenx_blockchain_core::auth::INTERNAL_ROLE_HEADER,
+                gridtokenx_blockchain_auth::INTERNAL_ROLE_HEADER,
                 "Service role injected by the gateway (RBAC)",
             ))),
         );
@@ -59,6 +59,7 @@ impl Modify for SecurityAddon {
         crate::rest::get_settlement_stats,
         crate::rest::get_p2p_orderbook,
         crate::rest::get_clearing_epochs,
+        crate::rest::list_active_order_meters,
         // Trades
         crate::rest::get_trades,
         crate::rest::export_trades,
@@ -135,6 +136,7 @@ mod tests {
             "/api/v1/orders/{id}",
             "/api/v1/zones/{zone_id}/book",
             "/api/v1/markets/clearing-epochs",
+            "/api/v1/markets/active-order-meters",
             "/api/v1/trades/export",
             "/api/v1/price-alerts/{id}",
             "/api/v1/orders/recurring/{id}/pause",

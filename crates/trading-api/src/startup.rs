@@ -144,6 +144,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/markets/clearing-epochs",
             axum::routing::get(crate::rest::get_clearing_epochs),
         )
+        .route(
+            "/api/v1/markets/active-order-meters",
+            axum::routing::get(crate::rest::list_active_order_meters),
+        )
         // Trades — history (JSON) + export (CSV)
         .route(
             "/api/v1/trades",

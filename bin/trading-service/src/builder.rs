@@ -7,7 +7,8 @@ use trading_infra::cache::CacheService;
 use trading_logic::{ClearingService, GridAwareTopology, MatcherService, SettlementService};
 use trading_persistence::repositories::{
     PostgresAnalyticsRepository, PostgresCarbonRepository, PostgresFuturesRepository,
-    PostgresOrderRepository, PostgresPriceAlertRepository, PostgresRecurringOrderRepository,
+    PostgresMeterRepository, PostgresOrderRepository, PostgresPriceAlertRepository,
+    PostgresRecurringOrderRepository,
     PostgresSettlementRepository,
 };
 
@@ -15,6 +16,7 @@ use trading_persistence::repositories::{
 pub struct Infrastructure {
     pub db: PgPool,
     pub order_repo: Arc<dyn OrderRepository>,
+    pub meter_repo: Arc<dyn MeterRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,
     pub outbox_repo: Arc<dyn OutboxRepository>,
     pub futures_repo: Arc<dyn FuturesRepository>,
@@ -59,6 +61,7 @@ impl ServiceBuilder {
         let chain_bridge_url = &config.chain_bridge_url;
 
         let order_repo = Arc::new(PostgresOrderRepository::new(db_pool.clone()));
+        let meter_repo = Arc::new(PostgresMeterRepository::new(db_pool.clone()));
         let settlement_repo = Arc::new(PostgresSettlementRepository::new(db_pool.clone()));
         let outbox_repo = Arc::new(trading_persistence::repositories::PostgresOutboxRepository::new(db_pool.clone()));
         let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
@@ -168,6 +171,7 @@ impl ServiceBuilder {
         let infra = Infrastructure {
             db: db_pool,
             order_repo: order_repo.clone(),
+            meter_repo: meter_repo.clone(),
             settlement_repo: settlement_repo.clone(),
             outbox_repo: outbox_repo.clone(),
             futures_repo,
