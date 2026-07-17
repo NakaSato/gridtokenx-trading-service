@@ -51,6 +51,12 @@ pub struct Config {
     pub readmodel_iam_topic: String,
     /// Kafka topic carrying metering meter domain events (default: "meter_events").
     pub readmodel_meter_topic: String,
+    /// Kafka cluster carrying `readmodel_meter_topic`. IAM wallet events and meter
+    /// events can live on different clusters (IAM/noti on kafka-cmd, meter-service on
+    /// kafka-market); when this differs from `kafka_bootstrap_servers` the feed runs a
+    /// second consumer for the meter topic there. Default: `kafka_bootstrap_servers`
+    /// (single-cluster, no behavior change).
+    pub readmodel_meter_brokers: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +290,11 @@ impl Config {
                 .unwrap_or_else(|_| "iam.user.events".to_string()),
             readmodel_meter_topic: env::var("READMODEL_METER_TOPIC")
                 .unwrap_or_else(|_| "meter_events".to_string()),
+            // Defaults to the main broker (same cluster ⇒ single consumer). Set to the
+            // meter-service cluster when meter_events lives apart from iam.user.events.
+            readmodel_meter_brokers: env::var("READMODEL_METER_BROKERS")
+                .or_else(|_| env::var("KAFKA_BOOTSTRAP_SERVERS"))
+                .unwrap_or_else(|_| "localhost:9001".to_string()),
         })
     }
 }

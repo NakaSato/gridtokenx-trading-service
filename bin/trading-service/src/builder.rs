@@ -161,6 +161,7 @@ impl ServiceBuilder {
                 wallet_rm,
                 meter_rm,
                 config.kafka_bootstrap_servers.clone(),
+                config.readmodel_meter_brokers.clone(),
                 config.readmodel_iam_topic.clone(),
                 config.readmodel_meter_topic.clone(),
             ))

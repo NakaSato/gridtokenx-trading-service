@@ -187,6 +187,9 @@ pub struct ReadModelFeedWorker {
     wallet_repo: Arc<dyn WalletReadModelRepository>,
     meter_repo: Arc<dyn MeterReadModelRepository>,
     brokers: String,
+    /// Cluster carrying `meter_topic`. Equals `brokers` unless meter_events lives on
+    /// a different Kafka cluster than iam.user.events (see [`run`]).
+    meter_brokers: String,
     iam_topic: String,
     meter_topic: String,
 }
@@ -196,6 +199,7 @@ impl ReadModelFeedWorker {
         wallet_repo: Arc<dyn WalletReadModelRepository>,
         meter_repo: Arc<dyn MeterReadModelRepository>,
         brokers: String,
+        meter_brokers: String,
         iam_topic: String,
         meter_topic: String,
     ) -> Self {
@@ -203,18 +207,48 @@ impl ReadModelFeedWorker {
             wallet_repo,
             meter_repo,
             brokers,
+            meter_brokers,
             iam_topic,
             meter_topic,
         }
     }
 
-    /// Build the consumer, subscribe, and stream forever. On a fatal setup error
-    /// (bad broker config / subscribe failure) it logs and returns — the process
-    /// keeps running with the feed disabled rather than crashing.
+    /// Stream events into the read-model. IAM wallet events (`iam_topic`) and meter
+    /// events (`meter_topic`) can live on DIFFERENT Kafka clusters — IAM publishes to
+    /// its own broker (kafka-cmd in this deploy, shared with noti), meter-service to
+    /// another (kafka-market). When `meter_brokers` names a different cluster than
+    /// `brokers`, run a SECOND consumer there for the meter topic so both streams are
+    /// consumed from where they actually live; otherwise a single consumer drains
+    /// both (original behavior — a no-op when the two brokers match).
     pub async fn run(self) {
+        let this = Arc::new(self);
+        if this.meter_brokers == this.brokers {
+            let topics = vec![this.iam_topic.clone(), this.meter_topic.clone()];
+            this.clone()
+                .drain(this.brokers.clone(), topics, CONSUMER_GROUP.to_string())
+                .await;
+            return;
+        }
+        let iam = tokio::spawn(this.clone().drain(
+            this.brokers.clone(),
+            vec![this.iam_topic.clone()],
+            format!("{CONSUMER_GROUP}-iam"),
+        ));
+        let meter = tokio::spawn(this.clone().drain(
+            this.meter_brokers.clone(),
+            vec![this.meter_topic.clone()],
+            format!("{CONSUMER_GROUP}-meter"),
+        ));
+        let _ = tokio::join!(iam, meter);
+    }
+
+    /// Build a consumer on `brokers`, subscribe to `topics`, and stream forever. On a
+    /// fatal setup error (bad broker config / subscribe failure) it logs and returns —
+    /// the process keeps running with that consumer disabled rather than crashing.
+    async fn drain(self: Arc<Self>, brokers: String, topics: Vec<String>, group_id: String) {
         let consumer: StreamConsumer = match ClientConfig::new()
-            .set("bootstrap.servers", &self.brokers)
-            .set("group.id", CONSUMER_GROUP)
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group_id)
             .set("enable.auto.commit", "true")
             .set("auto.offset.reset", "earliest")
             .set("fetch.message.max.bytes", "10485760") // 10MB, mirrors kafka_consumer.rs
@@ -222,17 +256,17 @@ impl ReadModelFeedWorker {
         {
             Ok(c) => c,
             Err(e) => {
-                error!("ReadModelFeedWorker: failed to create Kafka consumer: {e}");
+                error!("ReadModelFeedWorker: failed to create Kafka consumer ({group_id}) on {brokers}: {e}");
                 return;
             }
         };
 
-        let topics = [self.iam_topic.as_str(), self.meter_topic.as_str()];
-        if let Err(e) = consumer.subscribe(&topics) {
-            error!("ReadModelFeedWorker: failed to subscribe to {topics:?}: {e}");
+        let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+        if let Err(e) = consumer.subscribe(&topic_refs) {
+            error!("ReadModelFeedWorker: failed to subscribe to {topics:?} on {brokers}: {e}");
             return;
         }
-        info!("📥 ReadModelFeedWorker streaming on topics: {topics:?}");
+        info!("📥 ReadModelFeedWorker streaming on {brokers} topics: {topics:?}");
 
         loop {
             match consumer.recv().await {
@@ -242,7 +276,7 @@ impl ReadModelFeedWorker {
                     }
                 }
                 Err(e) => {
-                    error!("ReadModelFeedWorker: Kafka consumer error: {e}");
+                    error!("ReadModelFeedWorker: Kafka consumer error on {brokers}: {e}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
