@@ -57,7 +57,11 @@ struct WalletLinkedData {
     user_account_pda: Option<String>,
     #[serde(default)]
     shard_id: Option<i16>,
-    #[serde(default)]
+    // A UserWalletLinked/UserOnboarded event links the onboarding wallet, which IS
+    // the primary. IAM always sends is_primary explicitly, but when it is absent we
+    // default to primary — matching the aggregator's owner read-model rule (absent on
+    // Linked/Onboarded ⇒ treated as primary), so the two feeds agree.
+    #[serde(default = "default_true")]
     is_primary: bool,
     #[serde(default = "default_true")]
     blockchain_registered: bool,
@@ -416,19 +420,19 @@ mod tests {
     }
 
     #[test]
-    fn wallet_linked_absent_is_primary_defaults_false() {
-        // Documents ACTUAL behavior: is_primary is #[serde(default)] on a bool,
-        // so an absent field yields `false` — the wallet is projected as
-        // NON-primary. (See reported finding: if the aggregator's rule is that a
-        // first/only wallet should be primary, this default under-promotes it.)
+    fn wallet_linked_absent_is_primary_defaults_true() {
+        // A Linked/Onboarded event's wallet is the onboarding (primary) wallet, so an
+        // absent is_primary defaults to true — aligned with the aggregator owner
+        // read-model (absent on Linked/Onboarded ⇒ primary). IAM always sends it
+        // explicitly; this is the defensive default when it doesn't.
         let action = classify_envelope(json!({
             "event_type": "UserWalletLinked",
             "data": { "user_id": Uuid::new_v4(), "wallet_address": "W3" }
         }));
         match action {
             FeedAction::UpsertWallet(rec) => assert!(
-                !rec.is_primary,
-                "absent is_primary currently defaults to false, not true"
+                rec.is_primary,
+                "absent is_primary must default to true (onboarding wallet is primary)"
             ),
             other => panic!("expected UpsertWallet, got {other:?}"),
         }
