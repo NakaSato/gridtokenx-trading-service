@@ -4,16 +4,20 @@
 //!   * `iam_wallet_read_model`  ← IAM `user_wallets`
 //!   * `meter_read_model`       ← metering `meters`
 //!
-//! They are fed by two paths: a one-shot boot **backfill** (snapshot the source
-//! table, which is still reachable on the same pool pre-cutover) and the live
-//! NATS/Kafka event stream (see `trading-logic` `ReadModelFeedWorker`). At the
-//! later cutover the two cross-domain reads
-//! (`rpc/service.rs::get_user_primary_wallet`, `vpp.rs` meters JOIN) swap to
+//! They are fed by two paths: a one-shot boot **backfill** (snapshot of the
+//! source table) and the live NATS/Kafka event stream (see `trading-logic`
+//! `ReadModelFeedWorker`). The two cross-domain reads
+//! (`rpc/service.rs::get_user_primary_wallet`, `vpp.rs` meters JOIN) read from
 //! these tables. Runtime SQLx (no compile-time macros), per this workspace's
 //! convention.
+//!
+//! Post DB-split the source tables (`user_wallets`, `meters`) live in the IAM
+//! and metering databases, not the trading one, so the backfill needs a
+//! dedicated read-only source pool (`with_source_pool`). Without one it falls
+//! back to querying the local pool — correct only pre-cutover on the shared DB.
 
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use trading_core::traits::{
@@ -21,15 +25,39 @@ use trading_core::traits::{
     WalletReadModelRepository,
 };
 
+/// Does `table` exist in the pool's current database/search-path?
+///
+/// Used by the boot backfill's no-source-pool branch to distinguish a genuine
+/// pre-cutover shared DB (source table present locally → backfill it) from a
+/// post-split boot where the source pool wasn't available (source table absent
+/// locally → skip silently; the event feed seeds the read-model). `to_regclass`
+/// returns NULL for an unknown relation instead of raising, so this never logs
+/// a "relation does not exist" ERROR.
+async fn local_source_table_exists(pool: &PgPool, table: &str) -> TraitResult<bool> {
+    let present: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+        .bind(table)
+        .fetch_one(pool)
+        .await?;
+    Ok(present.is_some())
+}
+
 // ── Wallet read-model ────────────────────────────────────────────────────────
 
 pub struct PgWalletReadModelRepository {
     pool: PgPool,
+    /// Read-only pool on the IAM database; used only by `backfill_wallets`.
+    source_pool: Option<PgPool>,
 }
 
 impl PgWalletReadModelRepository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, source_pool: None }
+    }
+
+    #[must_use]
+    pub fn with_source_pool(mut self, source_pool: PgPool) -> Self {
+        self.source_pool = Some(source_pool);
+        self
     }
 }
 
@@ -157,20 +185,69 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         // `user_wallets`; COALESCE to the read-model's NOT NULL columns.
         // Assumes the source holds at most one primary wallet per user (IAM
         // enforces this) — otherwise the partial unique index would reject it.
-        let res = sqlx::query(
-            r#"INSERT INTO iam_wallet_read_model
-                   (user_id, wallet_address, is_primary, blockchain_registered,
-                    user_account_pda, shard_id, updated_at)
-               SELECT user_id, wallet_address,
-                      COALESCE(is_primary, false),
-                      COALESCE(blockchain_registered, false),
-                      user_account_pda, shard_id, now()
-                 FROM user_wallets
-               ON CONFLICT (user_id, wallet_address) DO NOTHING"#,
+        let Some(source) = &self.source_pool else {
+            // No source pool: either genuine pre-cutover (the `user_wallets` source
+            // lives on the local shared DB) or a post-split boot where connecting the
+            // source pool failed (transient DB/pgdog unreadiness). Only backfill from
+            // the local pool when the source table is actually present there — post
+            // DB-split it isn't, and querying it just logs a spurious "relation does
+            // not exist" ERROR. The live event feed seeds the read-model regardless,
+            // so skip silently instead of erroring.
+            if !local_source_table_exists(&self.pool, "user_wallets").await? {
+                tracing::info!(
+                    "read-model wallet backfill: no source pool and no local `user_wallets` \
+                     (post-split); skipping snapshot, event feed will seed"
+                );
+                return Ok(0);
+            }
+            let res = sqlx::query(
+                r#"INSERT INTO iam_wallet_read_model
+                       (user_id, wallet_address, is_primary, blockchain_registered,
+                        user_account_pda, shard_id, updated_at)
+                   SELECT user_id, wallet_address,
+                          COALESCE(is_primary, false),
+                          COALESCE(blockchain_registered, false),
+                          user_account_pda, shard_id, now()
+                     FROM user_wallets
+                   ON CONFLICT (user_id, wallet_address) DO NOTHING"#,
+            )
+            .execute(&self.pool)
+            .await?;
+            return Ok(res.rows_affected());
+        };
+
+        let rows = sqlx::query(
+            r#"SELECT user_id, wallet_address,
+                      COALESCE(is_primary, false)            AS is_primary,
+                      COALESCE(blockchain_registered, false) AS blockchain_registered,
+                      user_account_pda, shard_id
+                 FROM user_wallets"#,
         )
-        .execute(&self.pool)
+        .fetch_all(source)
         .await?;
-        Ok(res.rows_affected())
+
+        let mut inserted = 0u64;
+        for row in rows {
+            // DO NOTHING (not upsert): the backfill is a snapshot seed and must
+            // never overwrite fresher state already applied by the event feed.
+            let res = sqlx::query(
+                r#"INSERT INTO iam_wallet_read_model
+                       (user_id, wallet_address, is_primary, blockchain_registered,
+                        user_account_pda, shard_id, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, now())
+                   ON CONFLICT (user_id, wallet_address) DO NOTHING"#,
+            )
+            .bind(row.get::<Uuid, _>("user_id"))
+            .bind(row.get::<String, _>("wallet_address"))
+            .bind(row.get::<bool, _>("is_primary"))
+            .bind(row.get::<bool, _>("blockchain_registered"))
+            .bind(row.get::<Option<String>, _>("user_account_pda"))
+            .bind(row.get::<Option<i16>, _>("shard_id"))
+            .execute(&self.pool)
+            .await?;
+            inserted += res.rows_affected();
+        }
+        Ok(inserted)
     }
 }
 
@@ -178,11 +255,19 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
 
 pub struct PgMeterReadModelRepository {
     pool: PgPool,
+    /// Read-only pool on the metering database; used only by `backfill_meters`.
+    source_pool: Option<PgPool>,
 }
 
 impl PgMeterReadModelRepository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, source_pool: None }
+    }
+
+    #[must_use]
+    pub fn with_source_pool(mut self, source_pool: PgPool) -> Self {
+        self.source_pool = Some(source_pool);
+        self
     }
 }
 
@@ -218,15 +303,55 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
 
     async fn backfill_meters(&self) -> TraitResult<u64> {
         // `meters.id` is the meter_id; rated_power/capacity have no source column.
-        let res = sqlx::query(
-            r#"INSERT INTO meter_read_model
-                   (serial_number, meter_id, user_id, zone_id, status, updated_at)
-               SELECT serial_number, id, user_id, zone_id, status, now()
-                 FROM meters
-               ON CONFLICT (serial_number) DO NOTHING"#,
+        let Some(source) = &self.source_pool else {
+            // No source pool: pre-cutover (the `meters` source lives on the local
+            // shared DB) or a post-split boot where the source pool connect failed.
+            // Only backfill from the local pool when `meters` is actually present
+            // there — post DB-split it isn't, and querying it just logs a spurious
+            // "relation does not exist" ERROR. The event feed seeds the read-model
+            // regardless, so skip silently instead of erroring.
+            if !local_source_table_exists(&self.pool, "meters").await? {
+                tracing::info!(
+                    "read-model meter backfill: no source pool and no local `meters` \
+                     (post-split); skipping snapshot, event feed will seed"
+                );
+                return Ok(0);
+            }
+            let res = sqlx::query(
+                r#"INSERT INTO meter_read_model
+                       (serial_number, meter_id, user_id, zone_id, status, updated_at)
+                   SELECT serial_number, id, user_id, zone_id, status, now()
+                     FROM meters
+                   ON CONFLICT (serial_number) DO NOTHING"#,
+            )
+            .execute(&self.pool)
+            .await?;
+            return Ok(res.rows_affected());
+        };
+
+        let rows = sqlx::query(
+            r#"SELECT serial_number, id, user_id, zone_id, status FROM meters"#,
         )
-        .execute(&self.pool)
+        .fetch_all(source)
         .await?;
-        Ok(res.rows_affected())
+
+        let mut inserted = 0u64;
+        for row in rows {
+            let res = sqlx::query(
+                r#"INSERT INTO meter_read_model
+                       (serial_number, meter_id, user_id, zone_id, status, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, now())
+                   ON CONFLICT (serial_number) DO NOTHING"#,
+            )
+            .bind(row.get::<String, _>("serial_number"))
+            .bind(row.get::<Uuid, _>("id"))
+            .bind(row.get::<Uuid, _>("user_id"))
+            .bind(row.get::<Option<i32>, _>("zone_id"))
+            .bind(row.get::<Option<String>, _>("status"))
+            .execute(&self.pool)
+            .await?;
+            inserted += res.rows_affected();
+        }
+        Ok(inserted)
     }
 }

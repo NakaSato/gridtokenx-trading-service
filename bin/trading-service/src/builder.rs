@@ -141,14 +141,70 @@ impl ServiceBuilder {
         // Read-model feed (DB-per-service Phase 1). OFF unless TRADING_READMODEL_FEED=true;
         // when off nothing is constructed and no worker spawns (zero behavior change).
         // When on: build the two read-model repos, run the one-shot boot backfill from
-        // the still-reachable source tables, then hand the worker to main.rs to spawn.
+        // the source databases (READMODEL_IAM_DATABASE_URL / READMODEL_METER_DATABASE_URL;
+        // post DB-split the source tables are no longer on the trading pool), then hand
+        // the worker to main.rs to spawn.
         let readmodel_feed_worker = if config.readmodel_feed_enabled {
-            let wallet_rm: Arc<dyn WalletReadModelRepository> = Arc::new(
-                trading_persistence::repositories::PgWalletReadModelRepository::new(db_pool.clone()),
-            );
-            let meter_rm: Arc<dyn MeterReadModelRepository> = Arc::new(
-                trading_persistence::repositories::PgMeterReadModelRepository::new(db_pool.clone()),
-            );
+            // Source pools live on other services' DBs (via pgdog). At cold boot
+            // those backends can be briefly unready (DB still loading, pgdog not up
+            // yet), so a single connect attempt races and drops the backfill to the
+            // local pool — which post-split lacks the source tables and just logs a
+            // spurious "relation does not exist". Retry with linear backoff so the
+            // snapshot backfill actually runs once the source comes up. Bounded and
+            // non-fatal: on exhaustion we skip the backfill (the event feed still
+            // seeds the read-model).
+            let connect_source = |name: &'static str, url: Option<String>| async move {
+                let Some(url) = url else {
+                    tracing::warn!(
+                        "read-model backfill: no {name} source DB URL configured; \
+                         backfilling from the local pool (pre-cutover shared-DB mode)"
+                    );
+                    return None;
+                };
+                const MAX_ATTEMPTS: u32 = 5;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    match sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(2)
+                        .connect(&url)
+                        .await
+                    {
+                        Ok(pool) => return Some(pool),
+                        Err(e) if attempt < MAX_ATTEMPTS => {
+                            let backoff = std::time::Duration::from_millis(500 * u64::from(attempt));
+                            tracing::warn!(
+                                "read-model backfill: {name} source DB not ready \
+                                 (attempt {attempt}/{MAX_ATTEMPTS}, retrying in {backoff:?}): {e}"
+                            );
+                            tokio::time::sleep(backoff).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "read-model backfill: failed to connect {name} source DB after \
+                                 {MAX_ATTEMPTS} attempts (backfill skipped, event feed \
+                                 unaffected): {e}"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                None
+            };
+            let iam_source = connect_source("IAM", config.readmodel_iam_db_url.clone()).await;
+            let meter_source =
+                connect_source("metering", config.readmodel_meter_db_url.clone()).await;
+
+            let mut wallet_repo =
+                trading_persistence::repositories::PgWalletReadModelRepository::new(db_pool.clone());
+            if let Some(pool) = iam_source {
+                wallet_repo = wallet_repo.with_source_pool(pool);
+            }
+            let mut meter_repo_rm =
+                trading_persistence::repositories::PgMeterReadModelRepository::new(db_pool.clone());
+            if let Some(pool) = meter_source {
+                meter_repo_rm = meter_repo_rm.with_source_pool(pool);
+            }
+            let wallet_rm: Arc<dyn WalletReadModelRepository> = Arc::new(wallet_repo);
+            let meter_rm: Arc<dyn MeterReadModelRepository> = Arc::new(meter_repo_rm);
             match wallet_rm.backfill_wallets().await {
                 Ok(n) => tracing::info!("read-model boot backfill: {n} wallet rows"),
                 Err(e) => tracing::error!("read-model wallet backfill failed: {e}"),
