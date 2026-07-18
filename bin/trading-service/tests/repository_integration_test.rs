@@ -4,10 +4,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use chrono::Utc;
 use rust_decimal_macros::dec;
-use trading_core::traits::{OrderRepository, SettlementRepository};
+use trading_core::traits::{MeterRepository, OrderRepository, SettlementRepository};
 use trading_core::models::{TradingOrder, Settlement, SettlementStatus};
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
-use trading_persistence::repositories::{PostgresOrderRepository, PostgresSettlementRepository};
+use trading_persistence::repositories::{PostgresMeterRepository, PostgresOrderRepository, PostgresSettlementRepository};
 
 #[tokio::test]
 async fn test_postgres_order_repository_e2e() {
@@ -174,6 +174,60 @@ async fn test_postgres_order_repository_e2e() {
     // 8. Cleanup (Cascades delete order and settlement automatically when deleting user/epoch)
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+}
+
+/// db-split guard: meter identity lookups must read the Trading-owned
+/// `meter_read_model`, NOT the metering `meters` table (which no longer lives in
+/// the trading DB). A regression here 500s both active-order-meters endpoints —
+/// `get_serials_for_ids` runs on every populated response to translate
+/// `meter_id` into the map's `meter_serial` id space.
+#[tokio::test]
+async fn test_meter_repository_reads_read_model() {
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+    let pool = PgPool::connect(&db_url).await.expect("connect");
+
+    let meter_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let serial = format!("SN-REPO-{}", &meter_id.to_string()[..8]);
+
+    // Read model is fed by meter NATS events; here we seed one row directly.
+    // updated_at defaults to now(); user_id has no FK (read-model table).
+    sqlx::query(
+        "INSERT INTO meter_read_model (meter_id, serial_number, user_id, zone_id) VALUES ($1, $2, $3, $4)"
+    )
+    .bind(meter_id)
+    .bind(&serial)
+    .bind(user_id)
+    .bind(7_i32)
+    .execute(&pool)
+    .await
+    .expect("Failed to insert meter_read_model row");
+
+    let repo = PostgresMeterRepository::new(pool.clone());
+
+    // meter_id -> serial (the response-shaping path)
+    let serials = repo.get_serials_for_ids(&[meter_id]).await.expect("get_serials_for_ids");
+    assert_eq!(
+        serials.get(&meter_id).map(String::as_str),
+        Some(serial.as_str()),
+        "meter_id must resolve to its serial via meter_read_model"
+    );
+
+    // serial -> meter_id (the order-submission path)
+    let resolved = repo.resolve_id_by_serial(&serial).await.expect("resolve_id_by_serial");
+    assert_eq!(resolved, Some(meter_id), "serial must resolve back to the meter_id");
+
+    // Empty input short-circuits without touching the DB.
+    let empty = repo.get_serials_for_ids(&[]).await.expect("empty ids");
+    assert!(empty.is_empty());
+
+    // Unknown serial yields None, not an error.
+    let missing = repo.resolve_id_by_serial("SN-DOES-NOT-EXIST").await.expect("missing serial");
+    assert_eq!(missing, None);
+
+    sqlx::query("DELETE FROM meter_read_model WHERE meter_id = $1").bind(meter_id).execute(&pool).await.ok();
 }
 
 /// Phase 0: the market_segment column round-trips. An Interval order inserted
