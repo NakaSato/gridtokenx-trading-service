@@ -83,9 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Exponential backoff capped at 30s so a deterministic panic-on-spawn
         // degrades to one respawn per 30s instead of a 1Hz crash-loop that floods
         // logs; reset to the base delay after a run that stayed up past it.
-        const BASE_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(1);
-        const MAX_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(30);
-        let mut backoff = BASE_BACKOFF;
+        const BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+        const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+        // Full-jitter respawn delay so co-deployed matcher replicas don't all
+        // respawn a panicking reaper on the same schedule. `attempt` climbs per
+        // crash, resets after a run that stayed up past the max backoff.
+        let mut attempt = 0u32;
         loop {
             let repo = reaper_repo.clone();
             let started = tokio::time::Instant::now();
@@ -105,14 +108,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     // Reset backoff if the task ran healthily for a while before dying.
                     if started.elapsed() >= MAX_BACKOFF {
-                        backoff = BASE_BACKOFF;
+                        attempt = 0;
                     }
+                    let delay = gridtokenx_telemetry::backoff::full_jitter(
+                        attempt,
+                        BASE_BACKOFF,
+                        MAX_BACKOFF,
+                    );
                     error!(
                         "ReaperWorker task terminated unexpectedly ({e}); respawning in {:?}",
-                        backoff
+                        delay
                     );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    tokio::time::sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }
