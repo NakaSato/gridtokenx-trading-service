@@ -148,6 +148,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/markets/active-order-meters",
             axum::routing::get(crate::rest::list_active_order_meters),
         )
+        // Public (no-auth) variant for the grid map — order presence only.
+        .route(
+            "/api/v1/public/active-order-meters",
+            axum::routing::get(crate::rest::list_public_active_order_meters),
+        )
         // Trades — history (JSON) + export (CSV)
         .route(
             "/api/v1/trades",

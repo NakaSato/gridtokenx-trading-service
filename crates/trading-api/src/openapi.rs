@@ -60,6 +60,7 @@ impl Modify for SecurityAddon {
         crate::rest::get_p2p_orderbook,
         crate::rest::get_clearing_epochs,
         crate::rest::list_active_order_meters,
+        crate::rest::list_public_active_order_meters,
         // Trades
         crate::rest::get_trades,
         crate::rest::export_trades,

@@ -526,6 +526,37 @@ pub async fn list_active_order_meters(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
+    let data = fetch_active_order_meters(&state).await?;
+    Ok(Json(ActiveOrderMetersResponse { data }))
+}
+
+/// Public, unauthenticated variant of [`list_active_order_meters`] for the grid
+/// map. Returns only market-level order *presence* — which meters have a resting
+/// buy/sell order — which is strictly less than the already-public order book
+/// (`/api/v1/zones/{zone_id}/book`): no prices, amounts, or account identity. The
+/// logged-out map needs it to hide non-trading meters without a JWT.
+#[utoipa::path(
+    get,
+    path = "/api/v1/public/active-order-meters",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Meters with at least one resting (pending/active/partially-filled) order", body = ActiveOrderMetersResponse),
+        (status = 500, description = "Database error", body = String),
+    ),
+)]
+pub async fn list_public_active_order_meters(
+    State(state): State<AppState>,
+) -> Result<Json<ActiveOrderMetersResponse>, (axum::http::StatusCode, String)> {
+    let data = fetch_active_order_meters(&state).await?;
+    Ok(Json(ActiveOrderMetersResponse { data }))
+}
+
+/// Shared query behind both the authed and public active-order-meters endpoints:
+/// every meter with at least one resting order, grouped, with `meter_id`
+/// translated to the map's `meter_serial` id space.
+async fn fetch_active_order_meters(
+    state: &AppState,
+) -> Result<Vec<ActiveOrderMeter>, (axum::http::StatusCode, String)> {
     // `bootstrap_active_orders` is named for the matcher's warm-up path, but it is
     // exactly this query: every order in ('pending','active','partially_filled'),
     // as a full `TradingOrder` (so `meter_id` survives — `get_all_active_orders`
@@ -584,7 +615,7 @@ pub async fn list_active_order_meters(
     // Stable order so clients can diff responses without re-sorting.
     data.sort_by_key(|m| m.meter_id);
 
-    Ok(Json(ActiveOrderMetersResponse { data }))
+    Ok(data)
 }
 
 /// List the authenticated user's orders (optionally filtered by status).
