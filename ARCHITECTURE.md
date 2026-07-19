@@ -119,13 +119,16 @@ id), idx>>`) enforcing **price-time priority**, applies grid topology via the in
 and returns `Vec<MatchResult>` + `CycleStats`. Price math uses `FastPrice` fixed-point — **no floats
 on the hot path**. Keep this crate pure and dependency-light.
 
-When there is a **single zone book**, the per-buy scan takes a fast path: that book's `range` already
-yields sells in landed-cost order (zone-constant fees), so the engine skips the per-buy candidate sort
-and stops building candidates once it has gathered enough resting energy to fill the buy — turning the
-scan from O(all crossing sells) into O(sells actually needed) and the full-cross cycle from ~O(N²) to
-~O(N·log N). Multi-zone cycles keep the full build-and-sort (the global landed order interleaves books);
-a rare grid-capacity skip in the fast path falls back to one full-scan rebuild for that buy so results
-are identical to the exhaustive path.
+Each zone book is already ordered by `(price, created_at, id)` — which, fees being zone-constant, is
+landed-cost order for that zone. `gather_candidates` exploits this to build each buy's candidate list
+**lazily in global landed order** and stop once it has gathered enough resting energy to fill the buy —
+O(sells actually needed), not O(all crossing sells), turning a full-cross cycle from ~O(N²) to
+~O(N·log N). Two shapes: a **single reachable zone** drains that one book's `range` directly (no
+allocation); **multiple zones** are combined by a **k-way merge** (a min-heap over the per-zone book
+cursors) that yields the same total order without materialising and sorting every crossing sell — so
+FOK still sees every reachable sell, and a rare grid-capacity skip that under-fills an early-stopped buy
+triggers one full-scan rebuild, keeping results identical to the exhaustive path. This cut the
+8-zone × 1000×1000 benchmark from ~22 ms to ~0.74 ms.
 
 ### Settlement via Chain Bridge
 

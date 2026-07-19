@@ -38,10 +38,15 @@ pub trait TopologySnapshot: Send + Sync {
     fn calculate_loss_factor(&self, from_zone: Option<i32>, to_zone: Option<i32>) -> FastPrice;
 }
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 /// The pure matching engine.
 pub struct MatchingEngine;
+
+/// Zone-segmented sell books: `ZoneId -> (price, created_at, id) -> sell index`.
+/// A `BTreeMap` outer for deterministic zone iteration, `BTreeMap` inner for
+/// price-time priority within a zone.
+type ZoneBooks = BTreeMap<Option<i32>, BTreeMap<(FastPrice, i64, uuid::Uuid), usize>>;
 
 /// A priced match candidate ready to fill, carrying its own price-time sort key
 /// so the comparator never has to re-index the sell slice.
@@ -64,6 +69,44 @@ struct ZoneFees {
     loss: FastPrice,
 }
 
+/// One reachable zone book's head in the k-way merge: a priced candidate plus the
+/// index of the cursor it came from (so that cursor can be advanced after a pop).
+/// Ordered so a `BinaryHeap` (a max-heap) yields the CHEAPEST candidate first —
+/// same key as the exhaustive sort (landed, raw ask, arrival, id), so the merge
+/// reproduces that total order lazily. Sell ids are unique, so the key is a strict
+/// total order with no ties.
+struct HeapHead {
+    cand: Candidate,
+    cursor: usize,
+}
+impl HeapHead {
+    fn key(&self) -> (FastPrice, FastPrice, i64, uuid::Uuid) {
+        (
+            self.cand.landed,
+            self.cand.sort_price,
+            self.cand.sort_time,
+            self.cand.sort_id,
+        )
+    }
+}
+impl Ord for HeapHead {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reversed: the smallest key must be the heap's max so `pop` returns it.
+        other.key().cmp(&self.key())
+    }
+}
+impl PartialOrd for HeapHead {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for HeapHead {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+impl Eq for HeapHead {}
+
 impl MatchingEngine {
     /// Price one sell against a buy. Returns a [`Candidate`] when the trade is
     /// viable: not a self-trade, the grid can carry the flow, and the landed
@@ -71,6 +114,7 @@ impl MatchingEngine {
     /// checked — overflow clamps to `i64::MAX` rather than wrapping, so an
     /// adversarial price can never wrap the accumulator into a false (negative)
     /// cross.
+    #[allow(clippy::too_many_arguments)]
     fn priced_candidate(
         buy: &FastOrder,
         buy_remaining: Decimal,
@@ -163,6 +207,159 @@ impl MatchingEngine {
         }
     }
 
+    /// Refill `candidates` for one buy, in landed-cost order, by k-way-merging the
+    /// reachable zone books. Each zone book is already `(price,time,id)`-ordered,
+    /// which — fees being zone-constant — is landed order for that zone; a min-heap
+    /// over the per-zone heads yields the global landed order without materialising
+    /// and sorting every crossing sell. Returns `true` (truncated) when `early_stop`
+    /// let it stop with resting energy still unscanned — the only case a later
+    /// grid-capacity under-fill can be rescued by a full rebuild.
+    ///
+    /// `need_at_start` is the buy's size at the start of its cycle-iteration; passing
+    /// it (rather than reading `buy` live) makes a rebuild after a partial fill price
+    /// each sell exactly as a single full pass would.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_candidates(
+        candidates: &mut Vec<Candidate>,
+        zone_books: &ZoneBooks,
+        sell_orders: &[FastOrder],
+        buy: &FastOrder,
+        need_at_start: Decimal,
+        topology: &dyn TopologySnapshot,
+        dynamic_multiplier: FastPrice,
+        intra_zone_mult: FastPrice,
+        early_stop: bool,
+    ) -> bool {
+        candidates.clear();
+
+        // Fast path — zero or one zone book (the common deployment). Its `range` is
+        // already landed-ordered, so drain it directly with no per-buy cursor Vec or
+        // heap allocation. (`match_cycle` is called once per matching tick, so this
+        // per-buy allocation saving is on the hot path.)
+        if zone_books.len() <= 1 {
+            let Some((&sell_zone_id, book)) = zone_books.iter().next() else {
+                return false;
+            };
+            if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, MIN_TRADE_AMOUNT) {
+                return false;
+            }
+            let fees = ZoneFees {
+                wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
+                loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
+            };
+            let mut gathered = Decimal::ZERO;
+            for (_, &sell_idx) in book.range(..=(buy.price, i64::MAX, uuid::Uuid::max())) {
+                if let Some(c) = Self::priced_candidate(
+                    buy,
+                    need_at_start,
+                    sell_idx,
+                    &sell_orders[sell_idx],
+                    topology,
+                    fees,
+                    dynamic_multiplier,
+                    intra_zone_mult,
+                ) {
+                    gathered += sell_orders[sell_idx].remaining_amount();
+                    candidates.push(c);
+                    if early_stop && gathered >= need_at_start {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Multi-zone: k-way merge. One cursor per reachable zone — a landed-ordered
+        // iterator over that zone's crossing sells (raw ask <= bid) plus its fees.
+        struct ZoneCursor<'a> {
+            fees: ZoneFees,
+            range: std::collections::btree_map::Range<'a, (FastPrice, i64, uuid::Uuid), usize>,
+        }
+        let mut cursors: Vec<ZoneCursor> = Vec::new();
+        for (&sell_zone_id, book) in zone_books {
+            // Topology pre-filter: can the grid move energy from this zone to the
+            // buyer's zone at all? Checked with MIN_TRADE_AMOUNT as a baseline.
+            if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, MIN_TRADE_AMOUNT) {
+                continue;
+            }
+            // wheeling + loss depend only on (sell_zone, buy_zone) — computed once per
+            // zone, not per sell.
+            let fees = ZoneFees {
+                wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
+                loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
+            };
+            // Range: all sells in this zone with raw ask <= the buyer's bid.
+            // `priced_candidate` rejects any sell whose ask exceeds the bid, so the
+            // bid is the exact, tight upper bound (the discount / dynamic multiplier
+            // only ever reduce the buyer's payment within a crossing match, never
+            // rescue an above-bid sell).
+            cursors.push(ZoneCursor {
+                fees,
+                range: book.range(..=(buy.price, i64::MAX, uuid::Uuid::max())),
+            });
+        }
+
+        // Advance one cursor to its next priced (crossing) candidate, skipping sells
+        // that price out (self-trade, capacity, landed > bid).
+        let next_priced = |cur: &mut ZoneCursor| -> Option<Candidate> {
+            for (_, &sell_idx) in cur.range.by_ref() {
+                if let Some(c) = Self::priced_candidate(
+                    buy,
+                    need_at_start,
+                    sell_idx,
+                    &sell_orders[sell_idx],
+                    topology,
+                    cur.fees,
+                    dynamic_multiplier,
+                    intra_zone_mult,
+                ) {
+                    return Some(c);
+                }
+            }
+            None
+        };
+
+        // Single reachable zone (the common case): its cursor is already in landed
+        // order, so drain it directly — no heap, no per-candidate `HeapHead` move.
+        if cursors.len() == 1 {
+            let mut gathered = Decimal::ZERO;
+            while let Some(cand) = next_priced(&mut cursors[0]) {
+                gathered += sell_orders[cand.sell_idx].remaining_amount();
+                candidates.push(cand);
+                if early_stop && gathered >= need_at_start {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        let mut heap: BinaryHeap<HeapHead> = BinaryHeap::with_capacity(cursors.len());
+        for idx in 0..cursors.len() {
+            if let Some(cand) = next_priced(&mut cursors[idx]) {
+                heap.push(HeapHead { cand, cursor: idx });
+            }
+        }
+
+        let mut gathered = Decimal::ZERO;
+        let mut truncated = false;
+        while let Some(head) = heap.pop() {
+            let idx = head.cursor;
+            gathered += sell_orders[head.cand.sell_idx].remaining_amount();
+            candidates.push(head.cand);
+            // Landed order == fill order, so once gathered resting energy covers the
+            // buy the cheaper sells are all in hand and any dearer ones would never
+            // fill — stop (unless a full scan was requested, e.g. for FOK).
+            if early_stop && gathered >= need_at_start {
+                truncated = true;
+                break;
+            }
+            if let Some(cand) = next_priced(&mut cursors[idx]) {
+                heap.push(HeapHead { cand, cursor: idx });
+            }
+        }
+        truncated
+    }
+
     /// Execute a matching cycle on a set of orders.
     /// Optimized for grid-scale throughput using zone-segmented order books.
     pub fn match_cycle(
@@ -209,7 +406,7 @@ impl MatchingEngine {
         // 1. Segment active sell orders by Zone and Price-Time priority.
         // BTreeMap (not HashMap) so zone iteration order is deterministic.
         // Map: ZoneId -> BTreeMap<(Price, CreatedAt, Id), Index>
-        let mut zone_books: BTreeMap<Option<i32>, BTreeMap<(FastPrice, i64, uuid::Uuid), usize>> =
+        let mut zone_books: ZoneBooks =
             BTreeMap::new();
         for (idx, sell) in sell_orders.iter().enumerate() {
             if sell.remaining_amount() >= MIN_TRADE_AMOUNT && !sell.is_expired(now_ns) {
@@ -236,16 +433,6 @@ impl MatchingEngine {
         // per-trade check independently can oversell one link N-fold. Every committed
         // match adds to its link's total; each fill is re-checked against the running
         // total so cumulative flow can never exceed the link rating.
-        // With a single zone book, `book.range` already yields sells in
-        // (price,time,id) == landed-cost order (wheeling/loss/discount are all
-        // zone-constant, so landed cost is monotonic in the raw ask), which lets the
-        // buy loop below skip the per-buy sort AND stop building once it has gathered
-        // enough resting energy to fill the buy — turning the per-buy scan from
-        // O(all crossing sells) into O(sells actually needed). With more than one
-        // zone the global landed order interleaves the books, so the full build +
-        // sort is retained.
-        let single_zone = zone_books.len() <= 1;
-
         let mut committed_flow: BTreeMap<(Option<i32>, Option<i32>), Decimal> = BTreeMap::new();
         for buy in buy_orders.iter_mut() {
             if buy.remaining_amount() < MIN_TRADE_AMOUNT || buy.is_expired(now_ns) {
@@ -253,92 +440,34 @@ impl MatchingEngine {
             }
 
             // The buy's fillable size, fixed for this cycle-iteration. Passed to
-            // `priced_candidate` on every (re)build so a rebuild after a partial fill
-            // prices each sell exactly as a single full pass would, and used as the
-            // target the single-zone fast path gathers up to before it stops building.
+            // `gather_candidates` on every (re)build so a rebuild after a partial fill
+            // prices each sell exactly as a single full pass would, and the target the
+            // k-way merge gathers up to before it stops.
             let need_at_start = buy.remaining_amount();
 
-            // Early-stop applies only to the single-zone fast path, and never to FOK
-            // (whose all-or-nothing check must see every reachable sell). A grid-
-            // capacity skip can leave an early-stopped buy under-filled; if so we
-            // rebuild it once with a full scan (`full_scan`) — correctness first, the
-            // fast path for the common no-skip case.
-            let allow_early_stop = single_zone && buy.time_in_force != TimeInForce::Fok;
-            let mut full_scan = !allow_early_stop;
+            // FOK never early-stops — its all-or-nothing check must weigh every
+            // reachable sell. Everything else starts optimistic (early-stop on); a
+            // grid-capacity skip that leaves the buy under-filled flips `full_scan`
+            // and rebuilds once — correctness first, the fast path for the common
+            // no-skip case.
+            let mut full_scan = buy.time_in_force == TimeInForce::Fok;
 
             loop {
-                candidates.clear();
-                // `truncated` = the build stopped early with resting energy still
-                // unscanned beyond it; only then can a capacity-skip under-fill be
-                // rescued by a full rebuild.
-                let mut truncated = false;
-                let mut gathered = Decimal::ZERO;
-
-                // Optimization: Only iterate through zones that can reach the buyer's zone
-                for (&sell_zone_id, book) in &zone_books {
-                    // Topology pre-filtering: can the grid move energy from sell_zone to buy_zone?
-                    // We check with MIN_TRADE_AMOUNT as a baseline.
-                    if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, MIN_TRADE_AMOUNT) {
-                        continue;
-                    }
-
-                    // wheeling + loss depend only on (sell_zone, buy_zone) — compute once
-                    // per zone book, not once per sell.
-                    let fees = ZoneFees {
-                        wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
-                        loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
-                    };
-
-                    // Range query: all sells in this zone with raw ask <= the buyer's bid.
-                    // `priced_candidate` rejects any sell whose ask exceeds the bid (the
-                    // Case-1 settlement invariant), so the bid is the exact, tight upper
-                    // bound — no widening for the discount / dynamic multiplier is needed
-                    // (they only ever reduce the buyer's payment WITHIN a crossing match,
-                    // never rescue an above-bid sell). Fees (wheeling/loss) can still push a
-                    // below-bid sell's landed cost over the bid; priced_candidate does that
-                    // final landed <= bid check.
-                    let upper_price = buy.price;
-                    for (_, &sell_idx) in book.range(..=(upper_price, i64::MAX, uuid::Uuid::max())) {
-                        if let Some(c) = Self::priced_candidate(
-                            buy,
-                            need_at_start,
-                            sell_idx,
-                            &sell_orders[sell_idx],
-                            topology,
-                            fees,
-                            dynamic_multiplier,
-                            intra_zone_mult,
-                        ) {
-                            gathered += sell_orders[sell_idx].remaining_amount();
-                            candidates.push(c);
-                            // Single-zone only: the range is landed-ordered, so once
-                            // gathered resting energy covers the buy the cheaper sells
-                            // are all in hand and the rest (dearer) would never fill.
-                            if !full_scan && gathered >= need_at_start {
-                                truncated = true;
-                                break;
-                            }
-                        }
-                    }
-                    if truncated {
-                        break;
-                    }
-                }
-
-                // Consolidate candidates from all reachable zones by landed cost.
-                // Ties broken by raw sell price, then arrival, then id so the chosen
-                // fill order is deterministic (price-time priority) and not subject to
-                // zone-book traversal order. Skipped in the single-zone case: one
-                // landed-ordered `book.range` is already in exactly this order.
-                if !single_zone {
-                    candidates.sort_unstable_by(|a, b| {
-                        a.landed
-                            .cmp(&b.landed)
-                            .then_with(|| a.sort_price.cmp(&b.sort_price))
-                            .then_with(|| a.sort_time.cmp(&b.sort_time))
-                            .then_with(|| a.sort_id.cmp(&b.sort_id))
-                    });
-                }
+                // K-way-merge the reachable zone books into `candidates` in landed
+                // order (no separate sort). `truncated` = the merge stopped early with
+                // resting energy still unscanned, the only case a capacity-skip
+                // under-fill can be rescued by a full rebuild.
+                let truncated = Self::gather_candidates(
+                    &mut candidates,
+                    &zone_books,
+                    sell_orders,
+                    buy,
+                    need_at_start,
+                    topology,
+                    dynamic_multiplier,
+                    intra_zone_mult,
+                    !full_scan,
+                );
 
                 // FOK handling — all-or-nothing. Simulate the real drain loop below
                 // (sells under MIN_TRADE_AMOUNT are skipped; the loop stops once the
@@ -466,10 +595,10 @@ impl MatchingEngine {
                     }
                 }
 
-                // The single-zone fast path stopped early; if a grid-capacity skip
-                // left the buy short there may be farther, unbuilt sells that can still
-                // fill it. Rebuild this buy once with a full scan. Otherwise (already
-                // full, buy filled, or the book was exhausted without truncation) done.
+                // The merge stopped early; if a grid-capacity skip left the buy short
+                // there may be farther, unmerged sells that can still fill it. Rebuild
+                // this buy once with a full scan. Otherwise (already full, buy filled,
+                // or the merge drained without truncation) done.
                 if full_scan || buy.remaining_amount() < MIN_TRADE_AMOUNT || !truncated {
                     break;
                 }
@@ -1609,5 +1738,59 @@ mod tests {
         assert_eq!(stats.total_volume, dec!(100.0), "capacity gate caps the fill at one 100 lot");
         assert_eq!(matches.len(), 1, "no double-count across the retry rebuild");
         assert_eq!(buys[0].remaining_amount(), dec!(200.0), "buy left partially filled");
+    }
+
+    /// Multi-zone k-way merge: every crossing pair across 8 zones must still match
+    /// (completeness), guarding the heap merge + early-stop against dropped fills.
+    /// One buyer per zone, one seller per zone, all crossing 1:1.
+    #[test]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // small loop indices
+    fn multi_zone_merge_matches_all_crossing() {
+        let z = 8usize;
+        let mut buys: Vec<FastOrder> = (0..z)
+            .map(|i| order(Uuid::new_v4(), dec!(1.0), dec!(100.0), (i % z) as i32, i as i64, TimeInForce::Gtc, i))
+            .collect();
+        let mut sells: Vec<FastOrder> = (0..z)
+            .map(|i| order(Uuid::new_v4(), dec!(0.9), dec!(100.0), (i % z) as i32, i as i64, TimeInForce::Gtc, i))
+            .collect();
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(z),
+            &meta(z),
+            &NoFeeTopology,
+            unit(),
+            (z * 2) as i64,
+        );
+        assert_eq!(matches.len(), z, "each zone's buyer fills from its seller");
+        assert_eq!(stats.total_volume, dec!(100.0) * Decimal::from(z));
+    }
+
+    /// Multi-zone merge must pick the globally cheapest sell first, across zones,
+    /// even though each zone book is only locally sorted. The buyer sits in a zone
+    /// with no local sell (so every sell is inter-zone, no intra-zone discount to
+    /// muddy the landed order); sells in zones 1/2/3 priced 0.90/0.50/0.70 — the
+    /// 0.50 (zone 2) must win.
+    #[test]
+    fn multi_zone_merge_fills_globally_cheapest_first() {
+        let cheap = Uuid::new_v4();
+        let mut sells = vec![
+            order(Uuid::new_v4(), dec!(0.90), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
+            order(cheap, dec!(0.50), dec!(100.0), 2, 100, TimeInForce::Gtc, 1),
+            order(Uuid::new_v4(), dec!(0.70), dec!(100.0), 3, 100, TimeInForce::Gtc, 2),
+        ];
+        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 99, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(3),
+            &NoFeeTopology,
+            unit(),
+            100,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].seller_id, cheap, "cheapest across zones wins the merge");
+        assert_eq!(stats.total_volume, dec!(100.0));
     }
 }
