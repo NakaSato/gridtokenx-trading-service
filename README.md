@@ -10,8 +10,7 @@ rules (services, gateways, Chain Bridge as the only Solana RPC client) live in t
 
 - **Architecture** → [`ARCHITECTURE.md`](ARCHITECTURE.md) — citation-backed map (module layout,
   match→settlement pipeline, invariants).
-- **REST reference** → [`API.md`](API.md) — narrative conventions; live OpenAPI at
-  `GET /api-docs/openapi.json`, Swagger UI at `/docs`.
+- **REST reference** → live OpenAPI at `GET /api-docs/openapi.json`, Swagger UI at `/docs`.
 - **LLM working rules** → [`CLAUDE.md`](CLAUDE.md).
 
 ---
@@ -125,8 +124,7 @@ Loaded by `trading_core::config::Config::from_env()`. `.env` is auto-loaded via 
 
 REST under `/api/v1/*` (JWT `UserContext` + `ServiceRole` RBAC per handler; `/health`, `/metrics`
 open). Money/energy amounts are decimal **strings** (`rust_decimal`), not JSON numbers. Timestamps
-are RFC-3339 UTC. Full reference in [`API.md`](API.md); live spec at `/api-docs/openapi.json`,
-Swagger UI at `/docs`.
+are RFC-3339 UTC. Full reference: live spec at `/api-docs/openapi.json`, Swagger UI at `/docs`.
 
 Domain areas: **Orders** · **Quotes** · **Order book / market stats** · **Markets (read-only)** ·
 **Trades** (+ CSV/JSON export) · **Price alerts** · **Recurring orders** · **Futures** · **User

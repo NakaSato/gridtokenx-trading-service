@@ -57,6 +57,14 @@ pub struct Config {
     /// second consumer for the meter topic there. Default: `kafka_bootstrap_servers`
     /// (single-cluster, no behavior change).
     pub readmodel_meter_brokers: String,
+    /// Read-only connection URL of the IAM database, used only by the boot
+    /// backfill to snapshot `user_wallets` into `iam_wallet_read_model`.
+    /// Post DB-split the trading pool no longer sees IAM tables, so without
+    /// this the wallet backfill is skipped (event feed still applies).
+    pub readmodel_iam_db_url: Option<String>,
+    /// Read-only connection URL of the metering database, used only by the
+    /// boot backfill to snapshot `meters` into `meter_read_model`.
+    pub readmodel_meter_db_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +303,12 @@ impl Config {
             readmodel_meter_brokers: env::var("READMODEL_METER_BROKERS")
                 .or_else(|_| env::var("KAFKA_BOOTSTRAP_SERVERS"))
                 .unwrap_or_else(|_| "localhost:9001".to_string()),
+            readmodel_iam_db_url: env::var("READMODEL_IAM_DATABASE_URL")
+                .or_else(|_| env::var("IAM_DATABASE_URL"))
+                .ok(),
+            readmodel_meter_db_url: env::var("READMODEL_METER_DATABASE_URL")
+                .or_else(|_| env::var("METER_DATABASE_URL"))
+                .ok(),
         })
     }
 }

@@ -49,7 +49,8 @@ crates/
 │   └── src/
 │       ├── pool.rs
 │       └── repositories/            order, settlement, outbox, futures, carbon, conditional,
-│                                    recurring, vpp, epoch, analytics
+│                                    recurring, vpp, epoch, analytics, price_alert, meter,
+│                                    read_model (wallet/meter read-models, post DB-split)
 ├── trading-infra/                   external adapters (async)
 │   └── src/
 │       ├── blockchain/              BlockchainService → Chain Bridge (rpc, settlement, wallet)
@@ -72,7 +73,8 @@ crates/
 │       ├── recurring_evaluator.rs   recurring-order evaluation
 │       ├── rehydration.rs           order-book rehydration on boot
 │       ├── market_data.rs / participant.rs / p2p_config.rs
-│       └── workers/                 matcher, settlement, supply_sync, oracle_consumer
+│       └── workers/                 matcher, clearing, settlement, supply_sync, reaper,
+│                                    recurring, trigger, read_model_feed
 ├── trading-api/                     ConnectRPC + REST surface (async)
 │   └── src/
 │       ├── startup.rs               run(state, port, grpc_port, token) — serves HTTP + gRPC
@@ -116,6 +118,14 @@ id), idx>>`) enforcing **price-time priority**, applies grid topology via the in
 `TopologySnapshot` trait (wheeling charges, loss factors, flow accommodation, intra-zone discount),
 and returns `Vec<MatchResult>` + `CycleStats`. Price math uses `FastPrice` fixed-point — **no floats
 on the hot path**. Keep this crate pure and dependency-light.
+
+When there is a **single zone book**, the per-buy scan takes a fast path: that book's `range` already
+yields sells in landed-cost order (zone-constant fees), so the engine skips the per-buy candidate sort
+and stops building candidates once it has gathered enough resting energy to fill the buy — turning the
+scan from O(all crossing sells) into O(sells actually needed) and the full-cross cycle from ~O(N²) to
+~O(N·log N). Multi-zone cycles keep the full build-and-sort (the global landed order interleaves books);
+a rare grid-capacity skip in the fast path falls back to one full-scan rebuild for that buy so results
+are identical to the exhaustive path.
 
 ### Settlement via Chain Bridge
 
@@ -175,6 +185,23 @@ Domain events are written to a DB **outbox** in the same transaction as state ch
 fans out to **Redis Streams** always and **Kafka** when `KAFKA_EVENTS_ENABLED=true`. Services never
 publish to Kafka/Redis directly — they go through the outbox so events stay consistent with DB writes.
 
+### Read-model feed (DB-per-service Phase 1)
+
+Post DB-split the trading pool no longer sees IAM/meter tables, so wallet and meter data trading
+needs are mirrored into **local read-model tables** (`iam_wallet_read_model`, `meter_read_model`).
+Two halves, both gated on `TRADING_READMODEL_FEED=true`:
+
+- **Boot backfill** — runs once in `ServiceBuilder::build`, snapshots the source tables via
+  **read-only** connections `READMODEL_IAM_DATABASE_URL` / `READMODEL_METER_DATABASE_URL`
+  (`Config::readmodel_iam_db_url` / `readmodel_meter_db_url`,
+  `crates/trading-core/src/config/mod.rs`). Missing URL → that backfill is skipped (the event feed
+  still applies deltas).
+- **`ReadModelFeedWorker`** — a stable-group Kafka `StreamConsumer`
+  (`crates/trading-logic/src/workers/read_model_feed.rs`) that streams wallet/meter change events
+  and applies them to the read-models. Feeds into `WalletReadModelRepository` /
+  `MeterReadModelRepository`. Never `.unwrap()`s the consumer: a build/subscribe failure disables
+  the feed rather than crashing the process.
+
 ### ServiceBuilder — the single wiring point
 
 All collaborators are `Arc<dyn Trait>` traits defined in `trading-core/src/traits.rs`
@@ -182,8 +209,9 @@ All collaborators are `Arc<dyn Trait>` traits defined in `trading-core/src/trait
 `AnalyticsRepository`, `VppRepository`, `OutboxRepository`, `BlockchainGateway`, `EventPublisher`,
 `IdentityGateway`, `AuditLog`, `CacheStore`, …). Concrete impls are constructed in **exactly one
 place**: `ServiceBuilder::build` (`bin/trading-service/src/builder.rs`), which returns an
-`Infrastructure` (repos + gateways) and `AppServices` (`SettlementService`, `MatcherService`,
-`VppService`, `OracleConsumer`). To add a dependency: define the trait in `core`, implement it in
+`Infrastructure` (repos + gateways, incl. the optional `ReadModelFeedWorker`) and `AppServices`
+(`SettlementService`, `MatcherService`, `ClearingService`, `VppService`, `RecurringEvaluator`,
+`TriggerEvaluator`). To add a dependency: define the trait in `core`, implement it in
 `persistence`/`infra`, wire it in `builder.rs`, and surface it on `AppState` if a handler needs it.
 
 ### Runtime topology (`bin/trading-service/src/main.rs`)
@@ -198,7 +226,9 @@ place**: `ServiceBuilder::build` (`bin/trading-service/src/builder.rs`), which r
 | `ReaperWorker` | every 10s | flips orders past `expires_at` to `Expired`; sole expiry mechanism (the active-order queries no longer filter on `expires_at`), supervised with respawn + a 2×-cadence DB-call timeout |
 | `SettlementWorker` | every 10s, batch 10 | settles through Chain Bridge |
 | `SupplySyncWorker` | polling interval | syncs tokenized supply from blockchain; graceful-degrades |
-| `OracleConsumer` | event-driven | consumes oracle readings off the EventBus, feeds settlement |
+| `RecurringEvaluatorWorker` | periodic | materializes due recurring orders |
+| `TriggerEvaluatorWorker` | periodic | evaluates conditional/trigger orders |
+| `ReadModelFeedWorker` | Kafka-streamed | present only when `TRADING_READMODEL_FEED=true`; mirrors IAM/meter events into local read-models (see below) |
 
 The API server (`trading_api::startup::run`) serves both REST and ConnectRPC; default ports are
 `HTTP_PORT = 8093` and `GRPC_PORT = 8092` (override via env).
