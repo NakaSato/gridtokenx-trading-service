@@ -18,12 +18,16 @@ where
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Debug logging for headers
-        tracing::debug!("Incoming headers: {:?}", parts.headers);
-        for (name, value) in parts.headers.iter() {
-            if name.as_str().starts_with("x-gridtokenx-") {
-                tracing::info!("Found GridTokenX header: {} = {:?}", name, value);
-            }
+        // Log which GridTokenX headers are present, but never their values —
+        // they carry the gateway secret and user identity.
+        let gridtokenx_headers: Vec<&str> = parts
+            .headers
+            .keys()
+            .map(axum::http::HeaderName::as_str)
+            .filter(|name| name.starts_with("x-gridtokenx-"))
+            .collect();
+        if !gridtokenx_headers.is_empty() {
+            tracing::debug!(headers = ?gridtokenx_headers, "GridTokenX headers present");
         }
 
         if let Some(user_id_str) = parts
