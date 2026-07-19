@@ -155,6 +155,37 @@ impl SettlementRepository for MockSystem {
             total_settled_value,
         })
     }
+    async fn get_market_price(&self, window_hours: i64) -> TraitResult<trading_core::models::MarketPrice> {
+        use rust_decimal::Decimal;
+        let s = self.settlements.lock().unwrap();
+        let done: Vec<_> = s.iter().filter(|x| x.status == SettlementStatus::Completed).collect();
+        let volume: Decimal = done.iter().map(|x| x.energy_amount).sum();
+        let notional: Decimal = done.iter().map(|x| x.price * x.energy_amount).sum();
+        let vwap = if volume.is_zero() { Decimal::ZERO } else { notional / volume };
+        let high = done.iter().map(|x| x.price).max().unwrap_or(Decimal::ZERO);
+        let low = done.iter().map(|x| x.price).min().unwrap_or(Decimal::ZERO);
+        let last_price = done.last().map(|x| x.price).unwrap_or(Decimal::ZERO);
+        Ok(trading_core::models::MarketPrice {
+            vwap,
+            last_price,
+            high,
+            low,
+            volume_kwh: volume,
+            trade_count: done.len() as i64,
+            window_hours,
+            as_of: gridtokenx_telemetry::time::now(),
+        })
+    }
+    async fn count_active_traders(&self, _window_hours: i64) -> TraitResult<i64> {
+        use std::collections::HashSet;
+        let s = self.settlements.lock().unwrap();
+        let mut ids: HashSet<Uuid> = HashSet::new();
+        for x in s.iter().filter(|x| x.status == SettlementStatus::Completed) {
+            ids.insert(x.buyer_id);
+            ids.insert(x.seller_id);
+        }
+        Ok(ids.len() as i64)
+    }
     async fn update_settlement_status(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>) -> TraitResult<()> { Ok(()) }
     async fn update_settlement_status_with_event(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>, _event: &Event) -> TraitResult<()> { Ok(()) }
 }

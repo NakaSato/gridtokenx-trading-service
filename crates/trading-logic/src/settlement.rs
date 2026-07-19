@@ -433,6 +433,15 @@ mod tests {
         async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> {
             unimplemented!()
         }
+        async fn get_market_price(
+            &self,
+            _window_hours: i64,
+        ) -> TraitResult<trading_core::models::MarketPrice> {
+            unimplemented!()
+        }
+        async fn count_active_traders(&self, _window_hours: i64) -> TraitResult<i64> {
+            unimplemented!()
+        }
     }
 
     // ── Fake BlockchainGateway ───────────────────────────────────────────────

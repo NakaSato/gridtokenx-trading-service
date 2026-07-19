@@ -13,8 +13,8 @@ use std::str::FromStr;
 use tracing::info;
 use utoipa::{IntoParams, ToSchema};
 use trading_core::models::{
-    NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder, Settlement,
-    SettlementStats, TradingOrder,
+    MarketPrice, NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder,
+    Settlement, SettlementStats, TradingOrder,
 };
 use trading_core::recurring::next_execution_at;
 use trading_core::types::{
@@ -822,10 +822,31 @@ pub async fn create_quote(
         ));
     }
 
-    // An absent/zero agreed price falls back to the configured base price.
+    // An absent/zero agreed price falls back to the real market price (24h VWAP,
+    // widened to all-time), never a static config default. If the market has
+    // never traded there is no price to quote — reject rather than invent one.
     let mut price = Decimal::from_str(req.agreed_price.trim()).unwrap_or(Decimal::ZERO);
     if price <= Decimal::ZERO {
-        price = m.base_price_thb_kwh;
+        let quote_err = |e: String| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e);
+        let mut mp = state
+            .settlement_repo
+            .get_market_price(24)
+            .await
+            .map_err(|e| quote_err(format!("Database error: {e}")))?;
+        if mp.trade_count == 0 {
+            mp = state
+                .settlement_repo
+                .get_market_price(0)
+                .await
+                .map_err(|e| quote_err(format!("Database error: {e}")))?;
+        }
+        if mp.trade_count == 0 {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "no agreed_price supplied and no market price yet (no completed trades); supply agreed_price".to_string(),
+            ));
+        }
+        price = mp.vwap;
     }
 
     let same_zone = req.buyer_zone_id == req.seller_zone_id;
@@ -874,36 +895,58 @@ pub async fn create_quote(
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MarketStatsResponse {
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Total settled energy over the last 24h (kWh), decimal string.
     pub total_volume_24h_kwh: String,
+    /// 24h VWAP price (THB/kWh), decimal string. "0" when no trades in 24h.
     pub avg_price_24h: String,
-    pub active_users: u32,
-    pub grid_stability_index: String,
-    pub renewable_ratio: String,
+    /// Distinct users who traded (buyer or seller) in the last 24h.
+    pub active_users: i64,
+    /// Number of completed settlements in the last 24h.
+    pub trade_count_24h: i64,
 }
 
-/// 24h market statistics. Currently returns MOCK data.
+/// Real 24h market statistics, derived from completed settlements — no mock or
+/// static values. Price/volume come from the market-price aggregate (VWAP);
+/// `active_users` is the distinct buyer∪seller count. Grid-stability and
+/// renewable-ratio were removed: trading has no real source for them (they
+/// belong to telemetry), and a fabricated constant is worse than their absence.
 #[utoipa::path(
     get,
     path = "/api/v1/stats",
     tag = "markets",
     responses(
-        (status = 200, description = "Market stats (mock values)", body = MarketStatsResponse),
+        (status = 200, description = "Real 24h market stats from settled trades", body = MarketStatsResponse),
         (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
     ),
     security(("gateway_role" = [])),
 )]
 pub async fn get_market_stats(
     role: ServiceRole,
+    State(state): State<AppState>,
 ) -> Result<Json<MarketStatsResponse>, (axum::http::StatusCode, String)> {
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
+
+    let price = state.settlement_repo.get_market_price(24).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+    let active_users = state.settlement_repo.count_active_traders(24).await.map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
     Ok(Json(MarketStatsResponse {
         timestamp: gridtokenx_telemetry::time::now(),
-        total_volume_24h_kwh: "12500.50".to_string(),
-        avg_price_24h: "4.45".to_string(),
-        active_users: 156,
-        grid_stability_index: "0.98".to_string(),
-        renewable_ratio: "0.85".to_string(),
+        total_volume_24h_kwh: price.volume_kwh.to_string(),
+        avg_price_24h: price.vwap.to_string(),
+        active_users,
+        trade_count_24h: price.trade_count,
     }))
 }
 
@@ -1691,6 +1734,51 @@ pub async fn get_settlement_stats(
         )
     })?;
     Ok(Json(build_settlement_stats_response(&stats)))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct MarketPriceQuery {
+    /// Trailing window in hours (default 24, clamped to 0..=720).
+    /// `0` means all-time (no time bound) — used to widen when a 24h window is empty.
+    pub window_hours: Option<i64>,
+}
+
+/// Real market price (THB/kWh) computed from completed settlements — VWAP, last,
+/// high/low, volume and trade count over a trailing window. Replaces static/mock
+/// pricing: when `trade_count` is 0 there is no price yet (all fields 0), so
+/// callers must not render 0 as a real value.
+#[utoipa::path(
+    get,
+    path = "/api/v1/markets/price",
+    tag = "markets",
+    params(MarketPriceQuery),
+    responses(
+        (status = 200, description = "Real trade-derived market price; prices are decimal strings", body = MarketPrice),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
+pub async fn get_market_price(
+    role: ServiceRole,
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<MarketPriceQuery>,
+) -> Result<Json<MarketPrice>, (axum::http::StatusCode, String)> {
+    role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
+        .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
+
+    let window_hours = q.window_hours.unwrap_or(24).clamp(0, 720);
+    let price = state
+        .settlement_repo
+        .get_market_price(window_hours)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+    Ok(Json(price))
 }
 
 #[derive(Debug, Deserialize, IntoParams)]

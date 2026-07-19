@@ -457,6 +457,35 @@ pub struct SettlementStats {
     pub total_settled_value: Decimal,
 }
 
+/// Real market price derived from completed settlements over a trailing window.
+/// All prices are THB per kWh; `vwap` is volume-weighted by settled energy.
+/// When no trades fall in the window every numeric field is zero and
+/// `trade_count` is 0 — callers must treat that as "no price yet", not a real 0.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MarketPrice {
+    /// Volume-weighted average price over the window: Σ(price·energy)/Σ(energy).
+    #[schema(value_type = String)]
+    pub vwap: Decimal,
+    /// Price of the most recent completed settlement (latest by confirmed/created).
+    #[schema(value_type = String)]
+    pub last_price: Decimal,
+    /// Highest settlement price in the window.
+    #[schema(value_type = String)]
+    pub high: Decimal,
+    /// Lowest settlement price in the window.
+    #[schema(value_type = String)]
+    pub low: Decimal,
+    /// Total settled energy in the window (kWh).
+    #[schema(value_type = String)]
+    pub volume_kwh: Decimal,
+    /// Number of completed settlements in the window.
+    pub trade_count: i64,
+    /// Length of the trailing window, in hours.
+    pub window_hours: i64,
+    /// Server time this snapshot was computed.
+    pub as_of: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SettlementTransaction {
     pub settlement_id: Uuid,

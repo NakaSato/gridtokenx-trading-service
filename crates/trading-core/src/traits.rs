@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::events::Event;
 use crate::models::{
-    ConditionalOrder, MarketEpoch, OrderBookEntry, OrderMatch, RecurringOrder, Settlement,
-    SettlementStats, TradingOrder,
+    ConditionalOrder, MarketEpoch, MarketPrice, OrderBookEntry, OrderMatch, RecurringOrder,
+    Settlement, SettlementStats, TradingOrder,
 };
 use crate::types::OrderStatus;
 
@@ -232,6 +232,17 @@ pub trait SettlementRepository: Send + Sync {
 
     /// Aggregate settlement counts by status + total settled value.
     async fn get_settlement_stats(&self) -> TraitResult<SettlementStats>;
+
+    /// Real market price over a trailing `window_hours` window: VWAP, last,
+    /// high/low, volume and trade count from `completed` settlements. Returns an
+    /// all-zero `MarketPrice` (trade_count = 0) when the window holds no trades.
+    /// `window_hours <= 0` means all-time (no time bound).
+    async fn get_market_price(&self, window_hours: i64) -> TraitResult<MarketPrice>;
+
+    /// Count distinct users (buyer ∪ seller) with at least one `completed`
+    /// settlement in the last `window_hours`. Real replacement for the mock
+    /// `active_users` stat.
+    async fn count_active_traders(&self, window_hours: i64) -> TraitResult<i64>;
 
     /// Update settlement status.
     async fn update_settlement_status(

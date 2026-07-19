@@ -273,6 +273,8 @@ mod tests {
         async fn reclaim_stale_processing(&self, _s: i64, _m: i32) -> TraitResult<u64> { unimplemented!() }
         async fn list_settlements_for_user(&self, _u: Uuid, _l: i64, _o: i64) -> TraitResult<(Vec<Settlement>, i64)> { unimplemented!() }
         async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> { unimplemented!() }
+        async fn get_market_price(&self, _window_hours: i64) -> TraitResult<trading_core::models::MarketPrice> { unimplemented!() }
+        async fn count_active_traders(&self, _window_hours: i64) -> TraitResult<i64> { unimplemented!() }
         async fn update_settlement_status(&self, _id: Uuid, _s: &str, _t: Option<&str>, _e: Option<&str>) -> TraitResult<()> { unimplemented!() }
         async fn update_settlement_status_with_event(&self, _id: Uuid, _s: &str, _t: Option<&str>, _e: Option<&str>, _ev: &Event) -> TraitResult<()> { unimplemented!() }
     }

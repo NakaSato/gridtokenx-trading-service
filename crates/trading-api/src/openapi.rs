@@ -57,6 +57,7 @@ impl Modify for SecurityAddon {
         crate::rest::get_p2p_market_prices,
         crate::rest::get_matching_status,
         crate::rest::get_settlement_stats,
+        crate::rest::get_market_price,
         crate::rest::get_p2p_orderbook,
         crate::rest::get_clearing_epochs,
         crate::rest::list_active_order_meters,

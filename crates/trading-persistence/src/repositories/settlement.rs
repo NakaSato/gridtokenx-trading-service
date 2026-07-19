@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
 use trading_core::events::Event;
-use trading_core::models::{OrderMatch, Settlement, SettlementStats, SettlementStatus};
+use trading_core::models::{
+    MarketPrice, OrderMatch, Settlement, SettlementStats, SettlementStatus,
+};
 use trading_core::traits::{SettlementRepository, TraitResult};
 
 /// Bind every settlement column onto an INSERT query — shared by the plain and
@@ -95,6 +97,18 @@ struct SettlementStatsRow {
     confirmed: i64,
     failed: i64,
     total_settled_value: Decimal,
+}
+
+/// Aggregates over completed settlements in the trailing window. Every field is
+/// nullable at the SQL level (no rows → all NULL), coalesced to zero in code.
+#[derive(Debug, Clone, FromRow)]
+struct MarketPriceRow {
+    vwap: Option<Decimal>,
+    last_price: Option<Decimal>,
+    high: Option<Decimal>,
+    low: Option<Decimal>,
+    volume_kwh: Option<Decimal>,
+    trade_count: i64,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -402,6 +416,81 @@ impl SettlementRepository for PostgresSettlementRepository {
             failed_count: row.failed,
             total_settled_value: row.total_settled_value,
         })
+    }
+
+    async fn get_market_price(&self, window_hours: i64) -> TraitResult<MarketPrice> {
+        // VWAP weights price by settled energy; high/low/volume/count are plain
+        // aggregates. `last_price` uses a correlated subselect ordering by the
+        // settlement's effective time (confirmed_at, falling back to created_at)
+        // so it is the genuinely most-recent completed fill, not an aggregate.
+        //
+        // `window_hours <= 0` means "all-time": the `$2::bool` all-time flag
+        // short-circuits the time predicate, so widening to the full history
+        // needs no magic large window value.
+        let all_time = window_hours <= 0;
+        let hours = i32::try_from(window_hours.max(0)).unwrap_or(24);
+        let row = sqlx::query_as::<_, MarketPriceRow>(
+            r#"
+            SELECT
+                SUM(price * energy_amount) / NULLIF(SUM(energy_amount), 0) AS vwap,
+                MAX(price)              AS high,
+                MIN(price)              AS low,
+                SUM(energy_amount)      AS volume_kwh,
+                COUNT(*)                AS trade_count,
+                (
+                    SELECT s2.price
+                    FROM settlements s2
+                    WHERE s2.status = 'completed'
+                      AND ($2::bool OR s2.created_at >= NOW() - make_interval(hours => $1::int))
+                    ORDER BY COALESCE(s2.confirmed_at, s2.created_at) DESC
+                    LIMIT 1
+                ) AS last_price
+            FROM settlements
+            WHERE status = 'completed'
+              AND ($2::bool OR created_at >= NOW() - make_interval(hours => $1::int))
+            "#,
+        )
+        .bind(hours)
+        .bind(all_time)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let z = Decimal::ZERO;
+        Ok(MarketPrice {
+            vwap: row.vwap.unwrap_or(z),
+            last_price: row.last_price.unwrap_or(z),
+            high: row.high.unwrap_or(z),
+            low: row.low.unwrap_or(z),
+            volume_kwh: row.volume_kwh.unwrap_or(z),
+            trade_count: row.trade_count,
+            window_hours,
+            as_of: gridtokenx_telemetry::time::now(),
+        })
+    }
+
+    async fn count_active_traders(&self, window_hours: i64) -> TraitResult<i64> {
+        let all_time = window_hours <= 0;
+        let hours = i32::try_from(window_hours.max(0)).unwrap_or(24);
+        // Distinct users across both sides: UNION the buyer and seller id sets,
+        // then count the deduped rows.
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT buyer_id AS uid FROM settlements
+                WHERE status = 'completed'
+                  AND ($2::bool OR created_at >= NOW() - make_interval(hours => $1::int))
+                UNION
+                SELECT seller_id AS uid FROM settlements
+                WHERE status = 'completed'
+                  AND ($2::bool OR created_at >= NOW() - make_interval(hours => $1::int))
+            ) AS traders
+            "#,
+        )
+        .bind(hours)
+        .bind(all_time)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
     }
 
     async fn update_settlement_status(
