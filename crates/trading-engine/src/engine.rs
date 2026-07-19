@@ -73,6 +73,7 @@ impl MatchingEngine {
     /// cross.
     fn priced_candidate(
         buy: &FastOrder,
+        buy_remaining: Decimal,
         sell_idx: usize,
         sell: &FastOrder,
         topology: &dyn TopologySnapshot,
@@ -97,8 +98,10 @@ impl MatchingEngine {
         }
         let sell_zone_id = sell.zone_id;
 
-        // Strict topology check for the actual tradeable amount.
-        let potential_amount = buy.remaining_amount().min(sell.remaining_amount());
+        // Strict topology check for the actual tradeable amount. `buy_remaining` is
+        // passed in (not read live off `buy`) so a rebuild after a partial fill uses
+        // the buy's start-of-cycle size — pricing a sell identically to a single pass.
+        let potential_amount = buy_remaining.min(sell.remaining_amount());
         if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, potential_amount) {
             return None;
         }
@@ -233,185 +236,244 @@ impl MatchingEngine {
         // per-trade check independently can oversell one link N-fold. Every committed
         // match adds to its link's total; each fill is re-checked against the running
         // total so cumulative flow can never exceed the link rating.
+        // With a single zone book, `book.range` already yields sells in
+        // (price,time,id) == landed-cost order (wheeling/loss/discount are all
+        // zone-constant, so landed cost is monotonic in the raw ask), which lets the
+        // buy loop below skip the per-buy sort AND stop building once it has gathered
+        // enough resting energy to fill the buy — turning the per-buy scan from
+        // O(all crossing sells) into O(sells actually needed). With more than one
+        // zone the global landed order interleaves the books, so the full build +
+        // sort is retained.
+        let single_zone = zone_books.len() <= 1;
+
         let mut committed_flow: BTreeMap<(Option<i32>, Option<i32>), Decimal> = BTreeMap::new();
         for buy in buy_orders.iter_mut() {
             if buy.remaining_amount() < MIN_TRADE_AMOUNT || buy.is_expired(now_ns) {
                 continue;
             }
 
-            candidates.clear();
+            // The buy's fillable size, fixed for this cycle-iteration. Passed to
+            // `priced_candidate` on every (re)build so a rebuild after a partial fill
+            // prices each sell exactly as a single full pass would, and used as the
+            // target the single-zone fast path gathers up to before it stops building.
+            let need_at_start = buy.remaining_amount();
 
-            // Optimization: Only iterate through zones that can reach the buyer's zone
-            for (&sell_zone_id, book) in &zone_books {
-                // Topology pre-filtering: can the grid move energy from sell_zone to buy_zone?
-                // We check with MIN_TRADE_AMOUNT as a baseline.
-                if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, MIN_TRADE_AMOUNT) {
-                    continue;
+            // Early-stop applies only to the single-zone fast path, and never to FOK
+            // (whose all-or-nothing check must see every reachable sell). A grid-
+            // capacity skip can leave an early-stopped buy under-filled; if so we
+            // rebuild it once with a full scan (`full_scan`) — correctness first, the
+            // fast path for the common no-skip case.
+            let allow_early_stop = single_zone && buy.time_in_force != TimeInForce::Fok;
+            let mut full_scan = !allow_early_stop;
+
+            loop {
+                candidates.clear();
+                // `truncated` = the build stopped early with resting energy still
+                // unscanned beyond it; only then can a capacity-skip under-fill be
+                // rescued by a full rebuild.
+                let mut truncated = false;
+                let mut gathered = Decimal::ZERO;
+
+                // Optimization: Only iterate through zones that can reach the buyer's zone
+                for (&sell_zone_id, book) in &zone_books {
+                    // Topology pre-filtering: can the grid move energy from sell_zone to buy_zone?
+                    // We check with MIN_TRADE_AMOUNT as a baseline.
+                    if !topology.can_accommodate_flow(sell_zone_id, buy.zone_id, MIN_TRADE_AMOUNT) {
+                        continue;
+                    }
+
+                    // wheeling + loss depend only on (sell_zone, buy_zone) — compute once
+                    // per zone book, not once per sell.
+                    let fees = ZoneFees {
+                        wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
+                        loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
+                    };
+
+                    // Range query: all sells in this zone with raw ask <= the buyer's bid.
+                    // `priced_candidate` rejects any sell whose ask exceeds the bid (the
+                    // Case-1 settlement invariant), so the bid is the exact, tight upper
+                    // bound — no widening for the discount / dynamic multiplier is needed
+                    // (they only ever reduce the buyer's payment WITHIN a crossing match,
+                    // never rescue an above-bid sell). Fees (wheeling/loss) can still push a
+                    // below-bid sell's landed cost over the bid; priced_candidate does that
+                    // final landed <= bid check.
+                    let upper_price = buy.price;
+                    for (_, &sell_idx) in book.range(..=(upper_price, i64::MAX, uuid::Uuid::max())) {
+                        if let Some(c) = Self::priced_candidate(
+                            buy,
+                            need_at_start,
+                            sell_idx,
+                            &sell_orders[sell_idx],
+                            topology,
+                            fees,
+                            dynamic_multiplier,
+                            intra_zone_mult,
+                        ) {
+                            gathered += sell_orders[sell_idx].remaining_amount();
+                            candidates.push(c);
+                            // Single-zone only: the range is landed-ordered, so once
+                            // gathered resting energy covers the buy the cheaper sells
+                            // are all in hand and the rest (dearer) would never fill.
+                            if !full_scan && gathered >= need_at_start {
+                                truncated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if truncated {
+                        break;
+                    }
                 }
 
-                // wheeling + loss depend only on (sell_zone, buy_zone) — compute once
-                // per zone book, not once per sell.
-                let fees = ZoneFees {
-                    wheeling: topology.calculate_wheeling_charge(sell_zone_id, buy.zone_id),
-                    loss: topology.calculate_loss_factor(sell_zone_id, buy.zone_id),
-                };
+                // Consolidate candidates from all reachable zones by landed cost.
+                // Ties broken by raw sell price, then arrival, then id so the chosen
+                // fill order is deterministic (price-time priority) and not subject to
+                // zone-book traversal order. Skipped in the single-zone case: one
+                // landed-ordered `book.range` is already in exactly this order.
+                if !single_zone {
+                    candidates.sort_unstable_by(|a, b| {
+                        a.landed
+                            .cmp(&b.landed)
+                            .then_with(|| a.sort_price.cmp(&b.sort_price))
+                            .then_with(|| a.sort_time.cmp(&b.sort_time))
+                            .then_with(|| a.sort_id.cmp(&b.sort_id))
+                    });
+                }
 
-                // Range query: all sells in this zone with raw ask <= the buyer's bid.
-                // `priced_candidate` rejects any sell whose ask exceeds the bid (the
-                // Case-1 settlement invariant), so the bid is the exact, tight upper
-                // bound — no widening for the discount / dynamic multiplier is needed
-                // (they only ever reduce the buyer's payment WITHIN a crossing match,
-                // never rescue an above-bid sell). Fees (wheeling/loss) can still push a
-                // below-bid sell's landed cost over the bid; priced_candidate does that
-                // final landed <= bid check.
-                let upper_price = buy.price;
-                for (_, &sell_idx) in book.range(..=(upper_price, i64::MAX, uuid::Uuid::max())) {
-                    if let Some(c) = Self::priced_candidate(
-                        buy,
+                // FOK handling — all-or-nothing. Simulate the real drain loop below
+                // (sells under MIN_TRADE_AMOUNT are skipped; the loop stops once the
+                // buy's remainder drops below MIN) and only proceed if the order fills
+                // completely. A plain `sum >= size` check is not enough: granular fills
+                // can leave a sub-MIN dust remainder that the real loop's MIN break
+                // strands, which the immediate sweep then cancels — a partial fill that
+                // violates fill-or-kill. The simulation must also mirror the drain's
+                // grid-capacity skip (against a COPY of committed_flow so the real ledger
+                // is untouched) — otherwise a FOK buy could pass a capacity-blind
+                // simulation, then partial-fill in the real drain when a link is full and
+                // get its remainder swept: exactly the partial-fill FOK violates. FOK
+                // always runs a full scan, so `candidates` holds every reachable sell
+                // here. If the simulation leaves anything unfilled, kill the order (skip
+                // matching; the sweep reports it for cancellation).
+                if buy.time_in_force == TimeInForce::Fok {
+                    let mut need = buy.remaining_amount();
+                    let mut sim_flow = committed_flow.clone();
+                    for c in candidates.iter() {
+                        let sim_sell = &sell_orders[c.sell_idx];
+                        if let Some(take) = fill_take(need, sim_sell.remaining_amount()) {
+                            let key = (sim_sell.zone_id, buy.zone_id);
+                            let already = sim_flow.get(&key).copied().unwrap_or(Decimal::ZERO);
+                            if !topology.can_accommodate_flow(sim_sell.zone_id, buy.zone_id, already + take)
+                            {
+                                continue;
+                            }
+                            *sim_flow.entry(key).or_insert(Decimal::ZERO) += take;
+                            need -= take;
+                            if need < MIN_TRADE_AMOUNT {
+                                break;
+                            }
+                        }
+                    }
+                    if need > Decimal::ZERO {
+                        break;
+                    }
+                }
+
+                // drain(..) yields owned Candidates and leaves the buffer empty but
+                // allocated for the next buy. On an early `break`, drain's Drop still
+                // clears the remaining range — `clear()` next iteration is idempotent.
+                for c in candidates.drain(..) {
+                    // Stable within this iteration: `buy.filled_amount` is only bumped
+                    // at the end, so compute the remaining need once and reuse it for
+                    // both the MIN break guard and the fill amount.
+                    let need = buy.remaining_amount();
+                    if need < MIN_TRADE_AMOUNT {
+                        break;
+                    }
+                    let Candidate {
                         sell_idx,
-                        &sell_orders[sell_idx],
-                        topology,
-                        fees,
-                        dynamic_multiplier,
-                        intra_zone_mult,
-                    ) {
-                        candidates.push(c);
+                        landed: landed_cost_fp,
+                        wheeling: wheeling_fp,
+                        loss: loss_fp,
+                        loss_cost: loss_cost_fp,
+                        ..
+                    } = c;
+
+                    let sell = &mut sell_orders[sell_idx];
+                    let Some(match_amount) = fill_take(need, sell.remaining_amount()) else {
+                        continue;
+                    };
+
+                    // Grid-capacity gate (see `committed_flow`): re-check the link with the
+                    // running committed total for this (sell_zone, buy_zone) pair PLUS this
+                    // fill. If the grid can't carry the aggregate, skip this fill — the sell
+                    // stays available for another pair / a later cycle rather than being
+                    // over-committed now. Conservative: the topology API is boolean (no
+                    // remaining-headroom readout), so a fill that would only partially fit is
+                    // skipped whole, not trimmed to the remaining capacity.
+                    let flow_key = (sell.zone_id, buy.zone_id);
+                    let already = committed_flow.get(&flow_key).copied().unwrap_or(Decimal::ZERO);
+                    if !topology.can_accommodate_flow(sell.zone_id, buy.zone_id, already + match_amount)
+                    {
+                        continue;
+                    }
+
+                    let buy_meta_idx = buy.metadata_index;
+                    let sell_meta_idx = sell.metadata_index;
+
+                    // No match-consolidation step: each sell lives in exactly one zone
+                    // book and so appears at most once in `candidates`, and `buy` is
+                    // fixed across this loop — so a given (buy, sell) pair can produce
+                    // at most one result per cycle. A full-scan rebuild after a partial
+                    // fill re-prices only sells still resting in the book (depleted ones
+                    // were removed below), so it cannot re-emit an already-filled pair.
+                    // There is never an adjacent same-pair result to merge into; emit
+                    // each match directly.
+                    let buy_meta = &buy_metadata[buy_meta_idx];
+
+                    results.push(MatchResult {
+                        buy_order_id: buy.id,
+                        sell_order_id: sell.id,
+                        buy_metadata_index: buy_meta_idx,
+                        sell_metadata_index: sell_meta_idx,
+                        match_amount,
+                        match_price: landed_cost_fp.to_decimal(),
+                        // CDA settles at the seller's ask (see settle_price docs).
+                        settle_price: sell.price.to_decimal(),
+                        seller_price: sell.price.to_decimal(),
+                        buyer_price: buy.price.to_decimal(),
+                        total_energy_cost: match_amount * landed_cost_fp.to_decimal(),
+                        wheeling_charge: match_amount * wheeling_fp.to_decimal(),
+                        loss_factor: loss_fp.to_decimal(),
+                        loss_cost: match_amount * loss_cost_fp.to_decimal(),
+                        buyer_zone_id: buy.zone_id,
+                        seller_zone_id: sell.zone_id,
+                        buyer_id: buy.user_id,
+                        seller_id: sell.user_id,
+                        epoch_id: buy_meta.epoch_id.unwrap_or_default(),
+                    });
+
+                    buy.filled_amount += match_amount;
+                    sell.filled_amount += match_amount;
+                    *committed_flow.entry(flow_key).or_insert(Decimal::ZERO) += match_amount;
+                    stats.matches_created += 1;
+                    stats.total_volume += match_amount;
+
+                    // Cleanup books if sell is depleted
+                    if sell.remaining_amount() < MIN_TRADE_AMOUNT {
+                        if let Some(book) = zone_books.get_mut(&sell.zone_id) {
+                            book.remove(&(sell.price, sell.created_at_ns, sell.id));
+                        }
                     }
                 }
-            }
 
-            // Sort consolidated candidates from all reachable zones by landed cost.
-            // Ties broken by raw sell price, then arrival, then id so the chosen
-            // fill order is deterministic (price-time priority) and not subject to
-            // zone-book traversal order.
-            candidates.sort_unstable_by(|a, b| {
-                a.landed
-                    .cmp(&b.landed)
-                    .then_with(|| a.sort_price.cmp(&b.sort_price))
-                    .then_with(|| a.sort_time.cmp(&b.sort_time))
-                    .then_with(|| a.sort_id.cmp(&b.sort_id))
-            });
-
-            // FOK handling — all-or-nothing. Simulate the real drain loop below
-            // (sells under MIN_TRADE_AMOUNT are skipped; the loop stops once the
-            // buy's remainder drops below MIN) and only proceed if the order fills
-            // completely. A plain `sum >= size` check is not enough: granular fills
-            // can leave a sub-MIN dust remainder that the real loop's MIN break
-            // strands, which the immediate sweep then cancels — a partial fill that
-            // violates fill-or-kill. The simulation must also mirror the drain's
-            // grid-capacity skip (against a COPY of committed_flow so the real ledger
-            // is untouched) — otherwise a FOK buy could pass a capacity-blind
-            // simulation, then partial-fill in the real drain when a link is full and
-            // get its remainder swept: exactly the partial-fill FOK violates. If the
-            // simulation leaves anything unfilled, kill the order (skip matching; the
-            // sweep reports it for cancellation).
-            if buy.time_in_force == TimeInForce::Fok {
-                let mut need = buy.remaining_amount();
-                let mut sim_flow = committed_flow.clone();
-                for c in candidates.iter() {
-                    let sim_sell = &sell_orders[c.sell_idx];
-                    if let Some(take) = fill_take(need, sim_sell.remaining_amount()) {
-                        let key = (sim_sell.zone_id, buy.zone_id);
-                        let already = sim_flow.get(&key).copied().unwrap_or(Decimal::ZERO);
-                        if !topology.can_accommodate_flow(sim_sell.zone_id, buy.zone_id, already + take)
-                        {
-                            continue;
-                        }
-                        *sim_flow.entry(key).or_insert(Decimal::ZERO) += take;
-                        need -= take;
-                        if need < MIN_TRADE_AMOUNT {
-                            break;
-                        }
-                    }
-                }
-                if need > Decimal::ZERO {
-                    continue;
-                }
-            }
-
-            // drain(..) yields owned Candidates and leaves the buffer empty but
-            // allocated for the next buy. On an early `break`, drain's Drop still
-            // clears the remaining range — `clear()` next iteration is idempotent.
-            for c in candidates.drain(..) {
-                // Stable within this iteration: `buy.filled_amount` is only bumped
-                // at the end, so compute the remaining need once and reuse it for
-                // both the MIN break guard and the fill amount.
-                let need = buy.remaining_amount();
-                if need < MIN_TRADE_AMOUNT {
+                // The single-zone fast path stopped early; if a grid-capacity skip
+                // left the buy short there may be farther, unbuilt sells that can still
+                // fill it. Rebuild this buy once with a full scan. Otherwise (already
+                // full, buy filled, or the book was exhausted without truncation) done.
+                if full_scan || buy.remaining_amount() < MIN_TRADE_AMOUNT || !truncated {
                     break;
                 }
-                let Candidate {
-                    sell_idx,
-                    landed: landed_cost_fp,
-                    wheeling: wheeling_fp,
-                    loss: loss_fp,
-                    loss_cost: loss_cost_fp,
-                    ..
-                } = c;
-
-                let sell = &mut sell_orders[sell_idx];
-                let Some(match_amount) = fill_take(need, sell.remaining_amount()) else {
-                    continue;
-                };
-
-                // Grid-capacity gate (see `committed_flow`): re-check the link with the
-                // running committed total for this (sell_zone, buy_zone) pair PLUS this
-                // fill. If the grid can't carry the aggregate, skip this fill — the sell
-                // stays available for another pair / a later cycle rather than being
-                // over-committed now. Conservative: the topology API is boolean (no
-                // remaining-headroom readout), so a fill that would only partially fit is
-                // skipped whole, not trimmed to the remaining capacity.
-                let flow_key = (sell.zone_id, buy.zone_id);
-                let already = committed_flow.get(&flow_key).copied().unwrap_or(Decimal::ZERO);
-                if !topology.can_accommodate_flow(sell.zone_id, buy.zone_id, already + match_amount)
-                {
-                    continue;
-                }
-
-                let buy_meta_idx = buy.metadata_index;
-                let sell_meta_idx = sell.metadata_index;
-
-                // No match-consolidation step: each sell lives in exactly one zone
-                // book and so appears at most once in `candidates`, and `buy` is
-                // fixed across this loop — so a given (buy, sell) pair can produce
-                // at most one result per cycle. There is never an adjacent same-pair
-                // result to merge into; emit each match directly.
-                let buy_meta = &buy_metadata[buy_meta_idx];
-
-                results.push(MatchResult {
-                    buy_order_id: buy.id,
-                    sell_order_id: sell.id,
-                    buy_metadata_index: buy_meta_idx,
-                    sell_metadata_index: sell_meta_idx,
-                    match_amount,
-                    match_price: landed_cost_fp.to_decimal(),
-                    // CDA settles at the seller's ask (see settle_price docs).
-                    settle_price: sell.price.to_decimal(),
-                    seller_price: sell.price.to_decimal(),
-                    buyer_price: buy.price.to_decimal(),
-                    total_energy_cost: match_amount * landed_cost_fp.to_decimal(),
-                    wheeling_charge: match_amount * wheeling_fp.to_decimal(),
-                    loss_factor: loss_fp.to_decimal(),
-                    loss_cost: match_amount * loss_cost_fp.to_decimal(),
-                    buyer_zone_id: buy.zone_id,
-                    seller_zone_id: sell.zone_id,
-                    buyer_id: buy.user_id,
-                    seller_id: sell.user_id,
-                    epoch_id: buy_meta.epoch_id.unwrap_or_default(),
-                });
-
-                buy.filled_amount += match_amount;
-                sell.filled_amount += match_amount;
-                *committed_flow.entry(flow_key).or_insert(Decimal::ZERO) += match_amount;
-                stats.matches_created += 1;
-                stats.total_volume += match_amount;
-
-                // Cleanup books if sell is depleted
-                if sell.remaining_amount() < MIN_TRADE_AMOUNT {
-                    if let Some(book) = zone_books.get_mut(&sell.zone_id) {
-                        book.remove(&(sell.price, sell.created_at_ns, sell.id));
-                    }
-                }
+                full_scan = true;
             }
         }
 
@@ -1423,5 +1485,129 @@ mod tests {
                 "run {run}: tiebreak must pick the same (lowest-id) sell every time"
             );
         }
+    }
+
+    /// Single-zone fast path (early-stop build, no per-buy sort) must still match
+    /// EVERY crossing pair — a completeness guard against the early `break`
+    /// dropping fills. 300 buys × 300 sells, all crossing, 1:1 by size.
+    #[test]
+    #[allow(clippy::cast_possible_wrap)] // loop index → created_at_ns, always small
+    fn single_zone_fast_path_matches_all_crossing() {
+        let n = 300usize;
+        let mut buys: Vec<FastOrder> = (0..n)
+            .map(|i| order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 1, i as i64, TimeInForce::Gtc, i))
+            .collect();
+        let mut sells: Vec<FastOrder> = (0..n)
+            .map(|i| order(Uuid::new_v4(), dec!(0.9), dec!(100.0), 1, i as i64, TimeInForce::Gtc, i))
+            .collect();
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(n),
+            &meta(n),
+            &NoFeeTopology,
+            unit(),
+            (n * 2) as i64,
+        );
+        assert_eq!(stats.matches_created, n, "every crossing pair fills");
+        assert_eq!(matches.len(), n);
+        assert_eq!(stats.total_volume, dec!(100.0) * Decimal::from(n));
+    }
+
+    /// Early-stop must not disturb price-time priority: a buy stops building once it
+    /// has gathered enough resting energy, but the sells it gathered (from the
+    /// landed-ordered range) are the CHEAPEST ones. Buyer needs 100; the 0.50 ask
+    /// (not the 0.70 / 0.90) must fill it.
+    #[test]
+    fn single_zone_early_stop_fills_cheapest() {
+        let cheap = Uuid::new_v4();
+        let mut sells = vec![
+            order(cheap, dec!(0.50), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
+            order(Uuid::new_v4(), dec!(0.70), dec!(100.0), 1, 101, TimeInForce::Gtc, 1),
+            order(Uuid::new_v4(), dec!(0.90), dec!(100.0), 1, 102, TimeInForce::Gtc, 2),
+        ];
+        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(3),
+            &NoFeeTopology,
+            unit(),
+            100,
+        );
+        assert_eq!(matches.len(), 1, "buyer fills entirely from the cheapest sell");
+        assert_eq!(matches[0].seller_id, cheap);
+        assert_eq!(stats.total_volume, dec!(100.0));
+    }
+
+    /// Early-stop must gather ACROSS sells until the buy is covered, still cheapest
+    /// first. Buyer needs 250; fills 100+100+50 from the 0.50 / 0.60 / 0.70 asks and
+    /// never touches the 0.80 ask.
+    #[test]
+    fn single_zone_early_stop_gathers_across_sells() {
+        let (u1, u2, u3, u4) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut sells = vec![
+            order(u1, dec!(0.50), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
+            order(u2, dec!(0.60), dec!(100.0), 1, 101, TimeInForce::Gtc, 1),
+            order(u3, dec!(0.70), dec!(100.0), 1, 102, TimeInForce::Gtc, 2),
+            order(u4, dec!(0.80), dec!(100.0), 1, 103, TimeInForce::Gtc, 3),
+        ];
+        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(250.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(4),
+            &NoFeeTopology,
+            unit(),
+            100,
+        );
+        assert_eq!(matches.len(), 3, "100 + 100 + 50 across the three cheapest");
+        assert_eq!(stats.total_volume, dec!(250.0));
+        let sellers: Vec<Uuid> = matches.iter().map(|m| m.seller_id).collect();
+        assert!(sellers.contains(&u1) && sellers.contains(&u2) && sellers.contains(&u3));
+        assert!(!sellers.contains(&u4), "the dearest 0.80 ask must stay untouched");
+        assert_eq!(matches[2].match_amount, dec!(50.0), "third fill is the 50 remainder");
+    }
+
+    /// Grid capacity that caps one link at 150 while the buy wants 300. The
+    /// single-zone early-stop under-fills (capacity skip) and triggers the full-scan
+    /// rebuild; the rebuild must respect the running `committed_flow` cap (no
+    /// over-fill, no double-count) and leave the buy partially filled — exactly a
+    /// single full pass would.
+    #[test]
+    #[allow(clippy::cast_possible_wrap)] // loop index → created_at_ns, always small
+    fn single_zone_capacity_cap_triggers_retry_without_overfill() {
+        struct CapTopology;
+        impl TopologySnapshot for CapTopology {
+            fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, a: Decimal) -> bool {
+                a <= dec!(150.0)
+            }
+            fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+                FastPrice::from(dec!(0))
+            }
+            fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+                FastPrice::from(dec!(1.0))
+            }
+        }
+        let mut sells: Vec<FastOrder> = (0..4)
+            .map(|i| order(Uuid::new_v4(), dec!(0.5), dec!(100.0), 1, 100 + i as i64, TimeInForce::Gtc, i))
+            .collect();
+        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(300.0), 1, 100, TimeInForce::Gtc, 0)];
+        let (matches, stats) = MatchingEngine::match_cycle(
+            &mut buys,
+            &mut sells,
+            &meta(1),
+            &meta(4),
+            &CapTopology,
+            unit(),
+            100,
+        );
+        // First fill of 100 commits the link to 100; the next fill would push it to
+        // 200 > 150 and is skipped, as are the rest — so only 100 settles.
+        assert_eq!(stats.total_volume, dec!(100.0), "capacity gate caps the fill at one 100 lot");
+        assert_eq!(matches.len(), 1, "no double-count across the retry rebuild");
+        assert_eq!(buys[0].remaining_amount(), dec!(200.0), "buy left partially filled");
     }
 }
