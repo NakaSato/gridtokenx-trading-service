@@ -142,3 +142,12 @@ lto = true
 codegen-units = 1
 panic = 'abort'
 strip = true
+
+# Do NOT strip proc-macro / build-script artifacts. Under the macOS `ld-27034`
+# linker (Darwin 27), stripping the proc-macro dylibs (e.g. `sqlx_macros`)
+# corrupts them ("mis-aligned LINKEDIT string pool"), so rustc cannot dlopen
+# them and the release build fails. These artifacts are compile-time only and
+# never shipped, so keeping their symbols has no runtime cost; the final
+# `trading-service` binary is still stripped by the profile above.
+[profile.release.build-override]
+strip = false
