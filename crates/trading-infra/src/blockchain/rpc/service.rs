@@ -18,6 +18,13 @@ pub struct BlockchainService {
     /// When false, on-chain atomic-swap settlement of matching-engine trades is
     /// disabled (trade settlements are left for retry, never sent on-chain).
     pub trade_settlement_enabled: bool,
+    /// Wallet read-model repo used to self-heal a missing wallet row on demand.
+    /// When `get_user_primary_wallet` misses the local `iam_wallet_read_model`
+    /// (e.g. a wallet event dropped in a boot-window Kafka wedge before it was
+    /// projected), this reconciles that one user from the IAM source instead of
+    /// failing closed until the next restart's boot backfill. `None` disables
+    /// the fallback (read-model feed off / no source pool wired).
+    pub wallet_read_model: Option<Arc<dyn trading_core::traits::WalletReadModelRepository>>,
 }
 
 impl std::fmt::Debug for BlockchainService {
@@ -67,12 +74,24 @@ impl BlockchainService {
             db,
             identity_gateway: None,
             trade_settlement_enabled: false,
+            wallet_read_model: None,
         })
     }
 
     /// Set the identity gateway for custodial signing
     pub fn with_identity_gateway(mut self, gateway: Arc<dyn trading_core::traits::IdentityGateway>) -> Self {
         self.identity_gateway = Some(gateway);
+        self
+    }
+
+    /// Wire the wallet read-model repo enabling on-demand self-heal of a missing
+    /// wallet row in `get_user_primary_wallet` (see the field doc).
+    #[must_use]
+    pub fn with_wallet_read_model(
+        mut self,
+        repo: Arc<dyn trading_core::traits::WalletReadModelRepository>,
+    ) -> Self {
+        self.wallet_read_model = Some(repo);
         self
     }
 
@@ -877,10 +896,27 @@ impl BlockchainService {
         .fetch_optional(db)
         .await?;
 
-        match wallet_address {
-            Some(addr) => Ok(Some(Self::parse_pubkey(&addr)?)),
-            None => Ok(None),
+        if let Some(addr) = wallet_address {
+            return Ok(Some(Self::parse_pubkey(&addr)?));
         }
+
+        // Read-model miss. Before failing closed, try a lazy single-user
+        // reconcile from the IAM source: the wallet row may simply never have
+        // been projected (e.g. a `user.wallet.*` event dropped in a boot-window
+        // Kafka producer wedge). This self-heals resolution on demand instead of
+        // waiting for the next restart's boot backfill.
+        if let Some(repo) = &self.wallet_read_model {
+            if let Some(addr) = repo.backfill_wallet_for(*user_id).await.map_err(|e| {
+                anyhow::anyhow!("lazy wallet read-model reconcile failed for {user_id}: {e}")
+            })? {
+                tracing::info!(
+                    %user_id,
+                    "wallet read-model miss self-healed via lazy IAM-source reconcile"
+                );
+                return Ok(Some(Self::parse_pubkey(&addr)?));
+            }
+        }
+        Ok(None)
     }
 
     /// Get a custodial signer for a user

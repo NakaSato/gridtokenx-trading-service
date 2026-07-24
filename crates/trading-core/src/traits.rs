@@ -612,6 +612,15 @@ pub trait WalletReadModelRepository: Send + Sync {
     /// One-shot boot backfill: snapshot the current `user_wallets` into the
     /// read-model. Idempotent (`ON CONFLICT DO NOTHING`). Returns rows inserted.
     async fn backfill_wallets(&self) -> TraitResult<u64>;
+
+    /// Lazy single-user backfill: reconcile ONE user's wallet rows from the
+    /// source `user_wallets` into the read-model, then return that user's
+    /// current primary `wallet_address` (or `None` if the source has no wallet
+    /// for the user). This is the self-heal path for a wallet event dropped
+    /// before it reached the read-model (e.g. a boot-window Kafka producer
+    /// wedge): resolution can recover on demand instead of failing closed until
+    /// the next restart's boot backfill. Idempotent; upserts last-writer-wins.
+    async fn backfill_wallet_for(&self, user_id: Uuid) -> TraitResult<Option<String>>;
 }
 
 /// Local read-model of metering `meters` (`meter_read_model`).

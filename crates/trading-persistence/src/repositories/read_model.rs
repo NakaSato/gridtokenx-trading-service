@@ -45,7 +45,8 @@ async fn local_source_table_exists(pool: &PgPool, table: &str) -> TraitResult<bo
 
 pub struct PgWalletReadModelRepository {
     pool: PgPool,
-    /// Read-only pool on the IAM database; used only by `backfill_wallets`.
+    /// Read-only pool on the IAM database; used by `backfill_wallets` (boot
+    /// snapshot) and `backfill_wallet_for` (lazy single-user self-heal).
     source_pool: Option<PgPool>,
 }
 
@@ -248,6 +249,61 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
             inserted += res.rows_affected();
         }
         Ok(inserted)
+    }
+
+    async fn backfill_wallet_for(&self, user_id: Uuid) -> TraitResult<Option<String>> {
+        // Single-user reconcile: pull this user's wallet rows from the source
+        // (post-split IAM DB, or the local pool pre-cutover) and upsert each via
+        // `upsert_wallet`, so primary-demotion + last-writer-wins match the event
+        // path exactly. Then return the resulting primary wallet_address.
+        const SELECT_ONE_USER: &str = r#"
+            SELECT user_id, wallet_address,
+                   COALESCE(is_primary, false)            AS is_primary,
+                   COALESCE(blockchain_registered, false) AS blockchain_registered,
+                   user_account_pda, shard_id
+              FROM user_wallets
+             WHERE user_id = $1"#;
+
+        let rows = match &self.source_pool {
+            Some(source) => sqlx::query(SELECT_ONE_USER)
+                .bind(user_id)
+                .fetch_all(source)
+                .await?,
+            None => {
+                // No source pool: only the pre-cutover shared DB can answer.
+                // Post-split the table is absent locally — skip rather than error
+                // (mirrors the `backfill_wallets` no-source branch).
+                if !local_source_table_exists(&self.pool, "user_wallets").await? {
+                    return Ok(None);
+                }
+                sqlx::query(SELECT_ONE_USER)
+                    .bind(user_id)
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+
+        for row in &rows {
+            let rec = WalletReadModelRecord {
+                user_id: row.get::<Uuid, _>("user_id"),
+                wallet_address: row.get::<String, _>("wallet_address"),
+                is_primary: row.get::<bool, _>("is_primary"),
+                blockchain_registered: row.get::<bool, _>("blockchain_registered"),
+                user_account_pda: row.get::<Option<String>, _>("user_account_pda"),
+                shard_id: row.get::<Option<i16>, _>("shard_id"),
+            };
+            self.upsert_wallet(&rec).await?;
+        }
+
+        // Read the primary back from the freshly-reconciled read-model rather
+        // than trusting the source snapshot's flag directly.
+        let primary: Option<String> = sqlx::query_scalar(
+            "SELECT wallet_address FROM iam_wallet_read_model WHERE user_id = $1 AND is_primary = true",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(primary)
     }
 }
 
