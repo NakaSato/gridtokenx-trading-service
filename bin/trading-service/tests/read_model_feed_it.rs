@@ -319,6 +319,101 @@ async fn backfill_wallets_mirrors_source_rows() {
     cleanup_source(&pool, user_id).await;
 }
 
+/// The lazy single-user self-heal: a user whose wallet row never reached the
+/// read-model (e.g. a dropped event) must be recoverable on demand —
+/// `backfill_wallet_for` reconciles just that user from the source and returns
+/// their primary wallet, without a full boot backfill.
+#[tokio::test]
+async fn backfill_wallet_for_reconciles_missing_row_and_returns_primary() {
+    if !db_it_enabled() {
+        return;
+    }
+    let pool = connect().await;
+    let repo = PgWalletReadModelRepository::new(pool.clone());
+
+    // Seed a user with a primary + a secondary source wallet, but DO NOT project
+    // them into the read-model — simulating the dropped-event gap.
+    let user_id = Uuid::new_v4();
+    seed_user(&pool, user_id).await;
+    for (addr, primary) in [("heal-primary", true), ("heal-secondary", false)] {
+        sqlx::query(
+            r#"INSERT INTO user_wallets
+                   (user_id, wallet_address, is_primary, blockchain_registered)
+               VALUES ($1, $2, $3, true)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(user_id)
+        .bind(addr)
+        .bind(primary)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Precondition: the read-model has nothing for this user yet.
+    let before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM iam_wallet_read_model WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, 0, "read-model must start empty for the user");
+
+    // Self-heal: reconcile just this user and return the primary.
+    let primary = repo
+        .backfill_wallet_for(user_id)
+        .await
+        .expect("lazy reconcile runs");
+    assert_eq!(
+        primary.as_deref(),
+        Some("heal-primary"),
+        "must return the source primary wallet"
+    );
+
+    // Both source wallets are now mirrored, exactly one flagged primary.
+    let mirrored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM iam_wallet_read_model WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(mirrored, 2, "both source wallets projected");
+    let primaries: Vec<String> = sqlx::query_scalar(
+        "SELECT wallet_address FROM iam_wallet_read_model WHERE user_id = $1 AND is_primary",
+    )
+    .bind(user_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(primaries, vec!["heal-primary".to_string()]);
+
+    // Idempotent: a second call is a harmless no-op returning the same primary.
+    let again = repo
+        .backfill_wallet_for(user_id)
+        .await
+        .expect("second reconcile runs");
+    assert_eq!(again.as_deref(), Some("heal-primary"));
+
+    cleanup_user(&pool, user_id).await;
+    cleanup_source(&pool, user_id).await;
+}
+
+#[tokio::test]
+async fn backfill_wallet_for_unknown_user_returns_none() {
+    if !db_it_enabled() {
+        return;
+    }
+    let pool = connect().await;
+    let repo = PgWalletReadModelRepository::new(pool.clone());
+    // A user with no source wallet yields None (fail-closed, nothing projected).
+    let user_id = Uuid::new_v4();
+    let primary = repo
+        .backfill_wallet_for(user_id)
+        .await
+        .expect("reconcile runs for unknown user");
+    assert!(primary.is_none(), "unknown user must resolve to None");
+}
+
 #[tokio::test]
 async fn backfill_meters_mirrors_source_rows() {
     if !db_it_enabled() {

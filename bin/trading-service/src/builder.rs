@@ -86,65 +86,18 @@ impl ServiceBuilder {
             )
         );
 
-        let blockchain: Arc<dyn BlockchainGateway> = Arc::new(
-            BlockchainService::new(
-                chain_bridge_url.to_string(),
-                config.solana_cluster.clone(),
-                config.solana_programs.clone(),
-                Some(db_pool.clone()),
-                None,
-            )
-            .await?
-            .with_identity_gateway(identity.clone())
-            .with_trade_settlement_enabled(config.trade_settlement_enabled),
-        );
-
-        let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
-
-        // Initialize Audit System
-        let (audit_tx, audit_rx) = tokio::sync::mpsc::channel(1000);
-        let audit_logger = AuditLogger::new(db_pool.clone(), audit_tx);
-        let audit_worker =
-            trading_infra::audit::worker::AuditWorker::new(audit_logger.clone(), audit_rx);
-        tokio::spawn(async move {
-            audit_worker.run().await;
-        });
-
-        let audit: Arc<dyn AuditLog> = Arc::new(audit_logger);
-
-        // Use the unified EventBus (supports Redis Streams for Telemetry)
-        let event_bus = Arc::new(
-            trading_infra::events::EventBus::new(
-                redis_url,
-                config.kafka_enabled,
-                Some(kafka_brokers),
-                Some(&config.kafka_topic_prefix),
-            )
-            .await?,
-        );
-
-        // Transactional Outbox Publisher & Worker
-        let outbox_worker = trading_infra::events::outbox_worker::OutboxWorker::new(
-            outbox_repo.clone(),
-            event_bus.clone(),
-        );
-        tokio::spawn(async move {
-            if let Err(e) = outbox_worker.run().await {
-                tracing::error!("Outbox worker failed: {}", e);
-            }
-        });
-
-        let events: Arc<dyn EventPublisher> = Arc::new(
-            trading_infra::events::OutboxPublisher::new(outbox_repo.clone())
-        );
-
-        // Read-model feed (DB-per-service Phase 1). OFF unless TRADING_READMODEL_FEED=true;
-        // when off nothing is constructed and no worker spawns (zero behavior change).
-        // When on: build the two read-model repos, run the one-shot boot backfill from
-        // the source databases (READMODEL_IAM_DATABASE_URL / READMODEL_METER_DATABASE_URL;
-        // post DB-split the source tables are no longer on the trading pool), then hand
-        // the worker to main.rs to spawn.
-        let readmodel_feed_worker = if config.readmodel_feed_enabled {
+        // Read-model repos (DB-per-service Phase 1). Built HERE — before the
+        // BlockchainService — so the wallet read-model can be injected into it,
+        // giving `get_user_primary_wallet` an on-demand self-heal path when a
+        // wallet event was dropped before projection (boot-window Kafka wedge).
+        // OFF unless TRADING_READMODEL_FEED=true; when off both are None (zero
+        // behavior change) and the lazy-reconcile fallback is simply disabled.
+        // The one-shot boot backfill (snapshot of the source tables) also runs
+        // here; the live feed worker is spawned later from these same repos.
+        let (wallet_rm, meter_rm): (
+            Option<Arc<dyn WalletReadModelRepository>>,
+            Option<Arc<dyn MeterReadModelRepository>>,
+        ) = if config.readmodel_feed_enabled {
             // Source pools live on other services' DBs (via pgdog). At cold boot
             // those backends can be briefly unready (DB still loading, pgdog not up
             // yet), so a single connect attempt races and drops the backfill to the
@@ -213,16 +166,81 @@ impl ServiceBuilder {
                 Ok(n) => tracing::info!("read-model boot backfill: {n} meter rows"),
                 Err(e) => tracing::error!("read-model meter backfill failed: {e}"),
             }
-            Some(trading_logic::ReadModelFeedWorker::new(
+            (Some(wallet_rm), Some(meter_rm))
+        } else {
+            (None, None)
+        };
+
+        let mut blockchain_svc = BlockchainService::new(
+            chain_bridge_url.to_string(),
+            config.solana_cluster.clone(),
+            config.solana_programs.clone(),
+            Some(db_pool.clone()),
+            None,
+        )
+        .await?
+        .with_identity_gateway(identity.clone())
+        .with_trade_settlement_enabled(config.trade_settlement_enabled);
+        if let Some(wallet_rm) = &wallet_rm {
+            blockchain_svc = blockchain_svc.with_wallet_read_model(wallet_rm.clone());
+        }
+        let blockchain: Arc<dyn BlockchainGateway> = Arc::new(blockchain_svc);
+
+        let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
+
+        // Initialize Audit System
+        let (audit_tx, audit_rx) = tokio::sync::mpsc::channel(1000);
+        let audit_logger = AuditLogger::new(db_pool.clone(), audit_tx);
+        let audit_worker =
+            trading_infra::audit::worker::AuditWorker::new(audit_logger.clone(), audit_rx);
+        tokio::spawn(async move {
+            audit_worker.run().await;
+        });
+
+        let audit: Arc<dyn AuditLog> = Arc::new(audit_logger);
+
+        // Use the unified EventBus (supports Redis Streams for Telemetry)
+        let event_bus = Arc::new(
+            trading_infra::events::EventBus::new(
+                redis_url,
+                config.kafka_enabled,
+                Some(kafka_brokers),
+                Some(&config.kafka_topic_prefix),
+            )
+            .await?,
+        );
+
+        // Transactional Outbox Publisher & Worker
+        let outbox_worker = trading_infra::events::outbox_worker::OutboxWorker::new(
+            outbox_repo.clone(),
+            event_bus.clone(),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = outbox_worker.run().await {
+                tracing::error!("Outbox worker failed: {}", e);
+            }
+        });
+
+        let events: Arc<dyn EventPublisher> = Arc::new(
+            trading_infra::events::OutboxPublisher::new(outbox_repo.clone())
+        );
+
+        // Read-model feed worker (DB-per-service Phase 1). The repos + boot
+        // backfill were built above (so the wallet read-model could be injected
+        // into the BlockchainService); here we just hand the live-feed worker to
+        // main.rs to spawn. Present only when both repos exist
+        // (TRADING_READMODEL_FEED=true) — otherwise no worker spawns, zero
+        // behavior change.
+        let readmodel_feed_worker = match (wallet_rm, meter_rm) {
+            (Some(wallet_rm), Some(meter_rm)) => Some(trading_logic::ReadModelFeedWorker::new(
                 wallet_rm,
                 meter_rm,
                 config.kafka_bootstrap_servers.clone(),
                 config.readmodel_meter_brokers.clone(),
                 config.readmodel_iam_topic.clone(),
                 config.readmodel_meter_topic.clone(),
-            ))
-        } else {
-            None
+            )),
+            _ => None,
         };
 
         let infra = Infrastructure {
