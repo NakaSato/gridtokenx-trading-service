@@ -3,10 +3,17 @@
 # GridTokenX Trading Service — distroless image: binary + its shared libs only.
 # No Rust toolchain, no target/ in the image (target lives in a BuildKit cache).
 # =============================================================================
-FROM rust:1.89-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
-# Install build dependencies with cache mount
-RUN <<EOT
+# Install build dependencies. The apt cache mounts let BuildKit reuse the ~200MB
+# of .debs across rebuilds (and across the sibling service images, which share the
+# same mount ids) instead of re-downloading them whenever this layer invalidates.
+# docker-clean must go, otherwise apt deletes the very archives we are caching.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked <<EOT
+    set -eux
+    rm -f /etc/apt/apt.conf.d/docker-clean
+    echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
     apt-get update
     apt-get install -y --no-install-recommends \
         build-essential \
