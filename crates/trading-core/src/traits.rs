@@ -22,6 +22,23 @@ use crate::types::OrderStatus;
 /// Result alias for trait methods.
 pub type TraitResult<T> = std::result::Result<T, ApiError>;
 
+/// One side (buyer or seller) of a matched trade, for the atomic
+/// [`SettlementRepository::persist_matched_trade`] path. The fill is applied
+/// *incrementally* (`filled_amount += delta`), so an order that crosses several
+/// times in one cycle accumulates correctly across the per-trade transactions.
+#[derive(Debug, Clone)]
+pub struct TradeFill {
+    /// The order being filled.
+    pub order_id: Uuid,
+    /// Owner of the order, stamped onto the emitted `OrderUpdate` event. `None`
+    /// only when the caller could not resolve it.
+    pub user_id: Option<Uuid>,
+    /// Amount to add to `filled_amount` for this trade.
+    pub delta: Decimal,
+    /// Zone tag carried onto the `OrderUpdate` event.
+    pub zone_id: Option<i32>,
+}
+
 // ── Repository Traits ────────────────────────────────────────────────────────
 
 /// Order persistence operations.
@@ -182,6 +199,33 @@ pub trait SettlementRepository: Send + Sync {
         zone_id: Option<i32>,
         event: &Event,
     ) -> TraitResult<()>;
+
+    /// Persist one matched trade **atomically**: the settlement row, its
+    /// `order_matches` ledger row, both orders' incremental fills, and every
+    /// associated outbox event, all in a single database transaction.
+    ///
+    /// This replaces the old split of "insert all settlements, then apply all
+    /// fills" — which had no transaction spanning the two phases, so a failure
+    /// between them left settlements committed while the orders stayed `active`,
+    /// and the next matching cycle re-matched and **re-settled the same energy**
+    /// (each settlement carries a fresh `trade_id`, so the on-chain nullifier
+    /// never deduplicated them → double payment).
+    ///
+    /// Returns `Ok(true)` when the trade fully committed. Returns `Ok(false)`
+    /// when either order was no longer fillable (already `expired`/`cancelled`/
+    /// `filled` — the guarded fill matched 0 rows): the whole trade, including
+    /// its settlement, is rolled back so nothing is orphaned, and the caller
+    /// leaves the orders for the next cycle. Both `OrderUpdate` events are built
+    /// from the post-update `filled_amount`/`status` returned by the fill.
+    async fn persist_matched_trade(
+        &self,
+        settlement: &Settlement,
+        order_match: &OrderMatch,
+        matched_event: &Event,
+        match_zone_id: Option<i32>,
+        buyer: &TradeFill,
+        seller: &TradeFill,
+    ) -> TraitResult<bool>;
 
     /// Get a settlement by ID.
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>>;

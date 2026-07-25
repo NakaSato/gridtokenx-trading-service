@@ -84,7 +84,6 @@ impl MatcherService {
             );
             let totals = crate::clearing_support::order_totals(&buy_orders, &sell_orders);
             crate::clearing_support::persist_matches(
-                self.order_repo.as_ref(),
                 self.settlement_repo.as_ref(),
                 &matches,
                 &buy_metadata,
@@ -129,6 +128,7 @@ impl MatcherService {
             }
             let event = trading_core::events::Event::OrderUpdate {
                 id: fo.id,
+                user_id: Some(fo.user_id),
                 filled_amount: fo.filled_amount,
                 status: trading_core::types::OrderStatus::Cancelled.to_string(),
                 zone_id: fo.zone_id,
@@ -251,13 +251,43 @@ mod tests {
     struct MockSettlementRepo {
         settlements: Mutex<Vec<Settlement>>,
         matches: Mutex<Vec<OrderMatch>>,
+        /// (order_id, delta) recorded by the atomic `persist_matched_trade`.
+        fills: Mutex<Vec<(Uuid, Decimal)>>,
+        /// When true, `persist_matched_trade` (and `insert_settlement`) errors —
+        /// simulates a DB failure so the fill-gating path can be exercised.
+        fail_settlement: bool,
     }
 
     #[async_trait]
     impl SettlementRepository for MockSettlementRepo {
         async fn insert_settlement(&self, s: &Settlement) -> TraitResult<()> {
+            if self.fail_settlement {
+                return Err(trading_core::error::ApiError::Internal(
+                    "simulated settlement insert failure".to_string(),
+                ));
+            }
             self.settlements.lock().unwrap().push(s.clone());
             Ok(())
+        }
+        async fn persist_matched_trade(
+            &self,
+            s: &Settlement,
+            om: &OrderMatch,
+            _matched_event: &Event,
+            _match_zone_id: Option<i32>,
+            buyer: &trading_core::traits::TradeFill,
+            seller: &trading_core::traits::TradeFill,
+        ) -> TraitResult<bool> {
+            if self.fail_settlement {
+                return Err(trading_core::error::ApiError::Internal(
+                    "simulated settlement insert failure".to_string(),
+                ));
+            }
+            self.settlements.lock().unwrap().push(s.clone());
+            self.matches.lock().unwrap().push(om.clone());
+            self.fills.lock().unwrap().push((buyer.order_id, buyer.delta));
+            self.fills.lock().unwrap().push((seller.order_id, seller.delta));
+            Ok(true)
         }
         async fn insert_match_with_event(&self, m: &OrderMatch, _sid: Option<Uuid>, _z: Option<i32>, _e: &Event) -> TraitResult<()> {
             self.matches.lock().unwrap().push(m.clone());
@@ -306,11 +336,56 @@ mod tests {
         assert_eq!(s.energy_amount, dec!(10.0));
         assert!(s.trade_id.is_some(), "trade settlement carries a trade_id");
 
-        // Both orders fully filled (10/10) → Filled.
-        let fills = orders.fills.lock().unwrap();
+        // Both orders filled 10.0 via the atomic trade path (final status is the
+        // DB's job — CASE on energy_amount — and is covered by the integration
+        // test; here we assert the incremental deltas the mock sees).
+        let fills = settlements.fills.lock().unwrap();
         assert_eq!(fills.len(), 2);
-        assert!(fills.iter().any(|(id, amt, st)| *id == buy_id && *amt == dec!(10.0) && *st == OrderStatus::Filled));
-        assert!(fills.iter().any(|(id, amt, st)| *id == sell_id && *amt == dec!(10.0) && *st == OrderStatus::Filled));
+        assert!(fills.iter().any(|(id, amt)| *id == buy_id && *amt == dec!(10.0)));
+        assert!(fills.iter().any(|(id, amt)| *id == sell_id && *amt == dec!(10.0)));
+    }
+
+    /// Regression: if the settlement row fails to persist, the match must NOT be
+    /// booked as a fill. Booking it would mark the orders Filled (energy consumed)
+    /// with no settlement row for the settlement worker to ever pay from — a fill
+    /// without payment. The match is skipped instead; orders stay live (the DB is
+    /// re-read each cycle) and re-match next time. No fill, no match-ledger row.
+    #[tokio::test]
+    async fn run_matching_cycle_skips_fill_when_settlement_persist_fails() {
+        let buy = order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10);
+        let sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo {
+            fail_settlement: true,
+            ..Default::default()
+        });
+        let matcher =
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+
+        let matched = matcher.run_matching_cycle().await.unwrap();
+
+        // The engine still produced the crossing match...
+        assert_eq!(matched, 1, "engine matched the crossing pair");
+        // ...but the atomic persist failed, so NOTHING was written — no settlement,
+        // no ledger row, no fill. Energy not consumed; orders stay live to re-match.
+        assert!(
+            settlements.settlements.lock().unwrap().is_empty(),
+            "no settlement row when the atomic trade persist fails"
+        );
+        assert!(
+            settlements.matches.lock().unwrap().is_empty(),
+            "no order_matches ledger row when the atomic trade persist fails"
+        );
+        assert!(
+            settlements.fills.lock().unwrap().is_empty(),
+            "no fill applied — energy not consumed; orders stay live to re-match"
+        );
     }
 
     /// No sell orders → nothing to match → no persistence, returns 0.

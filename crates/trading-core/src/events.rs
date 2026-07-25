@@ -17,6 +17,12 @@ pub enum Event {
     SettlementRequested(Settlement),
     OrderUpdate {
         id: Uuid,
+        /// Owner of the order. Carried so downstream consumers (the
+        /// notification service) can route fill/cancel/expiry updates to the
+        /// trader without querying this service. `None` only when the emitting
+        /// path could not resolve the owner, in which case consumers skip.
+        #[serde(default)]
+        user_id: Option<Uuid>,
         filled_amount: Decimal,
         status: String,
         zone_id: Option<i32>,

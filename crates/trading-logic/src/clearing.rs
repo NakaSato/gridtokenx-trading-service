@@ -116,7 +116,6 @@ impl ClearingService {
 
         let totals = crate::clearing_support::order_totals(&buy_orders, &sell_orders);
         crate::clearing_support::persist_matches(
-            self.order_repo.as_ref(),
             self.settlement_repo.as_ref(),
             &all_matches,
             &buy_metadata,
@@ -347,6 +346,8 @@ mod tests {
     struct MockSettlementRepo {
         settlements: Mutex<Vec<Settlement>>,
         matches: Mutex<Vec<OrderMatch>>,
+        /// (order_id, delta) recorded by the atomic `persist_matched_trade`.
+        fills: Mutex<Vec<(Uuid, Decimal)>>,
     }
 
     #[async_trait]
@@ -354,6 +355,21 @@ mod tests {
         async fn insert_settlement(&self, s: &Settlement) -> TraitResult<()> {
             self.settlements.lock().unwrap().push(s.clone());
             Ok(())
+        }
+        async fn persist_matched_trade(
+            &self,
+            s: &Settlement,
+            om: &OrderMatch,
+            _matched_event: &Event,
+            _match_zone_id: Option<i32>,
+            buyer: &trading_core::traits::TradeFill,
+            seller: &trading_core::traits::TradeFill,
+        ) -> TraitResult<bool> {
+            self.settlements.lock().unwrap().push(s.clone());
+            self.matches.lock().unwrap().push(om.clone());
+            self.fills.lock().unwrap().push((buyer.order_id, buyer.delta));
+            self.fills.lock().unwrap().push((seller.order_id, seller.delta));
+            Ok(true)
         }
         async fn insert_match_with_event(
             &self,
@@ -483,7 +499,7 @@ mod tests {
         assert_eq!(settlements.matches.lock().unwrap().len(), 1);
         let s = &settlements.settlements.lock().unwrap()[0];
         assert_eq!(s.price, dec!(0.8), "settlement booked at the uniform price");
-        assert_eq!(orders.fills.lock().unwrap().len(), 2, "both orders filled");
+        assert_eq!(settlements.fills.lock().unwrap().len(), 2, "both orders filled");
     }
 
     #[tokio::test]

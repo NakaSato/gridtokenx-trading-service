@@ -409,6 +409,17 @@ mod tests {
         ) -> TraitResult<()> {
             unimplemented!()
         }
+        async fn persist_matched_trade(
+            &self,
+            _settlement: &Settlement,
+            _order_match: &OrderMatch,
+            _matched_event: &Event,
+            _match_zone_id: Option<i32>,
+            _buyer: &trading_core::traits::TradeFill,
+            _seller: &trading_core::traits::TradeFill,
+        ) -> TraitResult<bool> {
+            unimplemented!()
+        }
         async fn get_settlement(&self, _id: Uuid) -> TraitResult<Option<Settlement>> {
             unimplemented!()
         }

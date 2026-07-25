@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Row};
 use uuid::Uuid;
 
 use chrono::{DateTime, Utc};
@@ -10,7 +10,28 @@ use trading_core::events::Event;
 use trading_core::models::{
     MarketPrice, OrderMatch, Settlement, SettlementStats, SettlementStatus,
 };
-use trading_core::traits::{SettlementRepository, TraitResult};
+use trading_core::traits::{SettlementRepository, TradeFill, TraitResult};
+
+/// Incrementally advance an order's `filled_amount` by `delta`, flip it to
+/// `filled` once it reaches `energy_amount`, and return the post-update
+/// `filled_amount`/`status` — but only while the order is still in a live status
+/// (`pending`/`active`/`partially_filled`). `filled_amount` is nullable, so it is
+/// coalesced to 0 before adding. A terminal order matches 0 rows (returns `None`),
+/// which the atomic trade path uses to roll the whole trade back.
+const INCREMENTAL_FILL_SQL: &str = r#"
+    UPDATE trading_orders
+    SET filled_amount = COALESCE(filled_amount, 0) + $1,
+        status = CASE
+            WHEN COALESCE(filled_amount, 0) + $1 >= energy_amount THEN 'filled'::order_status
+            ELSE 'partially_filled'::order_status
+        END,
+        filled_at = CASE
+            WHEN COALESCE(filled_amount, 0) + $1 >= energy_amount THEN NOW()
+            ELSE filled_at
+        END
+    WHERE id = $2 AND status IN ('pending', 'active', 'partially_filled')
+    RETURNING filled_amount, status::text AS status_text
+"#;
 
 /// Bind every settlement column onto an INSERT query — shared by the plain and
 /// transactional insert paths so the column list cannot drift between them.
@@ -263,6 +284,62 @@ impl SettlementRepository for PostgresSettlementRepository {
         tx.commit().await?;
 
         Ok(())
+    }
+
+    async fn persist_matched_trade(
+        &self,
+        settlement: &Settlement,
+        order_match: &OrderMatch,
+        matched_event: &Event,
+        match_zone_id: Option<i32>,
+        buyer: &TradeFill,
+        seller: &TradeFill,
+    ) -> TraitResult<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Settlement row (drives on-chain payment) + 2. the order_matches
+        // ledger row and its OrderMatched event — all in this one transaction.
+        bind_settlement(sqlx::query(INSERT_SETTLEMENT_SQL), settlement)
+            .execute(&mut *tx)
+            .await?;
+        bind_match(
+            sqlx::query(INSERT_MATCH_SQL),
+            order_match,
+            Some(settlement.id),
+            match_zone_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        crate::repositories::outbox::insert_event_in_tx(&mut tx, matched_event).await?;
+
+        // 3. Both orders' incremental fills. A guarded 0-row result means the
+        // order raced to a terminal status (e.g. the reaper expired it): roll the
+        // entire trade back — settlement included — so nothing is orphaned, and
+        // signal the caller to leave the orders for the next cycle.
+        for side in [buyer, seller] {
+            let row = sqlx::query(INCREMENTAL_FILL_SQL)
+                .bind(side.delta)
+                .bind(side.order_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(row) = row else {
+                tx.rollback().await?;
+                return Ok(false);
+            };
+            let filled_amount: Decimal = row.try_get("filled_amount")?;
+            let status: String = row.try_get("status_text")?;
+            let event = Event::OrderUpdate {
+                id: side.order_id,
+                user_id: side.user_id,
+                filled_amount,
+                status,
+                zone_id: side.zone_id,
+            };
+            crate::repositories::outbox::insert_event_in_tx(&mut tx, &event).await?;
+        }
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {

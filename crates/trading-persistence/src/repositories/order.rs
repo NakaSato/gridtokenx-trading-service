@@ -312,14 +312,31 @@ impl OrderRepository for PostgresOrderRepository {
         // `insert_order_with_event`).
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
-            "UPDATE trading_orders SET filled_amount = $1, status = $2, filled_at = CASE WHEN $2 = 'filled' THEN NOW() ELSE filled_at END WHERE id = $3"
+        // Guard on a live source status, exactly like `expire_stale_orders` and
+        // `cancel_order`. Without it this write would unconditionally overwrite a
+        // row the reaper (or a cancel) had already moved to a terminal state —
+        // resurrecting an expired/cancelled order to `filled` after its escrow
+        // was refunded, i.e. an escrow double-process. The order book is
+        // in-memory, so the matcher can still hold an order the reaper expired
+        // between the book snapshot and this write; this predicate is the
+        // authoritative check.
+        let result = sqlx::query(
+            "UPDATE trading_orders SET filled_amount = $1, status = $2, filled_at = CASE WHEN $2 = 'filled' THEN NOW() ELSE filled_at END \
+             WHERE id = $3 AND status IN ('pending', 'active', 'partially_filled')"
         )
         .bind(filled_amount)
         .bind(status)
         .bind(id)
         .execute(&mut *tx)
         .await?;
+
+        // Row already terminal (expired/cancelled/filled elsewhere): the fill did
+        // not apply, so its `OrderUpdate` event must not fire either. Emitting it
+        // would publish a phantom fill for an order the trader was told was gone.
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(());
+        }
 
         crate::repositories::outbox::insert_event_in_tx(&mut tx, event).await?;
 
@@ -338,7 +355,7 @@ impl OrderRepository for PostgresOrderRepository {
              SET status = 'expired', updated_at = NOW() \
              WHERE status IN ('pending', 'active', 'partially_filled') \
                AND expires_at IS NOT NULL AND expires_at <= $1 \
-             RETURNING id, filled_amount, zone_id",
+             RETURNING id, user_id, filled_amount, zone_id",
         )
         .bind(now)
         .fetch_all(&mut *tx)
@@ -347,10 +364,12 @@ impl OrderRepository for PostgresOrderRepository {
         let mut ids = Vec::with_capacity(rows.len());
         for row in &rows {
             let id: Uuid = row.try_get("id")?;
+            let user_id: Uuid = row.try_get("user_id")?;
             let filled_amount: Decimal = row.try_get("filled_amount")?;
             let zone_id: Option<i32> = row.try_get("zone_id")?;
             let event = Event::OrderUpdate {
                 id,
+                user_id: Some(user_id),
                 filled_amount,
                 status: OrderStatus::Expired.to_string(),
                 zone_id,

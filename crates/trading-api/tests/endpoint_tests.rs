@@ -119,6 +119,7 @@ impl SettlementRepository for MockSystem {
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { Ok(Uuid::nil()) }
     async fn insert_match(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>) -> TraitResult<()> { Ok(()) }
     async fn insert_match_with_event(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>, _event: &Event) -> TraitResult<()> { Ok(()) }
+    async fn persist_matched_trade(&self, _settlement: &trading_core::models::Settlement, _order_match: &trading_core::models::OrderMatch, _matched_event: &Event, _match_zone_id: Option<i32>, _buyer: &TradeFill, _seller: &TradeFill) -> TraitResult<bool> { Ok(true) }
     async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
     async fn claim_settlements_for_processing(&self, _ids: &[Uuid]) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
     async fn reset_settlements_for_retry(&self, _ids: &[Uuid], _max_retries: i32, _error: Option<&str>) -> TraitResult<u64> { Ok(0) }

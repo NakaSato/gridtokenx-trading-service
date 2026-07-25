@@ -8,6 +8,7 @@
 use chrono::{Duration, Utc};
 use rust_decimal_macros::dec;
 use sqlx::{PgPool, Row};
+use trading_core::events::Event;
 use trading_core::traits::OrderRepository;
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 use trading_persistence::repositories::PostgresOrderRepository;
@@ -143,6 +144,133 @@ async fn test_expire_stale_orders_e2e() {
     }
 
     // Cleanup — cascades delete the orders.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+/// Regression for the fill/expiry race: `update_filled_amount_with_event` must
+/// refuse to move a row that is already in a terminal status. Before the status
+/// guard, a matcher holding an order the reaper had just expired would overwrite
+/// it back to `filled` (after its escrow was refunded) and emit a phantom fill
+/// event. The guard makes the fill a no-op on terminal rows — no status change,
+/// no outbox event — while a genuinely live order still fills and emits.
+#[tokio::test]
+async fn test_fill_does_not_resurrect_terminal_order() {
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| {
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+        });
+    let pool = PgPool::connect(&db_url)
+        .await
+        .expect("Failed to connect to postgres");
+
+    // `trading_orders.user_id` is an IAM id, NOT a cross-DB FK (see the
+    // db-per-service migration), so no `users` row is required here.
+    let user_id = Uuid::new_v4();
+
+    let epoch_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1, $2, $3, $4, 'pending')",
+    )
+    .bind(epoch_id)
+    .bind(Utc::now().timestamp_nanos_opt().unwrap_or(0))
+    .bind(Utc::now())
+    .bind(Utc::now() + Duration::minutes(15))
+    .execute(&pool)
+    .await
+    .expect("insert epoch");
+
+    let insert = |status: OrderStatus, filled: rust_decimal::Decimal| {
+        let pool = pool.clone();
+        async move {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO trading_orders (id, user_id, order_type, side, energy_amount, \
+                 price_per_kwh, filled_amount, status, time_in_force, zone_id, epoch_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(OrderType::Limit)
+            .bind(OrderSide::Buy)
+            .bind(dec!(10.0))
+            .bind(dec!(1.0))
+            .bind(filled)
+            .bind(status)
+            .bind(TimeInForce::Gtc)
+            .bind(Some(1_i32))
+            .bind(epoch_id)
+            .execute(&pool)
+            .await
+            .expect("insert order");
+            id
+        }
+    };
+
+    let ev = |id: Uuid, filled: rust_decimal::Decimal, status: OrderStatus| Event::OrderUpdate {
+        id,
+        user_id: Some(user_id),
+        filled_amount: filled,
+        status: status.to_string(),
+        zone_id: Some(1),
+    };
+
+    // T: order the reaper already moved to `expired`. L: a genuinely live order.
+    let t = insert(OrderStatus::Expired, dec!(0.0)).await;
+    let l = insert(OrderStatus::Active, dec!(0.0)).await;
+
+    let repo = PostgresOrderRepository::new(pool.clone());
+
+    // Terminal row: fill must be a no-op.
+    repo.update_filled_amount_with_event(t, dec!(10.0), OrderStatus::Filled, &ev(t, dec!(10.0), OrderStatus::Filled))
+        .await
+        .expect("update on terminal order returns Ok (no-op)");
+    // Live row: fill applies.
+    repo.update_filled_amount_with_event(l, dec!(10.0), OrderStatus::Filled, &ev(l, dec!(10.0), OrderStatus::Filled))
+        .await
+        .expect("update on live order");
+
+    let status_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT status::text FROM trading_orders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get::<String, _>("status")
+        }
+    };
+    assert_eq!(status_of(t).await, "expired", "terminal order NOT resurrected to filled");
+    assert_eq!(status_of(l).await, "filled", "live order filled");
+
+    // The terminal no-op emits no outbox event; the live fill emits exactly one.
+    let event_count = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "SELECT COUNT(*) AS n FROM outbox_events \
+                 WHERE event_type = 'OrderUpdate' AND payload::text LIKE $1",
+            )
+            .bind(format!("%{id}%"))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get::<i64, _>("n")
+        }
+    };
+    assert_eq!(event_count(t).await, 0, "no phantom fill event for terminal order");
+    assert!(event_count(l).await >= 1, "live fill emits an OrderUpdate event");
+
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
