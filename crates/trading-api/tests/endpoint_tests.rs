@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use ed25519_dalek::SigningKey;
-use gridtokenx_blockchain_core::auth::{GATEWAY_SECRET_HEADER, INTERNAL_ROLE_HEADER};
+use gridtokenx_blockchain_auth::{GATEWAY_SECRET_HEADER, INTERNAL_ROLE_HEADER};
 use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,19 @@ struct MockSystem {
     pub published_events: Mutex<Vec<Event>>,
     pub price_alerts: Mutex<Vec<PriceAlert>>,
     pub recurring: Mutex<Vec<RecurringOrder>>,
+}
+
+#[async_trait]
+impl MeterRepository for MockSystem {
+    async fn resolve_id_by_serial(&self, _serial: &str) -> TraitResult<Option<Uuid>> {
+        Ok(None)
+    }
+    async fn get_serials_for_ids(
+        &self,
+        _ids: &[Uuid],
+    ) -> TraitResult<std::collections::HashMap<Uuid, String>> {
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 #[async_trait]
@@ -611,7 +624,13 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         "role": "api",
         "platform_user_id": Uuid::nil(),
         "aggregator_bridge_public_key": oracle_pub_key,
-        "trade_settlement_enabled": false
+        "trade_settlement_enabled": false,
+        "readmodel_feed_enabled": false,
+        "readmodel_iam_topic": "iam.user.events",
+        "readmodel_meter_topic": "meter_events",
+        "readmodel_meter_brokers": "localhost:9001",
+        "readmodel_iam_db_url": null,
+        "readmodel_meter_db_url": null
     });
 
     let config: trading_core::config::Config = serde_json::from_value(config_json).unwrap();
@@ -639,6 +658,7 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
     let state = AppState {
         config: config_arc,
         order_repo: mock.clone(),
+        meter_repo: mock.clone(),
         settlement_repo: mock.clone(),
         futures_repo: mock.clone(),
         carbon_repo: mock.clone(),
@@ -1834,18 +1854,19 @@ async fn create_quote_same_zone_has_no_wheeling_and_low_loss() {
 }
 
 #[tokio::test]
-async fn create_quote_defaults_price_to_base_when_zero() {
+async fn create_quote_rejects_zero_price_without_market_history() {
     let app = build_router(setup_test_state(test_oracle_key()));
-    // agreed_price "0.00" -> falls back to base_price 4.50 -> energy_cost 10*4.50=45.00
-    let (status, body) = post_quote_json(app, json!({
+    // agreed_price "0.00" -> falls back to the trade-derived market price, not a
+    // static config default. This mock has no completed settlements, so there is
+    // no VWAP to quote and the request is rejected rather than invented.
+    let (status, _) = post_quote_json(app, json!({
         "buyer_zone_id": 1,
         "seller_zone_id": 1,
         "energy_amount_kwh": "10",
         "agreed_price": "0.00"
     })).await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["breakdown"]["energy_cost"], "45.00");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
