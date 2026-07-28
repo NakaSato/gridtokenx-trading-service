@@ -122,6 +122,32 @@ impl BlockchainGateway for BlockchainService {
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
 
+    async fn get_currency_balance(&self, wallet_address: &str) -> TraitResult<u64> {
+        use std::str::FromStr;
+        let owner = solana_sdk::pubkey::Pubkey::from_str(wallet_address)
+            .map_err(|e| trading_core::error::ApiError::Validation(e.to_string()))?;
+
+        let mint_str = std::env::var("CURRENCY_TOKEN_MINT").map_err(|_| {
+            trading_core::error::ApiError::Internal(
+                "CURRENCY_TOKEN_MINT environment variable is required".to_string(),
+            )
+        })?;
+        let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str).map_err(|e| {
+            trading_core::error::ApiError::Internal(format!("invalid CURRENCY_TOKEN_MINT: {}", e))
+        })?;
+
+        // MUST pass the token program explicitly. `get_token_balance(owner, mint)`
+        // derives the ATA under Token-2022, which is right for energy and wrong
+        // for this mint — the currency mint is owned by the CLASSIC SPL Token
+        // program. Deriving under the wrong program gives a different, unfunded
+        // address, and because a missing ATA is legitimately zero, the caller sees
+        // a confident `0` for a wallet holding real baht instead of an error.
+        // Observed exactly that: 0.000000 reported against 55.0275 on-chain.
+        self.get_token_balance_with_program(&owner, &mint, &spl_token::id())
+            .await
+            .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
+    }
+
     async fn get_sol_balance(&self, wallet_address: &str) -> TraitResult<f64> {
         use std::str::FromStr;
         let owner = solana_sdk::pubkey::Pubkey::from_str(wallet_address)

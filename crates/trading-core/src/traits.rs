@@ -531,8 +531,23 @@ pub trait BlockchainGateway: Send + Sync {
     /// Get user's on-chain wallet address.
     async fn get_user_wallet(&self, user_id: Uuid) -> TraitResult<Option<String>>;
 
-    /// Get on-chain token balance for a user.
+    /// Get on-chain **energy** (GRID/GRX, 9-dec) balance for a wallet.
     async fn get_token_balance(&self, wallet_address: &str) -> TraitResult<u64>;
+
+    /// Get on-chain **currency** (THBC, 6-dec) balance for a wallet — the baht side
+    /// of a trade.
+    ///
+    /// A trade has two legs and the API long exposed only the energy one, so a
+    /// wallet could show the kWh it held but not the money it was paid or spent.
+    ///
+    /// Note the two mints differ in more than decimals: energy is Token-2022 while
+    /// the currency mint is classic SPL Token, so their ATAs derive under different
+    /// token programs and must never be assumed interchangeable.
+    ///
+    /// Defaults to 0 so mock/non-chain gateways need no override.
+    async fn get_currency_balance(&self, _wallet_address: &str) -> TraitResult<u64> {
+        Ok(0)
+    }
 
     /// Get native SOL balance (in SOL, not lamports) for a wallet address.
     /// Default returns 0.0 so mock/non-chain gateways need no override.

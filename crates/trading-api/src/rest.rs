@@ -1343,13 +1343,41 @@ pub async fn get_wallet_balance(
         }
     };
 
+    // The currency (THBC) leg. A trade moves energy one way and baht the other,
+    // but this endpoint used to return only the energy side — so a wallet could
+    // show the kWh it held and not the money it was paid or spent.
+    //
+    // Best-effort like SOL: a wallet that has never touched the currency mint has
+    // no ATA, and that is a legitimate zero, not a 500. Never fail the whole call
+    // on this leg.
+    //
+    // CURRENCY_DECIMALS is 6 against energy's 9. They are reported explicitly, per
+    // leg, rather than left for the caller to infer — assuming one scale for both
+    // is exactly the mistake that produces 1000x errors.
+    const CURRENCY_DECIMALS: u32 = 6;
+    let currency_raw = match state.blockchain.get_currency_balance(&address).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to read currency balance for {}: {}", address, e);
+            0
+        }
+    };
+    let currency_decimal = Decimal::new(currency_raw as i64, CURRENCY_DECIMALS);
+
     Ok(Json(serde_json::json!({
         "wallet_address": address,
+        // Energy leg — kept at the original key names so existing callers,
+        // including the trading UI's getWalletBalance, keep working unchanged.
         "token_balance": balance_decimal.to_string(),
         "token_balance_raw": balance_raw,
         "balance_sol": balance_sol,
         "decimals": decimals,
         "token_mint": std::env::var("ENERGY_TOKEN_MINT").unwrap_or_default(),
+        // Currency leg (THBC).
+        "currency_balance": currency_decimal.to_string(),
+        "currency_balance_raw": currency_raw,
+        "currency_decimals": CURRENCY_DECIMALS,
+        "currency_mint": std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(),
     })))
 }
 

@@ -344,9 +344,24 @@ impl BlockchainService {
         Ok(balance as f64 / 1_000_000_000.0)
     }
 
-    /// Get SPL token balance for a user
+    /// Get SPL token balance for a user. Assumes the mint's ATA is under
+    /// Token-2022 — true for energy, NOT for the classic-SPL currency mint. For
+    /// that, use [`Self::get_token_balance_with_program`].
     pub async fn get_token_balance(&self, owner: &Pubkey, mint: &Pubkey) -> Result<u64> {
         self.core.token_manager.get_token_balance(owner, mint).await
+    }
+
+    /// Balance for a mint whose owning token program is not Token-2022.
+    pub async fn get_token_balance_with_program(
+        &self,
+        owner: &Pubkey,
+        mint: &Pubkey,
+        token_program: &Pubkey,
+    ) -> Result<u64> {
+        self.core
+            .token_manager
+            .get_token_balance_with_program(owner, mint, token_program)
+            .await
     }
 
     /// Send and confirm a transaction
