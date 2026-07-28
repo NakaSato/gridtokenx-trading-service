@@ -377,7 +377,10 @@ impl BlockchainService {
                 &std::env::var("CURRENCY_TOKEN_MINT")
                     .map_err(|_| anyhow::anyhow!("CURRENCY_TOKEN_MINT unset"))?,
             )?;
-            // GRX (6-dec) owed = energy(kWh, 9-dec atomic) * price(6-dec atomic) / 1e9.
+            // Currency (THBC, 6-dec) owed = energy(kWh, 9-dec atomic) * price(6-dec atomic) / 1e9.
+            // NOT GRX: GRX is the 9-dec *energy* mint funded by the sell branch below —
+            // one mint, two role names (see docs/blockchain-tokens.md §1). The /1e9 strips
+            // the energy side's 9-dec scaling, leaving a 6-dec currency amount.
             let amount = (energy_amount_atomic as u128)
                 .saturating_mul(price_atomic as u128)
                 / 1_000_000_000u128;
