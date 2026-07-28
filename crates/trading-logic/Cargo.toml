@@ -8,7 +8,6 @@ description = "Domain services and use-case orchestration for GridTokenX trading
 trading-core.workspace = true
 gridtokenx-telemetry.workspace = true
 trading-engine.workspace = true
-trading-persistence.workspace = true
 trading-infra.workspace = true
 
 # Async
@@ -22,16 +21,12 @@ chrono.workspace = true
 uuid.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
-ulid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 # Blockchain (for settlement provider types)
 solana-sdk.workspace = true
 gridtokenx-blockchain-core.workspace = true
-
-# Data structures
-dashmap.workspace = true
 
 # Observability
 tracing.workspace = true
@@ -50,7 +45,6 @@ rdkafka.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
-tokio-test.workspace = true
 
 [lints]
 workspace = true

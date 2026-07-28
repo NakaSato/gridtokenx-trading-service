@@ -36,13 +36,11 @@ rdkafka.workspace = true
 
 # Blockchain
 gridtokenx-blockchain-core.workspace = true
-solana-client.workspace = true
 solana-sdk.workspace = true
 solana-program.workspace = true
 spl-token.workspace = true
 spl-associated-token-account.workspace = true
 spl-token-2022.workspace = true
-solana-transaction-status.workspace = true
 
 # Crypto
 hmac.workspace = true

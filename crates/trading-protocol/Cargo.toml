@@ -11,8 +11,6 @@ description = "Protobuf / ConnectRPC wire types for GridTokenX trading service"
 doctest = false
 
 [dependencies]
-trading-core.workspace = true
-
 serde.workspace = true
 buffa.workspace = true
 connectrpc.workspace = true
@@ -20,7 +18,6 @@ futures.workspace = true
 http-body.workspace = true
 
 [build-dependencies]
-buffa-build.workspace = true
 connectrpc-build.workspace = true
 
 [lints.rust]

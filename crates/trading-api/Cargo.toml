@@ -9,7 +9,6 @@ trading-core.workspace = true
 gridtokenx-telemetry.workspace = true
 trading-protocol.workspace = true
 trading-logic.workspace = true
-trading-persistence.workspace = true
 trading-infra.workspace = true
 trading-engine.workspace = true
 
@@ -51,10 +50,8 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
-mockall = "0.13"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio-test = "0.4"
 
 [lints]
 workspace = true
