@@ -18,6 +18,9 @@ pub struct BlockchainService {
     /// When false, on-chain atomic-swap settlement of matching-engine trades is
     /// disabled (trade settlements are left for retry, never sent on-chain).
     pub trade_settlement_enabled: bool,
+    /// Settle from the parties' own escrow PDAs rather than the platform's pooled
+    /// ATAs. Off = today's custodial behaviour (see `Config`).
+    pub per_user_escrow_settlement: bool,
     /// Wallet read-model repo used to self-heal a missing wallet row on demand.
     /// When `get_user_primary_wallet` misses the local `iam_wallet_read_model`
     /// (e.g. a wallet event dropped in a boot-window Kafka wedge before it was
@@ -74,6 +77,7 @@ impl BlockchainService {
             db,
             identity_gateway: None,
             trade_settlement_enabled: false,
+            per_user_escrow_settlement: false,
             wallet_read_model: None,
         })
     }
@@ -99,6 +103,74 @@ impl BlockchainService {
     pub fn with_trade_settlement_enabled(mut self, enabled: bool) -> Self {
         self.trade_settlement_enabled = enabled;
         self
+    }
+
+    /// Settle from the parties' own escrow PDAs instead of the platform's pooled
+    /// ATAs. See `Config::per_user_escrow_settlement`.
+    pub fn with_per_user_escrow_settlement(mut self, enabled: bool) -> Self {
+        self.per_user_escrow_settlement = enabled;
+        self
+    }
+
+    /// Load one side of a match in the form `settle_offchain_match` needs: the
+    /// terms the wallet signed, plus the signature.
+    ///
+    /// Returns `None` when the order carries no wallet signature — i.e. it was
+    /// placed before per-user escrow settlement was enabled. Such orders can only
+    /// settle on the pooled path; the caller must skip them rather than attempt a
+    /// settlement the on-chain Ed25519 check would reject.
+    ///
+    /// Amounts are converted with the same truncating rule the browser used when
+    /// signing (`trading_core::offchain_payload`); any divergence would rebuild a
+    /// different message and fail verification on-chain.
+    pub async fn get_signed_order_side(
+        &self,
+        order_id: &uuid::Uuid,
+    ) -> Result<Option<crate::blockchain::settlement::SignedOrderSide>> {
+        let db = self
+            .db
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
+
+        let row: Option<(uuid::Uuid, String, rust_decimal::Decimal, rust_decimal::Decimal, Option<i32>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT user_id, side::text, energy_amount, price_per_kwh, zone_id, expires_at, signature \
+                 FROM trading_orders WHERE id = $1",
+            )
+            .bind(order_id)
+            .fetch_optional(db)
+            .await?;
+
+        let Some((user_id, side, energy, price, zone_id, expires_at, signature)) = row else {
+            return Ok(None);
+        };
+        let Some(signature) = signature else {
+            return Ok(None); // unsigned legacy order — pooled path only
+        };
+
+        let Some(wallet) = self.get_user_primary_wallet(&user_id).await? else {
+            return Ok(None);
+        };
+
+        let energy_amount = trading_core::offchain_payload::energy_to_base_units(energy)
+            .ok_or_else(|| anyhow::anyhow!("order {order_id}: energy {energy} out of range"))?;
+        let price_per_kwh = trading_core::offchain_payload::currency_to_base_units(price)
+            .ok_or_else(|| anyhow::anyhow!("order {order_id}: price {price} out of range"))?;
+
+        Ok(Some(crate::blockchain::settlement::SignedOrderSide {
+            order_id: *order_id.as_bytes(),
+            user: wallet,
+            energy_amount,
+            price_per_kwh,
+            side: if side.eq_ignore_ascii_case("sell") {
+                trading_core::offchain_payload::SIDE_SELL
+            } else {
+                trading_core::offchain_payload::SIDE_BUY
+            },
+            zone_id: zone_id.unwrap_or(0) as u32,
+            expires_at: expires_at.map(|t| t.timestamp()).unwrap_or(0),
+            signature,
+        }))
     }
 
     /// Resolve a trading order's on-chain PDA from its database id. Returns

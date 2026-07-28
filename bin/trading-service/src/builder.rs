@@ -180,7 +180,8 @@ impl ServiceBuilder {
         )
         .await?
         .with_identity_gateway(identity.clone())
-        .with_trade_settlement_enabled(config.trade_settlement_enabled);
+        .with_trade_settlement_enabled(config.trade_settlement_enabled)
+        .with_per_user_escrow_settlement(config.per_user_escrow_settlement);
         if let Some(wallet_rm) = &wallet_rm {
             blockchain_svc = blockchain_svc.with_wallet_read_model(wallet_rm.clone());
         }

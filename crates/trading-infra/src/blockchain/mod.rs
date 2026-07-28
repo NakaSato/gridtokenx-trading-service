@@ -210,6 +210,44 @@ impl BlockchainGateway for BlockchainService {
                             }
                         };
 
+                    // Per-user escrow path: settle from the parties' OWN escrow
+                    // PDAs so the seller's GRX is actually debited, instead of the
+                    // platform's pooled ATAs funding both sides. Requires both
+                    // orders to carry a wallet signature; orders placed before the
+                    // flag was enabled have none and stay on the pooled path
+                    // below, since the on-chain Ed25519 check would reject them.
+                    if self.per_user_escrow_settlement {
+                        let buyer_side = self.get_signed_order_side(&settlement.buy_order_id).await;
+                        let seller_side =
+                            self.get_signed_order_side(&settlement.sell_order_id).await;
+                        match (buyer_side, seller_side) {
+                            (Ok(Some(b)), Ok(Some(s))) => {
+                                match provider.execute_offchain_settlement(settlement, &b, &s).await
+                                {
+                                    Ok(tx) => {
+                                        results.push(tx);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Settlement {}: per-user escrow settle failed ({e}); \
+                                             left for retry",
+                                            settlement.id
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {
+                                warn!(
+                                    "Settlement {}: one or both orders carry no wallet signature; \
+                                     falling back to the pooled path",
+                                    settlement.id
+                                );
+                            }
+                        }
+                    }
+
                     inputs.push((settlement, buy_pda, sell_pda, buyer_pubkey, seller_pubkey));
                 }
 
