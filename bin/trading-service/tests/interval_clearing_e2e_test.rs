@@ -123,7 +123,14 @@ async fn test_interval_order_clears_end_to_end() {
         .expect("insert sell");
 
     // Run the clearing worker's step.
-    let clearing = ClearingService::new(order_repo.clone(), settlement_repo.clone(), Arc::new(NoFee));
+    let clearing = ClearingService::new(
+        order_repo.clone(),
+        settlement_repo.clone(),
+        Arc::new(NoFee),
+        // Zero rates keep this test's assertions on gross amounts valid; the
+        // charge arithmetic is covered by `trading_core::charges`.
+        Arc::new(trading_core::charges::StaticChargeRates::ZERO),
+    );
     let summaries = clearing.clear_due_epochs().await.expect("clear");
 
     let mine = summaries

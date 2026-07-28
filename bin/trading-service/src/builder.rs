@@ -185,6 +185,36 @@ impl ServiceBuilder {
         if let Some(wallet_rm) = &wallet_rm {
             blockchain_svc = blockchain_svc.with_wallet_read_model(wallet_rm.clone());
         }
+        // Settlement charge rates, read once from chain before the concrete service
+        // is erased behind the gateway trait. They decide what the `settlements`
+        // ledger records as fee/wheeling/loss/net, so they must be the on-chain
+        // values — `config.transaction_fee_bps` disagrees with the deployed market
+        // (50 vs 25 bps) and would book double the real fee.
+        //
+        // On failure book ZERO rather than a guess: zero is visibly wrong and comes
+        // with this error, whereas an invented rate would be quietly wrong — which
+        // is the failure mode this replaces.
+        let charge_rates: Arc<dyn trading_core::charges::ChargeRates> =
+            match blockchain_svc.read_charge_rates().await {
+                Ok(r) => {
+                    tracing::info!(
+                        fee_bps = r.fee_bps,
+                        wheeling_rate_per_kwh = r.wheeling_rate_per_kwh,
+                        loss_bps = r.loss_bps,
+                        "settlement charge rates loaded from chain"
+                    );
+                    Arc::new(r)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "could not read on-chain charge rates; settlements will record ZERO \
+                         fee/wheeling/loss until restart — the ledger will understate charges"
+                    );
+                    Arc::new(trading_core::charges::StaticChargeRates::ZERO)
+                }
+            };
+
         let blockchain: Arc<dyn BlockchainGateway> = Arc::new(blockchain_svc);
 
         let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
@@ -277,6 +307,7 @@ impl ServiceBuilder {
             order_repo.clone(),
             settlement_repo.clone(),
             Arc::new(GridAwareTopology::new()),
+            charge_rates.clone(),
         ));
 
         // Uniform-price clearing for the Interval segment (Phase 4). Same repos +
@@ -285,6 +316,7 @@ impl ServiceBuilder {
             order_repo.clone(),
             settlement_repo.clone(),
             Arc::new(GridAwareTopology::new()),
+            charge_rates.clone(),
         ));
 
         let vpp_service = Arc::new(trading_logic::vpp::VppService::new(

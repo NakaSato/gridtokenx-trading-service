@@ -48,6 +48,10 @@ impl ClearingSummary {
 pub struct ClearingService {
     order_repo: Arc<dyn OrderRepository>,
     settlement_repo: Arc<dyn SettlementRepository>,
+    /// On-chain settlement charge rates (fee / wheeling / loss). Injected like
+    /// `topology` so the pure clearing logic performs no I/O — see
+    /// `trading_core::charges`.
+    charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     topology: Arc<dyn TopologySnapshot>,
 }
 
@@ -56,10 +60,12 @@ impl ClearingService {
         order_repo: Arc<dyn OrderRepository>,
         settlement_repo: Arc<dyn SettlementRepository>,
         topology: Arc<dyn TopologySnapshot>,
+        charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     ) -> Self {
         Self {
             order_repo,
             settlement_repo,
+            charge_rates,
             topology,
         }
     }
@@ -121,6 +127,7 @@ impl ClearingService {
             &buy_metadata,
             &sell_metadata,
             &totals,
+            self.charge_rates.as_ref(),
         )
         .await?;
 
@@ -198,6 +205,17 @@ mod tests {
     use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
     use trading_engine::engine::TopologySnapshot;
     use trading_core::fast_price::FastPrice;
+
+    /// Zero charge rates: these tests assert on gross amounts, so keeping the
+    /// seller whole preserves their existing expectations. The charge arithmetic
+    /// itself is covered in `trading_core::charges`.
+    #[derive(Debug)]
+    struct NoCharges;
+    impl trading_core::charges::ChargeRates for NoCharges {
+        fn fee_bps(&self) -> u16 { 0 }
+        fn wheeling_rate_per_kwh(&self) -> u64 { 0 }
+        fn loss_bps(&self) -> u16 { 0 }
+    }
 
     struct NoFeeTopology;
     impl TopologySnapshot for NoFeeTopology {
@@ -487,6 +505,7 @@ mod tests {
             orders.clone(),
             settlements.clone(),
             Arc::new(NoFeeTopology),
+            Arc::new(NoCharges),
         );
 
         let summary = svc.run_epoch_clearing(epoch).await.unwrap();
@@ -521,7 +540,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
 
         let summary = svc.run_epoch_clearing(epoch).await.unwrap();
 
@@ -551,7 +570,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
 
         let summary = svc.run_epoch_clearing(epoch).await.unwrap();
 
@@ -581,7 +600,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
 
         let summaries = svc.clear_due_epochs().await.unwrap();
 
@@ -604,7 +623,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology));
+        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
 
         let summaries = svc.clear_due_epochs().await.unwrap();
 

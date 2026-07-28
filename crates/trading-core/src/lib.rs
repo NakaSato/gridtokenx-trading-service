@@ -12,6 +12,7 @@
 //! - **`numeric`** — Safe numeric conversion utilities
 //! - **`traits`** — Repository and service trait definitions for dependency injection
 
+pub mod charges;
 pub mod config;
 pub mod error;
 pub mod events;

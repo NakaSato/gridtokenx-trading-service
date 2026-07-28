@@ -8,6 +8,10 @@ use trading_engine::engine::{MatchingEngine, TopologySnapshot};
 pub struct MatcherService {
     order_repo: Arc<dyn OrderRepository>,
     settlement_repo: Arc<dyn SettlementRepository>,
+    /// On-chain settlement charge rates (fee / wheeling / loss). Injected like
+    /// `topology` so the pure clearing logic performs no I/O — see
+    /// `trading_core::charges`.
+    charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     topology: Arc<dyn TopologySnapshot>,
 }
 
@@ -16,10 +20,12 @@ impl MatcherService {
         order_repo: Arc<dyn OrderRepository>,
         settlement_repo: Arc<dyn SettlementRepository>,
         topology: Arc<dyn TopologySnapshot>,
+        charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     ) -> Self {
         Self {
             order_repo,
             settlement_repo,
+            charge_rates,
             topology,
         }
     }
@@ -89,6 +95,7 @@ impl MatcherService {
                 &buy_metadata,
                 &sell_metadata,
                 &totals,
+                self.charge_rates.as_ref(),
             )
             .await?;
         }
@@ -164,6 +171,17 @@ mod tests {
 
     /// Permissive topology: every flow accommodated, zero wheeling/loss — so the
     /// test exercises the match→persist orchestration, not grid routing.
+    /// Zero charge rates: these tests assert on gross amounts, so keeping the
+    /// seller whole preserves their existing expectations. The charge arithmetic
+    /// itself is covered in `trading_core::charges`.
+    #[derive(Debug)]
+    struct NoCharges;
+    impl trading_core::charges::ChargeRates for NoCharges {
+        fn fee_bps(&self) -> u16 { 0 }
+        fn wheeling_rate_per_kwh(&self) -> u64 { 0 }
+        fn loss_bps(&self) -> u16 { 0 }
+    }
+
     struct PermissiveTopology;
     impl TopologySnapshot for PermissiveTopology {
         fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
@@ -324,7 +342,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -366,7 +384,7 @@ mod tests {
             ..Default::default()
         });
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -398,7 +416,7 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -420,7 +438,7 @@ mod tests {
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -449,7 +467,7 @@ mod tests {
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -480,7 +498,7 @@ mod tests {
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -512,7 +530,7 @@ mod tests {
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -537,7 +555,7 @@ mod tests {
         });
         let settlements = Arc::new(MockSettlementRepo::default());
         let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology));
+            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 

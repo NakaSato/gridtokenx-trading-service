@@ -95,6 +95,7 @@ pub(crate) async fn persist_matches(
     buy_metadata: &[OrderMetadata],
     sell_metadata: &[OrderMetadata],
     totals: &HashMap<Uuid, (Decimal, Decimal, Uuid)>,
+    rates: &dyn trading_core::charges::ChargeRates,
 ) -> TraitResult<()> {
     let owner_of = |order_id: Uuid| totals.get(&order_id).map(|(_, _, u)| *u);
 
@@ -117,6 +118,19 @@ pub(crate) async fn persist_matches(
         let settle_price = m.settle_price;
         let total_at_ask = m.match_amount * settle_price;
 
+        // What the chain will actually deduct from the buyer's escrow before the
+        // seller is paid. Previously this row recorded the matching engine's own
+        // numbers — fee hardcoded to zero, net set to the gross, and wheeling/loss
+        // taken from the landed-cost calculation that decides whether a pair
+        // crosses. Those are not the tariff the chain applies: on a measured
+        // 1 kWh @ THB1.00 trade the seller was credited 0.897 while this row
+        // claimed net 1.00 / fee 0.00 / wheeling 0.00 / loss 0.01.
+        //
+        // `m.wheeling_charge` / `m.loss_cost` remain correct for their own purpose
+        // (pricing the buyer's landed cost during matching) — they simply are not
+        // what gets charged, so only the tariff-derived values are persisted here.
+        let charges = trading_core::charges::compute_charges(total_at_ask, m.match_amount, rates);
+
         let settlement = trading_core::models::Settlement {
             id: settlement_id,
             trade_id: Some(Uuid::new_v4()),
@@ -128,15 +142,15 @@ pub(crate) async fn persist_matches(
             energy_amount: m.match_amount,
             price: settle_price,
             total_amount: total_at_ask,
-            fee_amount: rust_decimal_macros::dec!(0),
-            net_amount: total_at_ask,
+            fee_amount: charges.fee,
+            net_amount: charges.net,
             status: trading_core::models::SettlementStatus::Pending,
             blockchain_tx: None,
             created_at: gridtokenx_telemetry::time::now(),
             confirmed_at: None,
-            wheeling_charge: Some(m.wheeling_charge),
+            wheeling_charge: Some(charges.wheeling),
             loss_factor: Some(m.loss_factor),
-            loss_cost: Some(m.loss_cost),
+            loss_cost: Some(charges.loss),
             effective_energy: Some(m.match_amount),
             buyer_zone_id: m.buyer_zone_id,
             seller_zone_id: m.seller_zone_id,

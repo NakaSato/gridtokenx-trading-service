@@ -640,6 +640,9 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         mock.clone(),
         mock.clone(),
         Arc::new(TopologyStub),
+        // Zero charge rates: these endpoint tests assert on gross amounts. The
+        // charge arithmetic is covered in `trading_core::charges`.
+        Arc::new(trading_core::charges::StaticChargeRates::ZERO),
     ));
 
     let settlement = Arc::new(trading_logic::SettlementService::new(

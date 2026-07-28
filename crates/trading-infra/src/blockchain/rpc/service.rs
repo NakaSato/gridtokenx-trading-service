@@ -112,6 +112,34 @@ impl BlockchainService {
         self
     }
 
+    /// Read the settlement charge rates from chain: the market fee, and the
+    /// wheeling/loss tariff.
+    ///
+    /// These decide what the buyer's escrow is actually debited before the seller
+    /// is paid, and they are the only correct source for the `settlements` ledger.
+    /// In particular do NOT use `Config::transaction_fee_bps` — it defaults to 50
+    /// while the deployed market reads 25, so it would book double the real fee.
+    ///
+    /// Both accounts are `#[account(zero_copy)]`, so they are parsed by byte offset
+    /// (Borsh cannot decode them) — see `market_accounts`.
+    pub async fn read_charge_rates(&self) -> Result<trading_core::charges::StaticChargeRates> {
+        use gridtokenx_blockchain_core::rpc::instructions::market_accounts;
+
+        let trading_program_id = self.trading_program_id()?;
+        let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
+        let (tariff_pda, _) =
+            Pubkey::find_program_address(&[b"tariff_config"], &trading_program_id);
+
+        let market = self.get_account_data(&market_pda).await?;
+        let tariff = self.get_account_data(&tariff_pda).await?;
+
+        Ok(trading_core::charges::StaticChargeRates {
+            fee_bps: market_accounts::parse_market_fee_bps(&market)?,
+            wheeling_rate_per_kwh: market_accounts::parse_tariff_wheeling_rate(&tariff)?,
+            loss_bps: market_accounts::parse_tariff_loss_bps(&tariff)?,
+        })
+    }
+
     /// Load one side of a match in the form `settle_offchain_match` needs: the
     /// terms the wallet signed, plus the signature.
     ///
