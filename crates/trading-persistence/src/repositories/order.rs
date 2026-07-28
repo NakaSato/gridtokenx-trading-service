@@ -175,6 +175,18 @@ impl OrderRepository for PostgresOrderRepository {
         Ok(())
     }
 
+    async fn set_wallet_signature(&self, order_id: Uuid, signature: &str) -> TraitResult<()> {
+        // Targeted UPDATE rather than an extra INSERT column: `TradingOrder` does
+        // not map `signature`, and widening the model would touch every order
+        // literal in the suite for a field only the settlement builder reads.
+        sqlx::query("UPDATE trading_orders SET signature = $1 WHERE id = $2")
+            .bind(signature)
+            .bind(order_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn get_order(&self, id: Uuid) -> TraitResult<Option<TradingOrder>> {
         let order =
             sqlx::query_as::<_, TradingOrderDb>("SELECT * FROM trading_orders WHERE id = $1")

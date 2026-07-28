@@ -46,6 +46,23 @@ pub struct SubmitOrderRequest {
     /// Market segment: "realtime" (default, CDA matcher) or "interval"
     /// (15-min uniform-price clearing).
     pub market_segment: Option<String>,
+
+    // ── Per-user escrow settlement (config `per_user_escrow_settlement`) ──────
+    //
+    // Required only when that flag is on. The three fields below are inputs to
+    // the signed payload, so the client must send exactly what it signed; the
+    // server re-derives the message from them and verifies the signature before
+    // accepting the order (see `crate::order_signature`).
+    /// Order UUID. The client generates it because the id is part of the signed
+    /// payload — the server cannot mint one after the fact and still verify.
+    pub order_id: Option<Uuid>,
+    /// Base58 Ed25519 signature over the canonical payload
+    /// ([`trading_core::offchain_payload`]), produced by the user's wallet.
+    /// Distinct from the HMAC `signature` on `CreateOrderRequest`.
+    pub wallet_signature: Option<String>,
+    /// The exact `expires_at` (unix seconds) that was signed. Sent explicitly
+    /// because the server's own 24h default would not match the signed bytes.
+    pub signed_expires_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -323,8 +340,86 @@ pub async fn submit_order(
         None => req.meter_id,
     };
 
+    // ── Per-user escrow settlement: verify the wallet signature ──────────────
+    // With this flag on, settlement spends the parties' OWN escrow PDAs via
+    // `settle_offchain_match`, which verifies an Ed25519 signature over the order
+    // terms on-chain. Reject anything unsigned or mis-signed here, at placement,
+    // rather than letting it rest in the book and fail at settlement.
+    //
+    // The message is rebuilt from the values this handler is about to persist —
+    // never from client-supplied bytes — so a client cannot sign one price and
+    // submit another. See `crate::order_signature` for the full rationale.
+    let signed_order: Option<(Uuid, String, i64)> = if state.config.per_user_escrow_settlement {
+        let order_id = req.order_id.ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "order_id is required when per-user escrow settlement is enabled".to_string(),
+        ))?;
+        let wallet_signature = req.wallet_signature.clone().ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "wallet_signature is required when per-user escrow settlement is enabled".to_string(),
+        ))?;
+        let signed_expires_at = req.signed_expires_at.ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "signed_expires_at is required when per-user escrow settlement is enabled".to_string(),
+        ))?;
+
+        let wallet = state
+            .blockchain
+            .get_user_wallet(user.user_id)
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to resolve wallet: {e}"),
+                )
+            })?
+            .ok_or((
+                axum::http::StatusCode::BAD_REQUEST,
+                "no on-chain wallet linked to this account".to_string(),
+            ))?;
+
+        let wallet_bytes: [u8; 32] = bs58::decode(&wallet)
+            .into_vec()
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "linked wallet is not a valid Ed25519 public key".to_string(),
+            ))?;
+
+        // Same truncating conversion the on-chain instruction and the browser use.
+        let energy_base = trading_core::offchain_payload::energy_to_base_units(amount).ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "energy_amount_kwh is out of range".to_string(),
+        ))?;
+        let price_base = trading_core::offchain_payload::currency_to_base_units(price).ok_or((
+            axum::http::StatusCode::BAD_REQUEST,
+            "price_per_kwh is out of range".to_string(),
+        ))?;
+
+        let message = trading_core::offchain_payload::message_for(
+            order_id.as_bytes(),
+            &wallet_bytes,
+            energy_base,
+            price_base,
+            match side {
+                OrderSide::Buy => trading_core::offchain_payload::SIDE_BUY,
+                OrderSide::Sell => trading_core::offchain_payload::SIDE_SELL,
+            },
+            req.zone_id as u32,
+            signed_expires_at,
+        );
+
+        crate::order_signature::verify_order_signature(&wallet, &wallet_signature, &message)
+            .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        Some((order_id, wallet_signature, signed_expires_at))
+    } else {
+        None
+    };
+
     let mut order = TradingOrder {
-        id: Uuid::new_v4(),
+        id: signed_order.as_ref().map(|(id, _, _)| *id).unwrap_or_else(Uuid::new_v4),
         user_id: user.user_id,
         order_type,
         side,
@@ -332,7 +427,12 @@ pub async fn submit_order(
         price_per_kwh: price,
         filled_amount: Decimal::ZERO,
         status: OrderStatus::Pending,
-        expires_at: Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+        // The signed expiry must be what we store, or the settlement-time payload
+        // would not match the bytes the user signed.
+        expires_at: match signed_order.as_ref() {
+            Some((_, _, exp)) => chrono::DateTime::from_timestamp(*exp, 0),
+            None => Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+        },
         created_at: Some(gridtokenx_telemetry::time::now()),
         filled_at: None,
         epoch_id: None,
@@ -355,7 +455,16 @@ pub async fn submit_order(
     // no user signature). Fires when settlement is enabled or explicitly requested.
     // Best-effort: a failure leaves order_pda NULL so the settlement worker skips it
     // (unchanged behaviour) — it never fails the API.
-    if state.config.trade_settlement_enabled || req.custodial_sign.unwrap_or(false) {
+    //
+    // Skipped entirely under `per_user_escrow_settlement`: that is the whole point
+    // of the flag. Platform funding is what makes a seller's own GRX never move —
+    // the escrow is filled from the platform's ATA, so selling debits nobody and
+    // the pool drains by the traded amount on every match. With the flag on, each
+    // party funds their own `[b"escrow", user, mint]` PDA by wallet-signed
+    // `deposit_escrow`, and `settle_offchain_match` spends those.
+    if !state.config.per_user_escrow_settlement
+        && (state.config.trade_settlement_enabled || req.custodial_sign.unwrap_or(false))
+    {
         let seed = u64::from_le_bytes(
             order.id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes"),
         );
@@ -427,6 +536,25 @@ pub async fn submit_order(
             format!("Database error: {}", e),
         )
     })?;
+
+    // Store the wallet signature the settlement builder will replay into the
+    // Ed25519 verify instruction. Written after the insert (not as part of it)
+    // because `TradingOrder` does not map the column — see `set_wallet_signature`.
+    // Hard-fail on error: without the signature this order can never settle on the
+    // per-user-escrow path, and silently resting an unsettleable order in the book
+    // is exactly the failure mode that produced the endless re-match loop before.
+    if let Some((_, signature, _)) = signed_order.as_ref() {
+        state
+            .order_repo
+            .set_wallet_signature(order.id, signature)
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to persist order signature: {e}"),
+                )
+            })?;
+    }
 
     Ok(Json(SubmitOrderResponse {
         id: order.id,

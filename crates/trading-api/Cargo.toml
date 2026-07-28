@@ -41,6 +41,7 @@ metrics.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 bs58.workspace = true
+thiserror.workspace = true
 
 # Error handling
 anyhow.workspace = true

@@ -58,6 +58,21 @@ pub trait OrderRepository: Send + Sync {
         event: &Event,
     ) -> TraitResult<()>;
 
+    /// Store the wallet Ed25519 signature that authorises this order for
+    /// per-user-escrow settlement (config `per_user_escrow_settlement`).
+    ///
+    /// Written to the existing `trading_orders.signature` column. The settlement
+    /// builder reads it back and re-derives the signed payload from the order row,
+    /// so the raw bytes need not be stored alongside it.
+    ///
+    /// Defaults to a no-op so the in-memory/mock repositories used in unit tests
+    /// need not implement it — only the Postgres repository persists anything.
+    /// A new *production* repository MUST override this, or signed orders will
+    /// silently fail to settle.
+    async fn set_wallet_signature(&self, _order_id: Uuid, _signature: &str) -> TraitResult<()> {
+        Ok(())
+    }
+
     /// Return the id of the current active market epoch, creating one if none
     /// is open. Orders must be stamped with this on placement: `order_matches`
     /// and `settlements` both have a NOT NULL FK to `market_epochs(id)`, so a

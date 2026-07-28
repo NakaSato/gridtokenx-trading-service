@@ -43,6 +43,24 @@ pub struct Config {
     /// default: the swap path sends real energy↔currency transfers and must be
     /// validated against a live validator/simnet before being enabled.
     pub trade_settlement_enabled: bool,
+    /// Settle from **per-user escrow PDAs** instead of the platform's pooled ATAs.
+    ///
+    /// Off by default = today's custodial model: the platform funds both sides'
+    /// escrows at placement, so a seller's own GRX is never debited and the pool
+    /// drains by the traded amount on every match. On = each party must have
+    /// deposited their own tokens (`deposit_escrow`, wallet-signed) and settlement
+    /// runs through `settle_offchain_match`, which spends those PDAs.
+    ///
+    /// Requires every order to carry a valid Ed25519 signature over
+    /// [`crate::offchain_payload`]; orders placed before this was enabled have
+    /// none and can only settle on the pooled path. Keep both paths working until
+    /// no unsigned orders remain open.
+    ///
+    /// `serde(default)` so deserializing a config written before this field
+    /// existed yields the safe value (false = today's behaviour) instead of
+    /// failing outright.
+    #[serde(default)]
+    pub per_user_escrow_settlement: bool,
     /// Enable the read-model feed worker (DB-per-service Phase 1): backfill +
     /// project IAM wallet / metering meter events into the local read-model
     /// tables. Off by default (zero behavior change when unset).
@@ -284,6 +302,20 @@ impl Config {
                     other => {
                         return Err(anyhow::anyhow!(
                             "TRADE_SETTLEMENT_ENABLED must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
+                        ))
+                    }
+                },
+            },
+            // Off by default: enabling changes who funds a trade, and every order
+            // must be wallet-signed first. Malformed value aborts, as above.
+            per_user_escrow_settlement: match env::var("PER_USER_ESCROW_SETTLEMENT") {
+                Err(_) => false,
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => true,
+                    "false" | "0" | "no" | "off" => false,
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "PER_USER_ESCROW_SETTLEMENT must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
                         ))
                     }
                 },

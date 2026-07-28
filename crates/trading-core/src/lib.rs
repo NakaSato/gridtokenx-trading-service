@@ -18,6 +18,7 @@ pub mod events;
 pub mod fast_price;
 pub mod models;
 pub mod numeric;
+pub mod offchain_payload;
 pub mod order_policy;
 pub mod recurring;
 pub mod traits;
