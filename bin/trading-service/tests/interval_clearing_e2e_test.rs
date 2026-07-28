@@ -76,7 +76,7 @@ async fn test_interval_order_clears_end_to_end() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
@@ -163,8 +163,12 @@ async fn test_interval_order_clears_end_to_end() {
     assert_eq!(settle_count, 1, "one settlement for the pair");
     assert_eq!(settle_price, Some(dec!(0.8)));
 
-    // Cleanup — cascades orders/settlements/matches via the user + epoch FKs.
+    // Cleanup — the cross-domain FKs to IAM `users` were dropped by the
+    // DB-per-service split (migration 20260728000000), so orders no longer
+    // cascade away with their owner. Delete them explicitly or they linger as
+    // orphaned rows in the shared dev order book.
     for id in [buyer, seller] {
+        sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(id).execute(&pool).await.ok();
         sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(&pool).await.ok();
     }
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch).execute(&pool).await.ok();

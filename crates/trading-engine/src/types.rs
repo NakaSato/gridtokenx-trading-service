@@ -28,7 +28,13 @@ use std::sync::Arc;
 /// Metadata not required for the matching hot-path.
 #[derive(Debug, Clone)]
 pub struct OrderMetadata {
-    pub epoch_id: Option<Uuid>,
+    /// Market epoch the order trades in. Non-optional by construction: a match
+    /// is written to `settlements`/`order_matches`, whose `epoch_id` is NOT NULL
+    /// and FKs to `market_epochs`. Modelling this as `Option` invited the
+    /// `unwrap_or_default()` that silently substituted `Uuid::nil()` — never a
+    /// real epoch — so every such trade failed its FK and re-matched forever.
+    /// `to_fast_orders` drops epoch-less orders before they reach a book.
+    pub epoch_id: Uuid,
     pub order_pda: Option<Arc<str>>,
     pub session_token: Option<Arc<str>>,
 }

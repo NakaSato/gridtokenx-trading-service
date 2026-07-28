@@ -17,14 +17,31 @@ use uuid::Uuid;
 
 /// Convert domain orders into the engine's `FastOrder` hot-path representation
 /// plus the parallel `OrderMetadata` sidecar (indexed by `metadata_index`).
+///
+/// Orders with no `epoch_id` are excluded: `settlements.epoch_id` and
+/// `order_matches.epoch_id` are NOT NULL and FK to `market_epochs`, so a match
+/// involving one can never be persisted. Letting them into a book produced a
+/// match that failed its atomic persist and re-matched every cycle — an endless
+/// retry loop that never drained. Placement stamps every order with the active
+/// epoch (`rest.rs` `submit_order`), so a NULL here means orphaned data, not a
+/// live market participant. See `trading_persistence::repositories::epoch`.
 pub(crate) fn to_fast_orders(orders: &[TradingOrder]) -> (Vec<FastOrder>, Vec<OrderMetadata>) {
+    let epoch_less = orders.iter().filter(|o| o.epoch_id.is_none()).count();
+    if epoch_less > 0 {
+        tracing::warn!(
+            epoch_less,
+            "orders with no market epoch excluded from matching (unsettleable — orphaned rows?)"
+        );
+    }
+
     let mut metadata = Vec::with_capacity(orders.len());
     let fast = orders
         .iter()
+        .filter_map(|o| o.epoch_id.map(|epoch_id| (o, epoch_id)))
         .enumerate()
-        .map(|(i, o)| {
+        .map(|(i, (o, epoch_id))| {
             metadata.push(OrderMetadata {
-                epoch_id: o.epoch_id,
+                epoch_id,
                 order_pda: o.order_pda.as_ref().map(|s| Arc::from(s.as_str())),
                 session_token: o.session_token.as_ref().map(|s| Arc::from(s.as_str())),
             });

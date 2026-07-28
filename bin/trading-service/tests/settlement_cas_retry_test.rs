@@ -32,7 +32,7 @@ async fn try_pool() -> Option<PgPool> {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx"
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading"
                 .to_string()
         });
     PgPool::connect(&db_url).await.ok()
@@ -65,7 +65,9 @@ async fn seed_fk_chain(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
          VALUES ($1, $2, $3, $4, 'pending')",
     )
     .bind(epoch_id)
-    .bind(Utc::now().timestamp_nanos_opt().unwrap_or(0))
+    // Unique-id-derived, not wall-clock — avoids parallel-test collisions on
+    // market_epochs_epoch_number_key.
+    .bind((epoch_id.as_u128() as u64 >> 1) as i64)
     .bind(Utc::now())
     .bind(Utc::now() + chrono::Duration::minutes(15))
     .execute(pool)
@@ -167,6 +169,10 @@ async fn retry_count_of(pool: &PgPool, id: Uuid) -> i32 {
 }
 
 async fn cleanup(pool: &PgPool, user_id: Uuid, epoch_id: Uuid) {
+    // Orders first: the DB-per-service split dropped the cross-domain FK to IAM
+    // `users` (migration 20260728000000), so deleting the owner no longer
+    // cascades them away.
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(pool).await.ok();
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(pool).await.ok();
 }

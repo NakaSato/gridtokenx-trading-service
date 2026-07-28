@@ -578,7 +578,7 @@ impl MatchingEngine {
                         seller_zone_id: sell.zone_id,
                         buyer_id: buy.user_id,
                         seller_id: sell.user_id,
-                        epoch_id: buy_meta.epoch_id.unwrap_or_default(),
+                        epoch_id: buy_meta.epoch_id,
                     });
 
                     buy.filled_amount += match_amount;
@@ -667,7 +667,7 @@ mod tests {
             metadata_index: 0,
         }];
         let buy_meta = vec![OrderMetadata {
-            epoch_id: None,
+            epoch_id: Uuid::new_v4(),
             order_pda: None,
             session_token: None,
         }];
@@ -685,7 +685,7 @@ mod tests {
             metadata_index: 0,
         }];
         let sell_meta = vec![OrderMetadata {
-            epoch_id: None,
+            epoch_id: Uuid::new_v4(),
             order_pda: None,
             session_token: None,
         }];
@@ -739,7 +739,7 @@ mod tests {
             metadata_index: 0,
         }];
         let sell_meta = vec![OrderMetadata {
-            epoch_id: None,
+            epoch_id: Uuid::new_v4(),
             order_pda: None,
             session_token: None,
         }];
@@ -774,12 +774,12 @@ mod tests {
         ];
         let buy_meta = vec![
             OrderMetadata {
-                epoch_id: None,
+                epoch_id: Uuid::new_v4(),
                 order_pda: None,
                 session_token: None,
             },
             OrderMetadata {
-                epoch_id: None,
+                epoch_id: Uuid::new_v4(),
                 order_pda: None,
                 session_token: None,
             },
@@ -847,7 +847,7 @@ mod tests {
     fn meta(n: usize) -> Vec<OrderMetadata> {
         (0..n)
             .map(|_| OrderMetadata {
-                epoch_id: None,
+                epoch_id: Uuid::new_v4(),
                 order_pda: None,
                 session_token: None,
             })

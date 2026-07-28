@@ -14,7 +14,7 @@ async fn test_postgres_order_repository_e2e() {
     // 1. Establish central database connection
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
 
     let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
 
@@ -38,7 +38,9 @@ async fn test_postgres_order_repository_e2e() {
 
     // 3. Insert test epoch to satisfy epoch foreign key constraint
     let epoch_id = Uuid::new_v4();
-    let epoch_number = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    // Unique-id-derived, not wall-clock — avoids parallel-test collisions on
+    // market_epochs_epoch_number_key.
+    let epoch_number = (epoch_id.as_u128() as u64 >> 1) as i64;
     let start_time = Utc::now();
     let end_time = Utc::now() + chrono::Duration::minutes(15);
 
@@ -171,7 +173,15 @@ async fn test_postgres_order_repository_e2e() {
     assert_eq!(fetched_settlement.id, settlement_id);
     assert_eq!(fetched_settlement.energy_amount, dec!(5.5));
 
-    // 8. Cleanup (Cascades delete order and settlement automatically when deleting user/epoch)
+    // 8. Cleanup — delete the rows this test created, explicitly.
+    // These used to disappear via `trading_orders_user_id_fkey ON DELETE CASCADE`,
+    // but the DB-per-service split dropped every cross-domain FK to IAM `users`
+    // (migration 20260728000000). Without an explicit delete the fixture orders
+    // survive teardown, and `market_epochs` deletion only NULLs their epoch
+    // (ON DELETE SET NULL) — leaving orphaned active orders in the shared dev
+    // order book that the live matcher then tries, and fails, to settle.
+    sqlx::query("DELETE FROM settlements WHERE id = $1").bind(settlement_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
@@ -185,7 +195,7 @@ async fn test_postgres_order_repository_e2e() {
 async fn test_meter_repository_reads_read_model() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let meter_id = Uuid::new_v4();
@@ -238,7 +248,7 @@ async fn test_meter_repository_reads_read_model() {
 async fn test_market_segment_round_trips() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let user_id = Uuid::new_v4();
@@ -305,6 +315,9 @@ async fn test_market_segment_round_trips() {
     let rt = repo.get_order(order.id).await.unwrap().unwrap();
     assert_eq!(rt.market_segment, trading_core::types::MarketSegment::Realtime);
 
+    // Explicit order cleanup — no cross-domain FK cascade to rely on any more
+    // (see the teardown note in the repository round-trip test above).
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }

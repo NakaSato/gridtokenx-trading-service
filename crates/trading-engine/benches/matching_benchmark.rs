@@ -47,7 +47,7 @@ fn make_side(
             metadata_index: i,
         });
         meta.push(OrderMetadata {
-            epoch_id: None,
+            epoch_id: Uuid::new_v4(),
             order_pda: None,
             session_token: None,
         });

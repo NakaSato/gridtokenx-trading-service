@@ -255,7 +255,7 @@ impl UniformAuction {
                 seller_zone_id: sell.zone_id,
                 buyer_id: buy.user_id,
                 seller_id: sell.user_id,
-                epoch_id: buy_meta.epoch_id.unwrap_or_default(),
+                epoch_id: buy_meta.epoch_id,
             });
         }
 
@@ -314,7 +314,7 @@ mod tests {
     fn meta(n: usize) -> Vec<OrderMetadata> {
         (0..n)
             .map(|_| OrderMetadata {
-                epoch_id: None,
+                epoch_id: Uuid::new_v4(),
                 order_pda: None,
                 session_token: None,
             })

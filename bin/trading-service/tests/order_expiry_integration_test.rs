@@ -19,7 +19,7 @@ async fn test_expire_stale_orders_e2e() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     let pool = PgPool::connect(&db_url)
         .await
@@ -44,7 +44,10 @@ async fn test_expire_stale_orders_e2e() {
         "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1, $2, $3, $4, 'pending')",
     )
     .bind(epoch_id)
-    .bind(Utc::now().timestamp_nanos_opt().unwrap_or(0))
+    // Derive epoch_number from the unique id, not wall-clock: two tests in this
+    // file run in parallel and collided on the same nanosecond, tripping
+    // market_epochs_epoch_number_key. Same approach as settlement_atomic_trade_test.
+    .bind((epoch_id.as_u128() as u64 >> 1) as i64)
     .bind(Utc::now())
     .bind(Utc::now() + Duration::minutes(15))
     .execute(&pool)
@@ -143,7 +146,14 @@ async fn test_expire_stale_orders_e2e() {
         assert!(count >= 1, "reaped order {id} must have an OrderUpdate event");
     }
 
-    // Cleanup — cascades delete the orders.
+    // Cleanup — orders no longer cascade away with their owner: the
+    // DB-per-service split dropped the cross-domain FK to IAM `users`
+    // (migration 20260728000000). Delete them explicitly.
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
@@ -167,22 +177,39 @@ async fn test_fill_does_not_resurrect_terminal_order() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     let pool = PgPool::connect(&db_url)
         .await
         .expect("Failed to connect to postgres");
 
-    // `trading_orders.user_id` is an IAM id, NOT a cross-DB FK (see the
-    // db-per-service migration), so no `users` row is required here.
+    // `trading_orders.user_id` still carries `trading_orders_user_id_fkey ->
+    // users(id)` in `gridtokenx_trading` (the split cloned the legacy schema
+    // rather than dropping cross-service FKs), so the user row must exist —
+    // same as `test_expire_stale_orders_e2e` above.
     let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(user_id)
+    .bind(format!("resurrect-{user_id}@gridtokenx.com"))
+    // `username` is varchar(50); prefix + 36-char UUID must fit.
+    .bind(format!("resurrect_{user_id}"))
+    .bind("mock_hash")
+    .bind(format!("Wallet_{}", &user_id.to_string()[..32]))
+    .execute(&pool)
+    .await
+    .expect("insert user");
 
     let epoch_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1, $2, $3, $4, 'pending')",
     )
     .bind(epoch_id)
-    .bind(Utc::now().timestamp_nanos_opt().unwrap_or(0))
+    // Derive epoch_number from the unique id, not wall-clock: two tests in this
+    // file run in parallel and collided on the same nanosecond, tripping
+    // market_epochs_epoch_number_key. Same approach as settlement_atomic_trade_test.
+    .bind((epoch_id.as_u128() as u64 >> 1) as i64)
     .bind(Utc::now())
     .bind(Utc::now() + Duration::minutes(15))
     .execute(&pool)
@@ -271,6 +298,12 @@ async fn test_fill_does_not_resurrect_terminal_order() {
     assert_eq!(event_count(t).await, 0, "no phantom fill event for terminal order");
     assert!(event_count(l).await >= 1, "live fill emits an OrderUpdate event");
 
+    // Explicit order cleanup — no cross-domain FK cascade any more (see above).
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
