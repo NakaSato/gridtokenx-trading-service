@@ -327,6 +327,72 @@ mod tests {
         async fn update_settlement_status_with_event(&self, _id: Uuid, _s: &str, _t: Option<&str>, _e: Option<&str>, _ev: &Event) -> TraitResult<()> { unimplemented!() }
     }
 
+    /// The settlement row must record what the CHAIN charges, not the matching
+    /// engine's own numbers.
+    ///
+    /// Regression guard for a live accounting defect: every settlement recorded
+    /// `fee_amount = 0` and `net_amount = gross` while the chain charged a fee,
+    /// wheeling and loss — so platform revenue was earned on-chain and booked as
+    /// zero. Measured on a real 1 kWh @ THB1.00 trade, the seller was credited
+    /// 0.897 against a row claiming net 1.00 / fee 0.00 / wheeling 0.00 / loss
+    /// 0.01: all four fields wrong, and loss wrong in the OPPOSITE direction to
+    /// wheeling.
+    ///
+    /// `trading_core::charges` unit-tests the arithmetic; this asserts the matcher
+    /// actually *applies* it, which is the part that was broken. Uses the rates
+    /// deployed on the dev validator so the expected numbers are the ones observed
+    /// on-chain.
+    #[tokio::test]
+    async fn settlement_records_the_charges_the_chain_applies() {
+        /// Live on-chain rates: Market.market_fee_bps = 25, TariffConfig
+        /// wheeling THB0.10/kWh and loss_bps = 5.
+        #[derive(Debug)]
+        struct LiveRates;
+        impl trading_core::charges::ChargeRates for LiveRates {
+            fn fee_bps(&self) -> u16 { 25 }
+            fn wheeling_rate_per_kwh(&self) -> u64 { 100_000 }
+            fn loss_bps(&self) -> u16 { 5 }
+        }
+
+        // Crossing pair, 2 kWh settling at the seller's ask of 3.00 => gross 6.00.
+        let buy = order(OrderSide::Buy, dec!(3.5), dec!(2.0), 10);
+        let sell = order(OrderSide::Sell, dec!(3.0), dec!(2.0), 20);
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(LiveRates),
+        );
+
+        assert_eq!(matcher.run_matching_cycle().await.unwrap(), 1);
+
+        let captured = settlements.settlements.lock().unwrap();
+        let s = &captured[0];
+
+        assert_eq!(s.total_amount, dec!(6.00), "gross = 2 kWh x ask 3.00");
+        assert_eq!(s.fee_amount, dec!(0.0150), "0.25% of gross — NOT the hardcoded 0");
+        assert_eq!(s.wheeling_charge, Some(dec!(0.200000)), "2 kWh x THB0.10, per-kWh not per-value");
+        assert_eq!(s.loss_cost, Some(dec!(0.0030)), "0.05% of gross");
+        assert_eq!(s.net_amount, dec!(5.782), "what the seller actually receives");
+
+        // The invariant that makes the ledger reconcile with on-chain movement:
+        // every satang of the gross is accounted for by exactly one party.
+        assert_eq!(
+            s.net_amount + s.fee_amount + s.wheeling_charge.unwrap() + s.loss_cost.unwrap(),
+            s.total_amount,
+            "charges + seller payout must sum to the gross"
+        );
+        assert_ne!(s.net_amount, s.total_amount, "net must not be the gross");
+    }
+
     /// A crossing buy (5.0) and sell (4.0) for the same 10 kWh fully match: one
     /// settlement + one match-ledger row persisted, and both orders marked Filled.
     #[tokio::test]
