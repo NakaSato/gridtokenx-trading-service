@@ -60,6 +60,27 @@ async fn test_expire_stale_orders_e2e() {
 
     // Raw insert so we control status / expires_at / filled_amount (insert_order
     // omits those columns). Returns the new id.
+    //
+    // ISOLATION: these tests run against the shared dev database while the
+    // trading-service matcher is live, so an `active` order seeded here is a real,
+    // matchable order in a real book. Seeded at a crossable price it gets FILLED
+    // mid-test — "C never expires" failed with left: "filled", right: "active",
+    // intermittently, depending on what was resting in zone 1 at the time.
+    //
+    // Price each side so nothing can ever cross: sells far above any real bid,
+    // buys far below any real ask. That keeps them invisible to the matcher while
+    // preserving what these tests actually assert (expiry and status, never
+    // price). Zone stays 1 because cross-zone matching means a different zone is
+    // not by itself isolation.
+    //
+    // This is a mitigation, not the cure. The real fix is a dedicated test
+    // database so integration tests never share a book with a running service —
+    // the same shared-DB assumption also produced the orphaned-order match loop
+    // and the FK-cascade teardown breakage.
+    let unmatchable_price = |side: OrderSide| match side {
+        OrderSide::Sell => dec!(1000000.0),
+        OrderSide::Buy => dec!(0.01),
+    };
     let insert = |status: OrderStatus,
                   side: OrderSide,
                   filled: rust_decimal::Decimal,
@@ -77,7 +98,7 @@ async fn test_expire_stale_orders_e2e() {
             .bind(OrderType::Limit)
             .bind(side)
             .bind(dec!(10.0))
-            .bind(dec!(1.0))
+            .bind(unmatchable_price(side))
             .bind(filled)
             .bind(status)
             .bind(TimeInForce::Gtc)
@@ -230,7 +251,9 @@ async fn test_fill_does_not_resurrect_terminal_order() {
             .bind(OrderType::Limit)
             .bind(OrderSide::Buy)
             .bind(dec!(10.0))
-            .bind(dec!(1.0))
+            // Far below any real ask, so the live matcher can never fill it —
+            // see the isolation note on the sibling test's insert helper.
+            .bind(dec!(0.01))
             .bind(filled)
             .bind(status)
             .bind(TimeInForce::Gtc)
