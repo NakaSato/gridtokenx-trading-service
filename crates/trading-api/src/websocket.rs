@@ -47,7 +47,13 @@ const ZONE_CHANNEL_CAPACITY: usize = 512;
 pub struct WsQuery {
     pub token: String,
     /// Zone to subscribe to. Maps 1:1 onto a Kafka partition key.
-    pub zone_id: i32,
+    ///
+    /// Omit it to receive **every** zone. Market-wide views (best bid/ask, trade
+    /// history) span zones, and picking one would silently drop the others'
+    /// updates. Every frame carries its own `zone_id` and a sequence that is
+    /// still per-zone, so an all-zones subscriber tracks one sequence per zone
+    /// rather than a single global one — there is no cross-zone order to claim.
+    pub zone_id: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -73,9 +79,12 @@ pub struct MarketFrame {
 struct ResyncFrame {
     #[serde(rename = "type")]
     kind: &'static str,
-    zone_id: i32,
+    /// `None` for an all-zones subscriber: the drop spans zones, so every
+    /// tracked sequence is suspect, not just one.
+    zone_id: Option<i32>,
     /// Sequence the stream has reached; everything before it is unreliable.
-    seq: u64,
+    /// `None` alongside a `None` zone, for the same reason.
+    seq: Option<u64>,
     reason: &'static str,
 }
 
@@ -88,13 +97,20 @@ struct ZoneChannel {
 /// [`AppState`]); zones are created lazily on first publish or subscribe.
 pub struct ZoneHub {
     zones: DashMap<i32, Arc<ZoneChannel>>,
+    /// Every frame, regardless of zone, for market-wide subscribers. Separate
+    /// from the per-zone channels rather than derived from them: zones are
+    /// created lazily on first event, so a subscriber that had joined "all the
+    /// zones that exist right now" would never see one that appears later.
+    firehose: broadcast::Sender<Arc<str>>,
 }
 
 impl ZoneHub {
     #[must_use]
     pub fn new() -> Self {
+        let (firehose, _) = broadcast::channel(ZONE_CHANNEL_CAPACITY);
         Self {
             zones: DashMap::new(),
+            firehose,
         }
     }
 
@@ -135,18 +151,38 @@ impl ZoneHub {
         (rx, zone.seq.load(Ordering::Acquire))
     }
 
+    /// Every zone's frames on one receiver, for market-wide views. Frames stay
+    /// individually zone-tagged and per-zone sequenced; interleaving across
+    /// zones is arbitrary and carries no meaning.
+    #[must_use]
+    pub fn subscribe_all(&self) -> broadcast::Receiver<Arc<str>> {
+        self.firehose.subscribe()
+    }
+
     /// Stamp and broadcast an event. No-op for events without a zone, and for
     /// zones nobody is watching (`send` fails only when there are no receivers).
     pub fn publish(&self, event: &Event) {
-        let Some(zone_id) = zone_of(event) else {
+        let Some((zone_id, kind)) = routable(event) else {
             return;
         };
         let zone = self.zone(zone_id);
 
+        // `Event` is adjacently tagged (`#[serde(tag = "event_type", content =
+        // "data")]`), so serializing it whole yields `{event_type, data}` and the
+        // frame would read `frame.data.data.id`. Lift the payload out: the
+        // frame's own `type` already names the event, in the wire vocabulary
+        // rather than the Rust one, so the nested tag is both redundant and
+        // misleading. Clients get `frame.data.id`.
         let data = match serde_json::to_value(event) {
-            Ok(v) => v,
+            Ok(mut v) => {
+                if v.get("data").is_some() {
+                    v["data"].take()
+                } else {
+                    v
+                }
+            }
             Err(e) => {
-                warn!("🌐 WS: failed to serialize {} event: {}", event.outbox_event_type(), e);
+                warn!("🌐 WS: failed to serialize {kind} event: {e}");
                 return;
             }
         };
@@ -156,7 +192,7 @@ impl ZoneHub {
         let seq = zone.seq.fetch_add(1, Ordering::AcqRel) + 1;
 
         let frame = MarketFrame {
-            kind: event.outbox_event_type(),
+            kind,
             seq,
             zone_id,
             data,
@@ -165,7 +201,12 @@ impl ZoneHub {
 
         match serde_json::to_string(&frame) {
             Ok(json) => {
-                let _ = zone.tx.send(Arc::from(json.as_str()));
+                // One allocation shared by both fan-outs. `send` fails only when
+                // nobody is listening, which is the common case for a zone with
+                // no subscribers — not an error.
+                let payload: Arc<str> = Arc::from(json.as_str());
+                let _ = zone.tx.send(Arc::clone(&payload));
+                let _ = self.firehose.send(payload);
             }
             Err(e) => warn!("🌐 WS: failed to encode frame for zone {}: {}", zone_id, e),
         }
@@ -178,16 +219,28 @@ impl Default for ZoneHub {
     }
 }
 
-/// Zone a market event belongs to, or `None` when it carries no zone and
-/// therefore no ordering guarantee.
-fn zone_of(event: &Event) -> Option<i32> {
-    match event {
-        Event::OrderCreated(p) => p.zone_id,
-        Event::OrderMatched(p) => p.zone_id,
-        Event::OrderUpdate { zone_id, .. } | Event::PeakPriceUpdate { zone_id, .. } => *zone_id,
-        Event::SettlementRequested(s) => s.buyer_zone_id,
-        _ => None,
-    }
+/// Zone and browser-facing type name for an event, or `None` when it must not
+/// be broadcast — either it carries no zone (and so no ordering guarantee, see
+/// the module docs) or it is not part of the market-data contract.
+///
+/// Zone and wire name are derived together on purpose. They are the two things
+/// a frame cannot be built without, so pairing them here makes it impossible to
+/// start broadcasting an event while forgetting to name it.
+///
+/// The names are deliberately **not** `Event::outbox_event_type()`. That tag
+/// serves the outbox table and topic routing — internal concerns, free to change
+/// with a refactor. These strings are a public contract with browsers, so they
+/// live here and change only on purpose.
+fn routable(event: &Event) -> Option<(i32, &'static str)> {
+    let (zone, kind) = match event {
+        Event::OrderCreated(p) => (p.zone_id, "order_created"),
+        Event::OrderMatched(p) => (p.zone_id, "order_matched"),
+        Event::OrderUpdate { zone_id, .. } => (*zone_id, "order_update"),
+        Event::PeakPriceUpdate { zone_id, .. } => (*zone_id, "peak_price_update"),
+        Event::SettlementRequested(s) => (s.buyer_zone_id, "settlement_requested"),
+        _ => (None, ""),
+    };
+    zone.map(|z| (z, kind))
 }
 
 /// Consume the trading topics once for the whole process and republish into
@@ -266,15 +319,24 @@ pub async fn ws_handler(
 async fn handle_socket(
     mut socket: WebSocket,
     hub: Arc<ZoneHub>,
-    zone_id: i32,
+    zone_id: Option<i32>,
     user_id: uuid::Uuid,
 ) {
-    let (mut rx, joined_at_seq) = hub.subscribe(zone_id);
+    let mut rx = match zone_id {
+        Some(zone) => {
+            let (rx, joined_at_seq) = hub.subscribe(zone);
+            info!(
+                "🌐 WS: user {} subscribed to zone {} at seq {}",
+                user_id, zone, joined_at_seq
+            );
+            rx
+        }
+        None => {
+            info!("🌐 WS: user {} subscribed to all zones", user_id);
+            hub.subscribe_all()
+        }
+    };
     metrics::counter!("trading_ws_connections_opened").increment(1);
-    info!(
-        "🌐 WS: user {} subscribed to zone {} at seq {}",
-        user_id, zone_id, joined_at_seq
-    );
 
     loop {
         tokio::select! {
@@ -303,13 +365,15 @@ async fn handle_socket(
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         metrics::counter!("trading_ws_resync_sent").increment(1);
                         warn!(
-                            "🌐 WS: user {} lagged {} frames on zone {} — resyncing",
-                            user_id, missed, zone_id
+                            "🌐 WS: user {} lagged {} frames on {} — resyncing",
+                            user_id,
+                            missed,
+                            zone_id.map_or_else(|| "all zones".to_string(), |z| format!("zone {z}"))
                         );
                         let resync = ResyncFrame {
                             kind: "resync",
                             zone_id,
-                            seq: hub.current_seq(zone_id),
+                            seq: zone_id.map(|z| hub.current_seq(z)),
                             reason: "lagged",
                         };
                         match serde_json::to_string(&resync) {
@@ -331,7 +395,11 @@ async fn handle_socket(
     }
 
     metrics::counter!("trading_ws_connections_closed").increment(1);
-    info!("🌐 WS: user {} left zone {}", user_id, zone_id);
+    info!(
+        "🌐 WS: user {} left {}",
+        user_id,
+        zone_id.map_or_else(|| "all zones".to_string(), |z| format!("zone {z}"))
+    );
 }
 
 #[cfg(test)]
@@ -413,6 +481,111 @@ mod tests {
         // Only the zoned event arrives, and it is seq 1 — the dropped one did
         // not consume a sequence number.
         assert_eq!(seq_of(&rx.recv().await.expect("frame delivered")), 1);
+    }
+
+    fn type_of_frame(json: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(json)
+            .expect("frame is json")
+            .get("type")
+            .and_then(|v| v.as_str())
+            .expect("frame carries type")
+            .to_string()
+    }
+
+    /// The payload sits directly under `data` — not `data.data`. Clients key
+    /// frames by `data.id` / `data.match_id`, so the adjacent tag `Event`
+    /// serializes with must not leak into the wire shape.
+    #[tokio::test]
+    async fn frame_payload_is_not_double_nested() {
+        let hub = ZoneHub::new();
+        let mut rx = hub.subscribe_all();
+
+        hub.publish(&order_created(Some(1)));
+        let json = rx.recv().await.expect("frame delivered");
+        let frame: serde_json::Value = serde_json::from_str(&json).expect("frame is json");
+
+        let data = frame.get("data").expect("frame carries data");
+        assert!(
+            data.get("id").is_some(),
+            "payload must be at data.id, got: {data}"
+        );
+        assert!(
+            data.get("data").is_none() && data.get("event_type").is_none(),
+            "the adjacent serde tag must not reach the wire: {data}"
+        );
+    }
+
+    /// These strings are the browser-facing contract — the frontend's
+    /// `WebSocketMessageType` union matches on them. Renaming one silently stops
+    /// every handler firing, so pin them here rather than letting a refactor of
+    /// the internal `Event` enum change them by accident.
+    #[tokio::test]
+    async fn wire_type_names_are_stable() {
+        let hub = ZoneHub::new();
+        let mut rx = hub.subscribe_all();
+
+        hub.publish(&order_created(Some(1)));
+        assert_eq!(
+            type_of_frame(&rx.recv().await.expect("frame delivered")),
+            "order_created",
+            "must be snake_case wire name, not the Rust variant `OrderCreated`"
+        );
+    }
+
+    fn zone_of_frame(json: &str) -> i64 {
+        serde_json::from_str::<serde_json::Value>(json)
+            .expect("frame is json")
+            .get("zone_id")
+            .and_then(serde_json::Value::as_i64)
+            .expect("frame carries zone_id")
+    }
+
+    /// The market-wide case: one subscriber sees every zone. Picking a single
+    /// zone instead would silently drop the others' updates, which is the bug
+    /// this mode exists to prevent.
+    #[tokio::test]
+    async fn firehose_spans_every_zone() {
+        let hub = ZoneHub::new();
+        let mut rx = hub.subscribe_all();
+
+        hub.publish(&order_created(Some(0)));
+        hub.publish(&order_created(Some(1)));
+        hub.publish(&order_created(Some(0)));
+
+        let a = rx.recv().await.expect("frame delivered");
+        let b = rx.recv().await.expect("frame delivered");
+        let c = rx.recv().await.expect("frame delivered");
+
+        assert_eq!((zone_of_frame(&a), seq_of(&a)), (0, 1));
+        assert_eq!((zone_of_frame(&b), seq_of(&b)), (1, 1), "zone 1 has its own seq");
+        assert_eq!((zone_of_frame(&c), seq_of(&c)), (0, 2));
+    }
+
+    /// A zone that first appears *after* a subscriber joined must still reach
+    /// it — the reason the firehose is its own channel rather than a fan-in over
+    /// the zones that happened to exist at subscribe time.
+    #[tokio::test]
+    async fn firehose_includes_zones_created_later() {
+        let hub = ZoneHub::new();
+        let mut rx = hub.subscribe_all();
+
+        hub.publish(&order_created(Some(42))); // zone 42 did not exist yet
+
+        let frame = rx.recv().await.expect("frame delivered");
+        assert_eq!(zone_of_frame(&frame), 42);
+    }
+
+    /// Subscribing to one zone must not leak other zones onto that socket.
+    #[tokio::test]
+    async fn per_zone_subscription_stays_scoped() {
+        let hub = ZoneHub::new();
+        let (mut rx, _) = hub.subscribe(5);
+
+        hub.publish(&order_created(Some(6)));
+        hub.publish(&order_created(Some(5)));
+
+        let frame = rx.recv().await.expect("frame delivered");
+        assert_eq!(zone_of_frame(&frame), 5, "zone 6 must not appear here");
     }
 
     /// A consumer that overruns the ring gets `Lagged`, which is what drives the
