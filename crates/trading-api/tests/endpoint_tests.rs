@@ -675,6 +675,7 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
         matcher,
         settlement,
         vpp,
+        ws_hub: std::sync::Arc::new(trading_api::websocket::ZoneHub::new()),
     };
     (state, mock)
 }

@@ -75,6 +75,21 @@ pub struct SubmitOrderResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OrderBookResponse {
     pub zone_id: i32,
+    /// Sequence the `/ws/trading` stream had reached for this zone when the
+    /// snapshot was read.
+    ///
+    /// **A staleness hint, not a splice point.** This book is read from
+    /// Postgres while the sequence counts Kafka frames, and events reach
+    /// Postgres before they reach Kafka (the outbox relay,
+    /// `trading-infra/src/events/outbox_worker.rs`). So the snapshot can
+    /// already contain an order this sequence has not counted yet. A client
+    /// that resumed deltas from exactly `last_update_id + 1` would re-apply
+    /// that order.
+    ///
+    /// Apply frames keyed by `order_id`/`match_id` so a repeat is a no-op, and
+    /// use this only to notice you have fallen behind. Note it also **resets on
+    /// gateway restart** — the WS pump replays Kafka from earliest with a fresh
+    /// consumer group — so treat a decrease as "resync", not as an error.
     pub last_update_id: u64,
     pub asks: Vec<[String; 2]>,
     pub bids: Vec<[String; 2]>,
@@ -620,9 +635,11 @@ pub async fn get_order_book(
 
     Ok(Json(OrderBookResponse {
         zone_id,
-        // No exchange-wide sequence source yet; expose the resting-order count as
-        // a change proxy (replace with a real sequence when the matcher emits one).
-        last_update_id: entries.len() as u64,
+        // Was `entries.len()` — the resting-order count, a placeholder standing in
+        // for the sequence source that did not exist yet. It does now: the WS
+        // gateway stamps a per-zone sequence. See the field docs for why this is a
+        // staleness hint rather than a resume point.
+        last_update_id: state.ws_hub.current_seq(zone_id),
         asks,
         bids,
     }))

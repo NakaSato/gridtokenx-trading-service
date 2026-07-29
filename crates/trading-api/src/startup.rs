@@ -238,6 +238,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/analytics/history",
             axum::routing::get(crate::rest::get_user_analytics_history),
         )
+        // Market-data stream. Authenticates the `?token=` JWT in-handler because
+        // APISIX serves upgrade routes without the shared plugin config — see
+        // `crate::websocket`. Not in the OpenAPI doc: utoipa models HTTP verbs,
+        // not websocket upgrades.
+        .route(
+            "/ws/trading",
+            axum::routing::get(crate::websocket::ws_handler),
+        )
         .route(
             "/api/v1/transactions",
             axum::routing::get(crate::rest::get_user_transactions),

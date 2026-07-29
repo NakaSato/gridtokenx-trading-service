@@ -24,4 +24,7 @@ pub struct AppState {
     pub matcher: Arc<MatcherService>,
     pub settlement: Arc<SettlementService>,
     pub vpp: Arc<trading_logic::vpp::VppService>,
+    /// Per-zone market-data fan-out backing `GET /ws/trading`. Shared with the
+    /// Kafka pump spawned in `main.rs`; inert until that pump runs.
+    pub ws_hub: Arc<crate::websocket::ZoneHub>,
 }

@@ -11,3 +11,4 @@ pub mod order_signature;
 pub mod rest;
 pub mod startup;
 pub mod state;
+pub mod websocket;

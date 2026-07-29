@@ -21,7 +21,7 @@ async fn test_api_routing_e2e() {
     // 1. Establish database connection
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string());
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
 
     let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
 
@@ -64,6 +64,7 @@ async fn test_api_routing_e2e() {
         matcher: services.matcher,
         settlement: services.settlement,
         vpp: services.vpp,
+        ws_hub: std::sync::Arc::new(trading_api::websocket::ZoneHub::new()),
     };
 
     // 4. Initialize in-memory Axum Router
@@ -202,7 +203,9 @@ async fn test_api_routing_e2e() {
     .expect("Failed to insert test user");
 
     let epoch_id = Uuid::new_v4();
-    let epoch_number = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    // Unique-id-derived, not wall-clock — avoids parallel-test collisions on
+    // market_epochs_epoch_number_key.
+    let epoch_number = (epoch_id.as_u128() as u64 >> 1) as i64;
     let start_time = Utc::now();
     let end_time = Utc::now() + chrono::Duration::minutes(15);
 

@@ -35,6 +35,15 @@ pub struct Config {
     pub kafka_bootstrap_servers: String,
     /// Topic prefix for trading events (default: "trading")
     pub kafka_topic_prefix: String,
+    /// Shared platform JWT secret (`JWT_SECRET`). Only the market-data WebSocket
+    /// route needs it: APISIX cannot run the shared plugin config on an upgrade
+    /// route (it breaks the handshake), so `/ws/trading` receives no
+    /// `x-gridtokenx-user-id` header and must verify the `?token=` JWT itself.
+    /// Every other endpoint keeps trusting the gateway-injected header.
+    /// Defaulted so existing deserialized `Config` fixtures keep working; an
+    /// empty secret makes the WS route refuse upgrades rather than allow them.
+    #[serde(default)]
+    pub jwt_secret: String,
     /// Service role (api or matcher)
     pub role: String,
     /// Platform user ID for automated settlements (surplus buying)
@@ -288,6 +297,9 @@ impl Config {
                 .unwrap_or_else(|_| "localhost:9001".to_string()),
             kafka_topic_prefix: env::var("KAFKA_TOPIC_PREFIX")
                 .unwrap_or_else(|_| "trading".to_string()),
+            // Empty when unset — the WS route refuses every upgrade in that case
+            // rather than falling back to an unauthenticated stream.
+            jwt_secret: env::var("JWT_SECRET").unwrap_or_default(),
             role: env::var("TRADING_ROLE").unwrap_or_else(|_| "api".to_string()),
             platform_user_id: env::var("PLATFORM_USER_ID")
                 .unwrap_or_else(|_| "9d27181d-ab85-4a30-86f9-a9cf4701eb5b".to_string())

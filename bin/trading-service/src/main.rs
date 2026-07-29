@@ -171,6 +171,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 7. Start API Server
+    //
+    // Market-data fan-out for `GET /ws/trading`. The hub is shared between the
+    // Kafka pump below and every socket; without the pump it stays empty and the
+    // route simply never emits, so this is inert when Kafka is disabled.
+    let ws_hub = std::sync::Arc::new(trading_api::websocket::ZoneHub::new());
+    if config.kafka_enabled {
+        let topics = trading_infra::events::kafka::KafkaTopics::with_prefix(
+            &config.kafka_topic_prefix,
+        );
+        trading_api::websocket::spawn_kafka_pump(
+            config.kafka_bootstrap_servers.clone(),
+            vec![
+                topics.orders_created,
+                topics.orders_matched,
+                topics.orders_updated,
+                topics.settlements,
+            ],
+            // Distinct group per pod: every gateway needs *all* partitions, so
+            // pods must not share a group and split them between each other.
+            format!("trading-ws-gateway-{}", uuid::Uuid::new_v4()),
+            std::sync::Arc::clone(&ws_hub),
+        );
+    } else {
+        info!("Market-data WebSocket pump not started (KAFKA_EVENTS_ENABLED=false)");
+    }
+
     let state = AppState {
         config: config.clone(),
         order_repo: infra.order_repo,
@@ -188,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matcher: services.matcher,
         settlement: services.settlement,
         vpp: services.vpp,
+        ws_hub,
     };
 
     tokio::spawn(async move {

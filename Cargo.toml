@@ -71,8 +71,10 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 
 # ── Web Framework ────────────────────────────────────────────────────────────
-axum = { version = "0.8.7", features = ["macros"] }
+axum = { version = "0.8.7", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["trace"] }
+# Only the /ws/trading upgrade route verifies JWTs in-process; see Config::jwt_secret.
+jsonwebtoken = "9.3"
 
 # ── gRPC / ConnectRPC ────────────────────────────────────────────────────────
 connectrpc = { version = "0.2.1", features = ["client", "axum", "server"] }
