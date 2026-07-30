@@ -1,8 +1,8 @@
 //! Price alerts.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 

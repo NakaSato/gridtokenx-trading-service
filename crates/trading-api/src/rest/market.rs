@@ -1,11 +1,27 @@
 //! Market-wide data — stats, config, P2P prices/orderbook, matching, settlement, clearing.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
+/// Real 24h market statistics, derived from completed settlements — no mock or
+/// static values. Price/volume come from the market-price aggregate (VWAP);
+/// `active_users` is the distinct buyer∪seller count. Grid-stability and
+/// renewable-ratio were removed: trading has no real source for them (they
+/// belong to telemetry), and a fabricated constant is worse than their absence.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats",
+    tag = "markets",
+    responses(
+        (status = 200, description = "Real 24h market stats from settled trades", body = MarketStatsResponse),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_market_stats(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -39,15 +55,14 @@ pub async fn get_market_stats(
 // Futures Mock Handlers
 // =============================================================================
 
-/// List futures products.
+/// Static market pricing parameters. NOTE: real JSON floats, not decimal strings.
 #[utoipa::path(
     get,
-    path = "/api/v1/futures/products",
-    tag = "futures",
+    path = "/api/v1/markets/config",
+    tag = "markets",
     responses(
-        (status = 200, description = "All futures products", body = Vec<trading_core::models::FuturesProduct>),
+        (status = 200, description = "Market pricing config", body = MarketConfigResponse),
         (status = 403, description = "Caller role not allowed", body = String),
-        (status = 500, description = "Database error", body = String),
     ),
     security(("gateway_role" = [])),
 )]
@@ -151,7 +166,7 @@ pub async fn get_matching_status(
 /// row can be returned here after its `expires_at` but before the next reap tick.
 /// The matcher skips such orders, so counting them as crossable would report
 /// phantom liquidity. Filter them out with the same expiry rule the engine uses.
-fn build_matching_status(
+pub(super) fn build_matching_status(
     buys: &[TradingOrder],
     sells: &[TradingOrder],
     now: chrono::DateTime<chrono::Utc>,
@@ -224,7 +239,7 @@ pub struct P2POrderBookResponse {
     pub bids: Vec<[String; 2]>,
 }
 
-fn build_settlement_stats_response(s: &SettlementStats) -> SettlementStatsResponse {
+pub(super) fn build_settlement_stats_response(s: &SettlementStats) -> SettlementStatsResponse {
     SettlementStatsResponse {
         pending_count: s.pending_count,
         processing_count: s.processing_count,
@@ -236,7 +251,7 @@ fn build_settlement_stats_response(s: &SettlementStats) -> SettlementStatsRespon
 
 /// Aggregate active orders into price-level book entries (`[price, amount]`).
 /// Bids (buys) descending, asks (sells) ascending. DB-free, unit-testable.
-fn build_p2p_orderbook(entries: &[OrderBookEntry]) -> P2POrderBookResponse {
+pub(super) fn build_p2p_orderbook(entries: &[OrderBookEntry]) -> P2POrderBookResponse {
     use std::collections::BTreeMap;
     let mut bids: BTreeMap<Decimal, Decimal> = BTreeMap::new();
     let mut asks: BTreeMap<Decimal, Decimal> = BTreeMap::new();

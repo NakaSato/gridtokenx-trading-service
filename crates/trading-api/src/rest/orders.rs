@@ -1,11 +1,26 @@
 //! Order lifecycle — submit, book, list, cancel, quote.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
+/// Submit a spot order (limit or market) into the CDA or interval market.
+#[utoipa::path(
+    post,
+    path = "/api/v1/orders",
+    tag = "orders",
+    request_body = SubmitOrderRequest,
+    responses(
+        (status = 200, description = "Order accepted (status `open`)", body = SubmitOrderResponse),
+        (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination", body = String),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database or epoch resolution error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn submit_order(
     role: ServiceRole,
     user: UserContext,
@@ -514,7 +529,7 @@ pub async fn list_public_active_order_meters(
 /// Shared query behind both the authed and public active-order-meters endpoints:
 /// every meter with at least one resting order, grouped, with `meter_id`
 /// translated to the map's `meter_serial` id space.
-async fn fetch_active_order_meters(
+pub(super) async fn fetch_active_order_meters(
     state: &AppState,
 ) -> Result<Vec<ActiveOrderMeter>, (axum::http::StatusCode, String)> {
     // `bootstrap_active_orders` is named for the matcher's warm-up path, but it is
@@ -864,20 +879,3 @@ pub struct MarketStatsResponse {
     /// Number of completed settlements in the last 24h.
     pub trade_count_24h: i64,
 }
-
-/// Real 24h market statistics, derived from completed settlements — no mock or
-/// static values. Price/volume come from the market-price aggregate (VWAP);
-/// `active_users` is the distinct buyer∪seller count. Grid-stability and
-/// renewable-ratio were removed: trading has no real source for them (they
-/// belong to telemetry), and a fabricated constant is worse than their absence.
-#[utoipa::path(
-    get,
-    path = "/api/v1/stats",
-    tag = "markets",
-    responses(
-        (status = 200, description = "Real 24h market stats from settled trades", body = MarketStatsResponse),
-        (status = 403, description = "Caller role not allowed", body = String),
-        (status = 500, description = "Database error", body = String),
-    ),
-    security(("gateway_role" = [])),
-)]

@@ -1,17 +1,17 @@
 //! Trade history and CSV export.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
-fn dec_opt_str(d: Option<Decimal>) -> String {
+pub(super) fn dec_opt_str(d: Option<Decimal>) -> String {
     d.unwrap_or(Decimal::ZERO).to_string()
 }
 
 /// Map a settlement to a trade row from the perspective of `user`.
-fn build_trade_record(s: &Settlement, user: Uuid) -> TradeRecordResponse {
+pub(super) fn build_trade_record(s: &Settlement, user: Uuid) -> TradeRecordResponse {
     let is_buyer = s.buyer_id == user;
     let (role, counterparty_id) = if is_buyer {
         ("buyer".to_string(), s.seller_id)
@@ -46,7 +46,7 @@ fn build_trade_record(s: &Settlement, user: Uuid) -> TradeRecordResponse {
     }
 }
 
-fn build_trades_response(
+pub(super) fn build_trades_response(
     settlements: &[Settlement],
     total: i64,
     user: Uuid,
@@ -61,7 +61,7 @@ fn build_trades_response(
 
 /// RFC-4180 field escaping: quote if the value holds a comma, quote, CR or LF;
 /// double any embedded quotes.
-fn csv_field(v: &str) -> String {
+pub(super) fn csv_field(v: &str) -> String {
     if v.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", v.replace('"', "\"\""))
     } else {
@@ -70,7 +70,7 @@ fn csv_field(v: &str) -> String {
 }
 
 /// Serialize trade rows to a CSV document (header + one row each). DB-free.
-fn trades_to_csv(records: &[TradeRecordResponse]) -> String {
+pub(super) fn trades_to_csv(records: &[TradeRecordResponse]) -> String {
     let mut out = String::from(
         "id,executed_at,role,counterparty_id,quantity,price,total_value,fee_amount,wheeling_charge,loss_cost,effective_energy,status,transaction_hash,buyer_zone_id,seller_zone_id\n",
     );

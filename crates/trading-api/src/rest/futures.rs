@@ -1,11 +1,23 @@
 //! Futures products, orders, positions and candles.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
+/// List futures products.
+#[utoipa::path(
+    get,
+    path = "/api/v1/futures/products",
+    tag = "futures",
+    responses(
+        (status = 200, description = "All futures products", body = Vec<trading_core::models::FuturesProduct>),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Database error", body = String),
+    ),
+    security(("gateway_role" = [])),
+)]
 pub async fn get_futures_products(
     role: ServiceRole,
     State(state): State<AppState>,
@@ -207,18 +219,3 @@ pub async fn get_futures_order_book(
 // =============================================================================
 // User Data Handlers (Modernized)
 // =============================================================================
-
-/// GRID token balance for a wallet address (via Chain Bridge).
-#[utoipa::path(
-    get,
-    path = "/api/v1/wallets/{address}/balance",
-    tag = "wallets",
-    params(("address" = String, Path, description = "Solana wallet address")),
-    responses(
-        (status = 200, description = "Token balance (decimal string + raw), mint and decimals", body = serde_json::Value),
-        (status = 401, description = "Missing or invalid user id header", body = String),
-        (status = 403, description = "Caller role not allowed", body = String),
-        (status = 500, description = "Blockchain error", body = String),
-    ),
-    security(("gateway_role" = [], "user_id" = [])),
-)]

@@ -1,11 +1,25 @@
 //! Per-user views — wallet balance, analytics, transactions, carbon.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
+/// GRID token balance for a wallet address (via Chain Bridge).
+#[utoipa::path(
+    get,
+    path = "/api/v1/wallets/{address}/balance",
+    tag = "wallets",
+    params(("address" = String, Path, description = "Solana wallet address")),
+    responses(
+        (status = 200, description = "Token balance (decimal string + raw), mint and decimals", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid user id header", body = String),
+        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 500, description = "Blockchain error", body = String),
+    ),
+    security(("gateway_role" = [], "user_id" = [])),
+)]
 pub async fn get_wallet_balance(
     role: ServiceRole,
     _user: UserContext,
@@ -297,7 +311,7 @@ pub async fn transfer_carbon_credits(
 // Markets — Config, P2P Prices, Matching Status (Phase 1, read-only)
 // =============================================================================
 
-fn dec_f64(d: Decimal) -> f64 {
+pub(super) fn dec_f64(d: Decimal) -> f64 {
     d.to_f64().unwrap_or(0.0)
 }
 
@@ -337,15 +351,3 @@ pub struct MatchingStatusResponse {
     pub can_match: bool,
     pub match_reason: String,
 }
-
-/// Static market pricing parameters. NOTE: real JSON floats, not decimal strings.
-#[utoipa::path(
-    get,
-    path = "/api/v1/markets/config",
-    tag = "markets",
-    responses(
-        (status = 200, description = "Market pricing config", body = MarketConfigResponse),
-        (status = 403, description = "Caller role not allowed", body = String),
-    ),
-    security(("gateway_role" = [])),
-)]

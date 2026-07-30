@@ -223,39 +223,24 @@ pub struct GridMetrics {
 use crate::auth::UserContext;
 use gridtokenx_blockchain_auth::ServiceRole;
 
-/// Submit a spot order (limit or market) into the CDA or interval market.
-#[utoipa::path(
-    post,
-    path = "/api/v1/orders",
-    tag = "orders",
-    request_body = SubmitOrderRequest,
-    responses(
-        (status = 200, description = "Order accepted (status `open`)", body = SubmitOrderResponse),
-        (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination", body = String),
-        (status = 401, description = "Missing or invalid user id header", body = String),
-        (status = 403, description = "Caller role not allowed", body = String),
-        (status = 500, description = "Database or epoch resolution error", body = String),
-    ),
-    security(("gateway_role" = [], "user_id" = [])),
-)]
 
 // ---------------------------------------------------------------------------
-// Handlers live in per-domain submodules (split out of this file). They are
-// re-exported so every existing `crate::rest::<name>` path — router wiring and
-// openapi.rs — keeps resolving exactly as before.
+// Handlers live in per-domain submodules (split out of this file). Re-exported
+// so every existing `crate::rest::<name>` path — router wiring and openapi.rs —
+// keeps resolving unchanged.
 // ---------------------------------------------------------------------------
 mod orders;
+mod market;
 mod futures;
 mod portfolio;
-mod market;
 mod trades;
 mod alerts;
 mod recurring;
 
 pub use orders::*;
+pub use market::*;
 pub use futures::*;
 pub use portfolio::*;
-pub use market::*;
 pub use trades::*;
 pub use alerts::*;
 pub use recurring::*;

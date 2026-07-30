@@ -1,8 +1,8 @@
 //! Recurring (scheduled) orders.
 //!
 //! Split out of the former 3.3k-line `rest.rs` for readability. Pure code move:
-//! every handler is re-exported from `rest/mod.rs`, so `crate::rest::<name>`
-//! paths (router wiring, openapi.rs) are unchanged.
+//! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
+//! path (router wiring, openapi.rs) resolves exactly as before.
 
 use super::*;
 
@@ -30,7 +30,7 @@ pub fn build_recurring_response(o: &RecurringOrder) -> RecurringOrderWire {
     }
 }
 
-fn parse_side(s: &str) -> Result<OrderSide, (axum::http::StatusCode, String)> {
+pub(super) fn parse_side(s: &str) -> Result<OrderSide, (axum::http::StatusCode, String)> {
     match s.trim().to_lowercase().as_str() {
         "buy" => Ok(OrderSide::Buy),
         "sell" => Ok(OrderSide::Sell),
@@ -41,7 +41,7 @@ fn parse_side(s: &str) -> Result<OrderSide, (axum::http::StatusCode, String)> {
     }
 }
 
-fn parse_interval(s: &str) -> Result<IntervalType, (axum::http::StatusCode, String)> {
+pub(super) fn parse_interval(s: &str) -> Result<IntervalType, (axum::http::StatusCode, String)> {
     match s.trim().to_lowercase().as_str() {
         "hourly" => Ok(IntervalType::Hourly),
         "daily" => Ok(IntervalType::Daily),
@@ -54,7 +54,7 @@ fn parse_interval(s: &str) -> Result<IntervalType, (axum::http::StatusCode, Stri
     }
 }
 
-fn parse_opt_decimal(
+pub(super) fn parse_opt_decimal(
     field: &str,
     value: Option<&str>,
 ) -> Result<Option<Decimal>, (axum::http::StatusCode, String)> {
@@ -271,7 +271,7 @@ pub async fn delete_recurring_order(
 }
 
 /// Shared body for pause/resume: flip status scoped to the owner; 404 if absent.
-async fn set_recurring_status_handler(
+pub(super) async fn set_recurring_status_handler(
     state: &AppState,
     id: Uuid,
     user_id: Uuid,
