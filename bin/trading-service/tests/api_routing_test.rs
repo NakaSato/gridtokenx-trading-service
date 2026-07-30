@@ -185,22 +185,14 @@ async fn test_api_routing_e2e() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     // 9. Database Setup for Successful Operations
+    //
+    // No `users` row is seeded: after the DB-per-service split this service owns
+    // `gridtokenx_trading`, which has no `users` table at all (identities live in
+    // `gridtokenx_iam`) and no FK from `trading_orders.user_id` to one — the only
+    // FK on the table is `epoch_id -> market_epochs(id)`. The old INSERT here
+    // targeted the pre-split shared `gridtokenx` DB and failed with
+    // `relation "users" does not exist`, so any caller-supplied uuid works.
     let user_id = Uuid::new_v4();
-    let email = format!("api-test-user-{}@gridtokenx.com", user_id);
-    let username = format!("api_test_user_{}", user_id);
-    let wallet = format!("Wallet_{}", user_id.to_string()[..32].to_string());
-
-    sqlx::query(
-        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)"
-    )
-    .bind(user_id)
-    .bind(&email)
-    .bind(&username)
-    .bind("mock_hash")
-    .bind(&wallet)
-    .execute(&pool)
-    .await
-    .expect("Failed to insert test user");
 
     let epoch_id = Uuid::new_v4();
     // Unique-id-derived, not wall-clock — avoids parallel-test collisions on
@@ -305,6 +297,5 @@ async fn test_api_routing_e2e() {
     );
 
     // 13. Teardown Database
-    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }

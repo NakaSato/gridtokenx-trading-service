@@ -41,23 +41,13 @@ async fn try_pool() -> Option<PgPool> {
 /// Seed the FK chain a settlement requires (user → epoch → buy/sell orders) and
 /// return their ids. Caller deletes the user + epoch at the end (cascades).
 async fn seed_fk_chain(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
+    // No `users` rows are seeded or cleaned up here: migration 20260728000000
+    // (the DB-per-service split) dropped the cross-domain FK to IAM `users`, and
+    // `gridtokenx_trading` has no such table at all — identities live in
+    // `gridtokenx_iam`. Verified: the only FK on `trading_orders`/`settlements` is
+    // to `market_epochs(id)`. The leftover INSERT/DELETE failed with
+    // `relation "users" does not exist`.
     let user_id = Uuid::new_v4();
-    let email = format!("cas-test-{user_id}@gridtokenx.com");
-    let username = format!("cas_test_{user_id}");
-    let wallet = format!("Wallet_{}", &user_id.to_string()[..32]);
-
-    sqlx::query(
-        "INSERT INTO users (id, email, username, password_hash, wallet_address) \
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(user_id)
-    .bind(&email)
-    .bind(&username)
-    .bind("mock_hash")
-    .bind(&wallet)
-    .execute(pool)
-    .await
-    .expect("insert user");
 
     let epoch_id = Uuid::new_v4();
     sqlx::query(
@@ -173,7 +163,6 @@ async fn cleanup(pool: &PgPool, user_id: Uuid, epoch_id: Uuid) {
     // `users` (migration 20260728000000), so deleting the owner no longer
     // cascades them away.
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(pool).await.ok();
-    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(pool).await.ok();
 }
 

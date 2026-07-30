@@ -18,23 +18,13 @@ async fn test_postgres_order_repository_e2e() {
 
     let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
 
-    // 2. Insert test user to satisfy user foreign key constraint
+    // No `users` rows are seeded or cleaned up here: migration 20260728000000
+    // (the DB-per-service split) dropped the cross-domain FK to IAM `users`, and
+    // `gridtokenx_trading` has no such table at all — identities live in
+    // `gridtokenx_iam`. Verified: the only FK on `trading_orders`/`settlements` is
+    // to `market_epochs(id)`. The leftover INSERT/DELETE failed with
+    // `relation "users" does not exist`.
     let user_id = Uuid::new_v4();
-    let email = format!("test-user-{}@gridtokenx.com", user_id);
-    let username = format!("test_user_{}", user_id);
-    let wallet = format!("Wallet_{}", user_id.to_string()[..32].to_string());
-
-    sqlx::query(
-        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)"
-    )
-    .bind(user_id)
-    .bind(&email)
-    .bind(&username)
-    .bind("mock_hash")
-    .bind(&wallet)
-    .execute(&pool)
-    .await
-    .expect("Failed to insert test user");
 
     // 3. Insert test epoch to satisfy epoch foreign key constraint
     let epoch_id = Uuid::new_v4();
@@ -182,7 +172,6 @@ async fn test_postgres_order_repository_e2e() {
     // order book that the live matcher then tries, and fails, to settle.
     sqlx::query("DELETE FROM settlements WHERE id = $1").bind(settlement_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
 
@@ -251,14 +240,7 @@ async fn test_market_segment_round_trips() {
         .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
-    let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1,$2,$3,$4,$5)")
-        .bind(user_id)
-        .bind(format!("seg-{user_id}@gridtokenx.com"))
-        .bind(format!("seg_user_{user_id}"))
-        .bind("mock_hash")
-        .bind(format!("Wallet_{}", &user_id.to_string()[..32]))
-        .execute(&pool).await.expect("insert user");
+    let user_id = Uuid::new_v4(); // no `users` seed needed — see the note above
 
     let epoch_id = Uuid::new_v4();
     // Derive epoch_number from the epoch UUID (epoch_number is UNIQUE) — a
@@ -318,6 +300,6 @@ async fn test_market_segment_round_trips() {
     // Explicit order cleanup — no cross-domain FK cascade to rely on any more
     // (see the teardown note in the repository round-trip test above).
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM users WHERE id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
+

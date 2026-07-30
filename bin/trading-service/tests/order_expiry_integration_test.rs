@@ -25,19 +25,12 @@ async fn test_expire_stale_orders_e2e() {
         .await
         .expect("Failed to connect to postgres");
 
-    // Foreign keys: an order needs a user and a market epoch.
+    // Foreign keys: an order needs a market epoch. No `users` row is seeded —
+    // migration 20260728000000 (the DB-per-service split) dropped the
+    // cross-domain FK to IAM `users`, and `gridtokenx_trading` has no such table
+    // (identities live in `gridtokenx_iam`), so the old INSERT failed with
+    // `relation "users" does not exist`.
     let user_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(user_id)
-    .bind(format!("expiry-{user_id}@gridtokenx.com"))
-    .bind(format!("expiry_user_{user_id}"))
-    .bind("mock_hash")
-    .bind(format!("Wallet_{}", &user_id.to_string()[..32]))
-    .execute(&pool)
-    .await
-    .expect("insert user");
 
     let epoch_id = Uuid::new_v4();
     sqlx::query(
@@ -175,11 +168,6 @@ async fn test_expire_stale_orders_e2e() {
         .execute(&pool)
         .await
         .ok();
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1")
         .bind(epoch_id)
         .execute(&pool)
@@ -204,23 +192,12 @@ async fn test_fill_does_not_resurrect_terminal_order() {
         .await
         .expect("Failed to connect to postgres");
 
-    // `trading_orders.user_id` still carries `trading_orders_user_id_fkey ->
-    // users(id)` in `gridtokenx_trading` (the split cloned the legacy schema
-    // rather than dropping cross-service FKs), so the user row must exist —
-    // same as `test_expire_stale_orders_e2e` above.
+    // No `users` row is seeded —
+    // migration 20260728000000 (the DB-per-service split) dropped the
+    // cross-domain FK to IAM `users`, and `gridtokenx_trading` has no such table
+    // (identities live in `gridtokenx_iam`), so the old INSERT failed with
+    // `relation "users" does not exist`.
     let user_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(user_id)
-    .bind(format!("resurrect-{user_id}@gridtokenx.com"))
-    // `username` is varchar(50); prefix + 36-char UUID must fit.
-    .bind(format!("resurrect_{user_id}"))
-    .bind("mock_hash")
-    .bind(format!("Wallet_{}", &user_id.to_string()[..32]))
-    .execute(&pool)
-    .await
-    .expect("insert user");
 
     let epoch_id = Uuid::new_v4();
     sqlx::query(
@@ -323,11 +300,6 @@ async fn test_fill_does_not_resurrect_terminal_order() {
 
     // Explicit order cleanup — no cross-domain FK cascade any more (see above).
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&pool)
         .await

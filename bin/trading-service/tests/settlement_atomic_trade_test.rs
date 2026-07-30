@@ -47,6 +47,14 @@ async fn insert_epoch(pool: &PgPool) -> Uuid {
     epoch_id
 }
 
+// User ids here are throwaway uuids with nothing to seed. The `insert_user` /
+// `seed_settlement_users` helpers this file used to carry seeded IAM `users`
+// rows for FKs that no longer exist: migration 20260728000000 (the
+// DB-per-service split) dropped the cross-domain FKs, and `gridtokenx_trading`
+// has no `users` table at all — identities live in `gridtokenx_iam`. Verified:
+// the only FK on `trading_orders` and on `settlements` is to `market_epochs(id)`.
+// The leftover INSERTs failed with `relation "users" does not exist`.
+
 async fn insert_order(
     pool: &PgPool,
     epoch_id: Uuid,

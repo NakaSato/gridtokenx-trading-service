@@ -28,7 +28,7 @@ async fn test_epoch_clearing_lifecycle_e2e() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     let pool = PgPool::connect(&db_url)
         .await
@@ -132,7 +132,7 @@ async fn test_list_recent_cleared_epochs_e2e() {
     let db_url = std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     let pool = PgPool::connect(&db_url).await.expect("connect");
 

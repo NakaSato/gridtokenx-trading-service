@@ -80,18 +80,14 @@ async fn test_interval_order_clears_end_to_end() {
         });
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
-    // Two users (buyer + seller) for the FK.
+    // Buyer + seller ids. No `users` rows are seeded: the FK they were inserted
+    // for does not exist here. After the DB-per-service split this service owns
+    // `gridtokenx_trading`, which has no `users` table (identities live in
+    // `gridtokenx_iam`), and `trading_orders`'s only FK is
+    // `epoch_id -> market_epochs(id)`. The old INSERT targeted the pre-split
+    // shared `gridtokenx` DB and failed with `relation "users" does not exist`.
     let buyer = Uuid::new_v4();
     let seller = Uuid::new_v4();
-    for (id, tag) in [(buyer, "buyer"), (seller, "seller")] {
-        sqlx::query("INSERT INTO users (id, email, username, password_hash, wallet_address) VALUES ($1,$2,$3,$4,$5)")
-            .bind(id)
-            .bind(format!("{tag}-{id}@gridtokenx.com"))
-            .bind(format!("{tag}_{id}"))
-            .bind("mock_hash")
-            .bind(format!("Wallet_{}", &id.to_string()[..32]))
-            .execute(&pool).await.expect("insert user");
-    }
 
     // An epoch whose window has already elapsed → due for clearing this tick.
     let epoch = Uuid::new_v4();
@@ -176,7 +172,6 @@ async fn test_interval_order_clears_end_to_end() {
     // orphaned rows in the shared dev order book.
     for id in [buyer, seller] {
         sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(id).execute(&pool).await.ok();
-        sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(&pool).await.ok();
     }
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch).execute(&pool).await.ok();
 }

@@ -46,7 +46,7 @@ async fn connect() -> PgPool {
     let db_url = std::env::var("TRADING_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx".to_string()
+            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
         });
     PgPool::connect(&db_url)
         .await
