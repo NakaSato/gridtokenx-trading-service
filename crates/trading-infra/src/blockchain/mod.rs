@@ -6,6 +6,28 @@ pub use gridtokenx_blockchain_core::WalletService;
 pub use rpc::service::BlockchainService;
 pub use settlement::BlockchainSettlementProvider;
 
+/// Which SPL token program owns `CURRENCY_TOKEN_MINT`.
+///
+/// The currency leg used to be hardcoded to classic SPL, which was correct only for
+/// the dev-minted stand-in currency token. The treasury's real THBC mint (the one the
+/// Market's `settlement_thbc_mint` points at) is **Token-2022**, and an ATA derived
+/// under the wrong program is a DIFFERENT address — so every escrow fund and transfer
+/// would target an account that does not exist.
+///
+/// This is config, not detection, on purpose: the mint and its program are set together
+/// by the operator, and the blockchain-core invariant is that the two token programs are
+/// distinct and must not be "normalized" away. Default stays classic SPL so existing
+/// deployments are unaffected.
+///
+/// `CURRENCY_TOKEN_PROGRAM` accepts `token2022` / `spl` (or an explicit program pubkey).
+///
+/// Delegates to blockchain-core so the ATA derivations here and the `token_program`
+/// account the settlement instruction is built with can never disagree — a mismatch
+/// between the two is exactly the Anchor ConstraintOwner (2004) failure this replaced.
+pub fn currency_token_program() -> Pubkey {
+    gridtokenx_blockchain_core::rpc::instructions::currency_token_program()
+}
+
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;

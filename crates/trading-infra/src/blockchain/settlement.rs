@@ -99,7 +99,7 @@ impl BlockchainSettlementProvider {
         seller_pubkey: &Pubkey,
     ) -> trading_core::error::Result<TradeAtas> {
         let energy_tp = spl_token_2022::id();
-        let currency_tp = spl_token::id();
+        let currency_tp = crate::blockchain::currency_token_program();
         Ok(TradeAtas {
             buyer_currency_ata: self.blockchain.calculate_ata_address_with_program(
                 buyer_pubkey,
@@ -163,7 +163,7 @@ impl BlockchainSettlementProvider {
         } = self.derive_trade_atas(&energy_mint, &currency_mint, buyer_pubkey, seller_pubkey)?;
 
         // Collectors (currency mint → classic SPL Token program).
-        let currency_tp = spl_token::id();
+        let currency_tp = crate::blockchain::currency_token_program();
         let fee_collector =
             BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
         let wheeling_collector = BlockchainService::parse_pubkey(
@@ -518,7 +518,7 @@ impl BlockchainSettlementProvider {
 
         // Collectors hold currency (GRX) → classic SPL Token program. Party ATAs
         // are derived per-trade below via `derive_trade_atas`.
-        let currency_tp = spl_token::id();
+        let currency_tp = crate::blockchain::currency_token_program();
 
         let fee_collector_ata = self
             .blockchain

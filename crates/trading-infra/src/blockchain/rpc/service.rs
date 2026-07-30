@@ -499,7 +499,11 @@ impl BlockchainService {
             let amount = (energy_amount_atomic as u128)
                 .saturating_mul(price_atomic as u128)
                 / 1_000_000_000u128;
-            (currency_mint, spl_token::id(), amount as u64)
+            (
+                currency_mint,
+                crate::blockchain::currency_token_program(),
+                amount as u64,
+            )
         } else {
             let energy_mint = self.core.instruction_builder.get_mint_pda()?;
             (energy_mint, spl_token_2022::id(), energy_amount_atomic)
