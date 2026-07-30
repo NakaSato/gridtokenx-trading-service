@@ -145,7 +145,22 @@ impl TradingService for TradingGrpcService {
             price_per_kwh: price,
             filled_amount: Decimal::ZERO,
             status: OrderStatus::Pending,
-            expires_at: Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
+            // The configured default, shared with the REST edge rather than a
+            // second hard-coded 24h. `SubmitOrderRequest` (trading.proto) carries
+            // no expiry field, so there is no client value to resolve here — the
+            // `None`s are the client forms this transport cannot express. Adding
+            // one is a proto change, i.e. a cross-service contract change.
+            expires_at: Some(
+                trading_core::order_policy::resolve_expires_at(
+                    gridtokenx_telemetry::time::now(),
+                    None,
+                    None,
+                    None,
+                    self.state.config.order_expiry.default_ttl_secs,
+                    self.state.config.order_expiry.max_ttl_secs,
+                )
+                .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.message()))?,
+            ),
             created_at: Some(gridtokenx_telemetry::time::now()),
             filled_at: None,
             epoch_id: Some(epoch_id),
@@ -233,6 +248,14 @@ impl TradingService for TradingGrpcService {
                     tracing::warn!("order {}: on-chain placement failed (left for retry): {}", order.id, e)
                 }
             }
+        }
+
+        // Realtime matching: wake the matcher now the order is durable, mirroring
+        // the REST submit path in rest.rs. Fire-and-forget (never awaits, never
+        // fails), and only for Realtime-segment orders — Interval orders are
+        // cleared by the uniform-price path, which the CDA matcher skips.
+        if order.market_segment == trading_core::types::MarketSegment::Realtime {
+            self.state.matcher.request_cycle();
         }
 
         let mut res = TradingResponse::default();

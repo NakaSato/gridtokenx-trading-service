@@ -142,8 +142,10 @@ through an `Arc<dyn BlockchainGateway>` whose concrete impl is `BlockchainServic
 A trade travels two independent worker loops. The matcher persists intent; the settlement drain
 mints it on-chain. Every stage is crash-safe and replay-safe.
 
-**1. Match → persist** — same matcher cycle, every 1s. `MatcherWorker` →
-`MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:28`). The CDA
+**1. Match → persist** — same matcher cycle, run on order arrival (event-driven;
+`MATCHER_DEBOUNCE_MS` coalescing, 1s fallback tick — `crates/trading-logic/src/workers/matcher.rs:1`).
+`MatcherWorker` →
+`MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:62`). The CDA
 engine `MatchingEngine::match_cycle` returns matches (pure, no I/O); `clearing_support::persist_matches`
 (`crates/trading-logic/src/clearing_support.rs:71`) writes **atomically per match**: order fill
 deltas → `PartiallyFilled`/`Filled` (`:214`), a match row (`insert_match_with_event`, status
@@ -224,12 +226,12 @@ place**: `ServiceBuilder::build` (`bin/trading-service/src/builder.rs`), which r
 
 | Worker | Cadence | Role |
 | :--- | :--- | :--- |
-| `MatcherWorker` | every 1s | drains/matches realtime orders via `MatcherService` → `trading-engine` (CDA) |
+| `MatcherWorker` | on order arrival, coalesced over `MATCHER_DEBOUNCE_MS` (5ms default); 1s fallback tick | drains/matches realtime orders via `MatcherService` → `trading-engine` (CDA). Submit paths call `MatcherService::request_cycle`; `MATCHER_REALTIME=false` reverts to tick-only polling |
 | `ClearingWorker` | every 60s | uniform-price clears + closes interval epochs whose 15-min window elapsed |
-| `ReaperWorker` | every 10s | flips orders past `expires_at` to `Expired`; sole expiry mechanism (the active-order queries no longer filter on `expires_at`), supervised with respawn + a 2×-cadence DB-call timeout |
+| `ReaperWorker` | every 10s | flips orders past `expires_at` to `Expired` (set per order at submit — `expires_at`/`expires_in_secs`, else `ORDER_DEFAULT_TTL_SECS`, default 15 min = one interval-clearing window; see `trading_core::order_policy::resolve_expires_at`); sole expiry mechanism (the active-order queries no longer filter on `expires_at`), supervised with respawn + a 2×-cadence DB-call timeout |
 | `SettlementWorker` | every 10s, batch 10 | settles through Chain Bridge |
 | `SupplySyncWorker` | polling interval | syncs tokenized supply from blockchain; graceful-degrades |
-| `RecurringEvaluatorWorker` | periodic | materializes due recurring orders |
+| `RecurringEvaluatorWorker` | periodic | materializes due recurring orders, then wakes the matcher once per batch (`MatchTrigger`) |
 | `TriggerEvaluatorWorker` | periodic | evaluates conditional/trigger orders |
 | `ReadModelFeedWorker` | Kafka-streamed | present only when `TRADING_READMODEL_FEED=true`; mirrors IAM/meter events into local read-models (see below) |
 

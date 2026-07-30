@@ -53,10 +53,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let main_token = shutdown_token.clone();
 
     // 6. Start background workers
-    let matcher_worker = trading_logic::MatcherWorker::new(
-        services.matcher.clone(),
-        tokio::time::Duration::from_secs(1),
-    );
+    // Realtime matching: the submit paths wake this worker the moment an order is
+    // accepted, so a crossing pair matches within MATCHER_DEBOUNCE_MS instead of
+    // waiting out the tick. MATCHER_INTERVAL_MS stays as the fallback tick (see
+    // MatcherConfig); MATCHER_REALTIME=false reverts to pure polling.
+    let matcher_interval = tokio::time::Duration::from_millis(config.matcher.interval_ms);
+    let matcher_worker = if config.matcher.realtime_enabled {
+        trading_logic::MatcherWorker::realtime(
+            services.matcher.clone(),
+            matcher_interval,
+            tokio::time::Duration::from_millis(config.matcher.debounce_ms),
+        )
+    } else {
+        trading_logic::MatcherWorker::new(services.matcher.clone(), matcher_interval)
+    };
     tokio::spawn(async move {
         matcher_worker.run().await;
     });

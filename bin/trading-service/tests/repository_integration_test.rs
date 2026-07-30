@@ -303,3 +303,118 @@ async fn test_market_segment_round_trips() {
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
 
+/// `expires_at` must survive the insert, and a lapsed order must not appear in the
+/// live-book views.
+///
+/// Two regressions in one test. First, both insert paths omitted `expires_at` from
+/// their column list, so it was silently dropped: every order landed with NULL and
+/// the ReaperWorker (which matches `expires_at < now()`) had nothing to reap —
+/// order expiry was inert for anything created through the API. Second, once
+/// expiry actually persists, the live-book readers start seeing lapsed-but-not-yet-
+/// reaped rows; `OrderBookEntry` carries no expiry, so a caller cannot filter them
+/// and the book would advertise depth the matcher will never fill.
+#[tokio::test]
+async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
+    let db_url = std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
+        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let pool = PgPool::connect(&db_url).await.expect("connect");
+
+    let user_id = Uuid::new_v4();
+    let epoch_id = Uuid::new_v4();
+    let epoch_num = (epoch_id.as_u128() & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+    sqlx::query("INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) VALUES ($1,$2,$3,$4,'active'::epoch_status)")
+        .bind(epoch_id)
+        .bind(epoch_num)
+        .bind(Utc::now())
+        .bind(Utc::now() + chrono::Duration::minutes(15))
+        .execute(&pool).await.expect("insert epoch");
+
+    // A zone of its own, so the assertions see only this test's orders even with
+    // sibling tests writing to the same dev database.
+    let zone = 900 + (epoch_num % 90) as i32;
+    let repo = PostgresOrderRepository::new(pool.clone());
+
+    let mut order = TradingOrder {
+        id: Uuid::new_v4(),
+        user_id,
+        order_type: OrderType::Limit,
+        side: OrderSide::Sell,
+        energy_amount: dec!(5.0),
+        price_per_kwh: dec!(3.0),
+        filled_amount: dec!(0.0),
+        status: OrderStatus::Active,
+        expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        created_at: Some(Utc::now()),
+        filled_at: None,
+        epoch_id: Some(epoch_id),
+        zone_id: Some(zone),
+        meter_id: None,
+        refund_tx_signature: None,
+        order_pda: None,
+        order_index: None,
+        session_token: None,
+        blockchain_status: None,
+        blockchain_tx_hash: None,
+        blockchain_error: None,
+        retry_count: 0,
+        time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
+    };
+
+    // 1. A future expiry round-trips instead of being dropped to NULL.
+    let live_id = order.id;
+    let live_expiry = order.expires_at;
+    repo.insert_order(&order).await.expect("insert live order");
+    let fetched = repo.get_order(live_id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.expires_at.map(|t| t.timestamp()),
+        live_expiry.map(|t| t.timestamp()),
+        "expires_at must survive the insert (it used to be dropped silently)"
+    );
+
+    // 2. The same via the transactional path the API actually uses.
+    order.id = Uuid::new_v4();
+    let event = trading_core::events::Event::OrderUpdate {
+        id: order.id,
+        user_id: Some(user_id),
+        filled_amount: dec!(0),
+        status: OrderStatus::Active.to_string(),
+        zone_id: Some(zone),
+    };
+    repo.insert_order_with_event(&order, &event).await.expect("insert with event");
+    assert!(
+        repo.get_order(order.id).await.unwrap().unwrap().expires_at.is_some(),
+        "insert_order_with_event must persist expires_at too"
+    );
+
+    // 3. An order already past its expiry but NOT yet reaped (status still Active)
+    //    must be absent from both live-book views.
+    let expired_id = Uuid::new_v4();
+    order.id = expired_id;
+    order.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
+    repo.insert_order(&order).await.expect("insert expired order");
+    assert_eq!(
+        repo.get_order(expired_id).await.unwrap().unwrap().status,
+        OrderStatus::Active,
+        "precondition: the reaper has not touched it, so only the expiry filter can hide it"
+    );
+
+    let zone_book = repo.get_active_orders_by_zone(zone).await.expect("zone book");
+    let ids: Vec<Uuid> = zone_book.iter().map(|e| e.order_id).collect();
+    assert!(ids.contains(&live_id), "the unexpired order must still be quoted");
+    assert!(
+        !ids.contains(&expired_id),
+        "an expired order must not appear as depth in the zone book"
+    );
+
+    let all = repo.get_all_active_orders().await.expect("all active");
+    assert!(
+        !all.iter().any(|e| e.order_id == expired_id),
+        "an expired order must not reach get_all_active_orders (it sets the \
+         best bid/ask that price alerts fire on)"
+    );
+
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+}

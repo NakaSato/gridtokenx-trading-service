@@ -83,7 +83,11 @@ All collaborators are `Arc<dyn Trait>` traits defined in `trading-core/src/trait
 
 `main` builds the system, then `tokio::spawn`s long-running workers alongside the API server:
 
-- **MatcherWorker** — drains/matches orders every 1s (calls `MatcherService` → `trading-engine`).
+- **MatcherWorker** — drains/matches orders (calls `MatcherService` → `trading-engine`). Event-driven:
+  every insert path (REST, gRPC, `RecurringEvaluator` via the `MatchTrigger` trait) calls
+  `MatcherService::request_cycle`, waking it within `MATCHER_DEBOUNCE_MS` (default 5ms) of an order
+  landing; `MATCHER_INTERVAL_MS` (default 1s) is only a safety-net tick.
+  `MATCHER_REALTIME=false` reverts to tick-only polling.
 - **SettlementWorker** — settles in batches of 10 every 10s via Chain Bridge.
 - **SupplySyncWorker** — polls blockchain to sync tokenized supply; graceful-degrades on repeated failure.
 - **OracleConsumer** — consumes oracle readings off the EventBus, feeds settlement.
@@ -126,10 +130,17 @@ Loaded by `trading_core::config::Config::from_env()` (`crates/trading-core/src/c
 
 **Notable optional**: `CHAIN_BRIDGE_URL`, `IAM_GRPC_URL`/`IAM_SERVICE_URL`, `INTERNAL_API_KEY`,
 `ENCRYPTION_SECRET`, `KAFKA_EVENTS_ENABLED` + `KAFKA_BOOTSTRAP_SERVERS` + `KAFKA_TOPIC_PREFIX`,
-`TRADING_ROLE` (`api`|`matcher`), `PLATFORM_USER_ID`, `ORACLE_FEED_IN_TARIFF`,
+`TRADING_ROLE` (`api`|`matcher`), `MATCHER_REALTIME` + `MATCHER_DEBOUNCE_MS` + `MATCHER_INTERVAL_MS`
+(matching cadence — see `MatcherConfig`), `ORDER_DEFAULT_TTL_SECS` + `ORDER_MAX_TTL_SECS`
+(order lifetime — see `OrderExpiryConfig`), `PLATFORM_USER_ID`, `ORACLE_FEED_IN_TARIFF`,
 `AGGREGATOR_BRIDGE_PUBLIC_KEY`, and the `SOLANA_*_PROGRAM_ID` set (sensible localnet defaults baked in).
 
-`test-api.sh` is a manual REST smoke test against `:8093`.
+`test-api.sh` is a manual REST smoke test against `:8093` (`BASE_URL=... ./test-api.sh`; needs a
+running service + reachable Postgres). Guarded routes need **three** headers, not one:
+`x-gridtokenx-role`, `x-gridtokenx-user-id`, **and** `x-gridtokenx-gateway-secret` — the
+`api-gateway` role fails *closed* to `Unknown` (⇒ 403) without the secret, whose dev default is
+only honoured when the service runs with `CHAIN_BRIDGE_INSECURE=true` and `GATEWAY_SECRET` unset
+(`ServiceRole::from_headers`, `../gridtokenx-blockchain-core/crates/blockchain-auth/src/lib.rs`).
 
 ---
 

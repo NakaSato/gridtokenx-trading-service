@@ -21,7 +21,7 @@ Two distinct classes of grid participant need two distinct market mechanisms:
 
 ## 2. Current state (verified)
 
-- **CDA exists and runs.** Pure engine `MatchingEngine::match_cycle` (`crates/trading-engine/src/engine.rs:35`); driven by `MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:31`); spawned as `MatcherWorker` every 1s (`bin/trading-service/src/main.rs`).
+- **CDA exists and runs.** Pure engine `MatchingEngine::match_cycle` (`crates/trading-engine/src/engine.rs:35`); driven by `MatcherService::run_matching_cycle` (`crates/trading-logic/src/matcher_service.rs:62`); spawned as `MatcherWorker` (`bin/trading-service/src/main.rs`), which cycles on order arrival with a 1s fallback tick.
 - ~~**Uniform-price does NOT exist.**~~ **Now implemented** — pure engine `UniformAuction::clear_cycle` (`crates/trading-engine/src/uniform_auction.rs`), orchestrated by `ClearingService` (`crates/trading-logic/src/clearing.rs`), driven by `ClearingWorker` (`crates/trading-logic/src/workers/clearing.rs`). The on-chain `trigger_market_clearing` instruction is still NOT used — settlement reuses the per-trade swap path (see §5.4 decision).
 - **Schema already anticipates clearing.** `MarketEpoch` (`crates/trading-core/src/models.rs:328`) carries `clearing_price`, `total_volume`, `matched_orders`, `status: EpochStatus` — fields only a uniform-price clearing fills. `OrderMatch` (`models.rs:341`) is keyed by `epoch_id`.
 - **No routing dimension.** `OrderType` (`crates/trading-core/src/types.rs:27`) is only `Limit | Market`. `TradingOrder` (`models.rs:22`) has `epoch_id`, `zone_id`, `meter_id` but **no field that selects CDA vs uniform-price**. `get_active_buy_orders` / `get_active_sell_orders` (`crates/trading-core/src/traits.rs:90,93`) return ALL active orders — CDA would currently consume prosumer orders too.
@@ -62,7 +62,7 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 > `run_matching_cycle_does_not_cross_segments`.
 
 - `OrderRepository` (`traits.rs:90,93`): add `get_active_buy_orders_by_segment` / `_sell_` (preferred — non-breaking) or filter existing to `Realtime`.
-- `MatcherService::run_matching_cycle` (`matcher_service.rs:31`) consumes `Realtime` only.
+- `MatcherService::run_matching_cycle` (`matcher_service.rs:62`) consumes `Realtime` only.
 - **Test:** mixed-segment fixture → CDA cycle ignores `Interval` orders.
 
 ### Phase 2 — Pure uniform-price engine — ✅ DONE (`8e61579`)
@@ -99,9 +99,9 @@ Two engines, **one** downstream settlement path — no duplication of blockchain
 
 - Fill the placeholder with `ClearingService::run_epoch_clearing(epoch_id)`:
   1. Load `MarketEpoch`; guard `status == Open`.
-  2. Fetch `Interval` orders for the epoch (and zone); convert to `FastOrder` (mirror `matcher_service.rs:40-103`).
+  2. Fetch `Interval` orders for the epoch (and zone); convert to `FastOrder` (mirror `matcher_service.rs:68-131`).
   3. Call `uniform_auction::clear_epoch`.
-  4. Persist fills + settlements via the **existing** settlement path — settlement row first, then match row, atomic via outbox (`matcher_service.rs:165-190`).
+  4. Persist fills + settlements via the **existing** settlement path — settlement row first, then match row, atomic via outbox (`clearing_support.rs:92-99`).
   5. Write back `MarketEpoch.clearing_price`, `total_volume`, `matched_orders`; set `status = Cleared`.
 - Settlement reuses `BlockchainSettlement::execute_atomic_settlement` (token swap) — **no new on-chain path**.
 - **Test:** in-memory repos, one epoch; assert uniform price + epoch row updated.

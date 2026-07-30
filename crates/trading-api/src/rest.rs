@@ -47,6 +47,19 @@ pub struct SubmitOrderRequest {
     /// (15-min uniform-price clearing).
     pub market_segment: Option<String>,
 
+    // ── Order lifetime (both optional; send at most one) ─────────────────────
+    //
+    // Omitted → `ORDER_DEFAULT_TTL_SECS` (15m, one interval-clearing window) from
+    // now. A resting order past its expiry is skipped
+    // by the matcher immediately and flipped to `Expired` by the ReaperWorker.
+    // Inert for ioc/fok, which never rest.
+    /// Absolute expiry (RFC 3339, e.g. `2026-07-30T12:00:00Z`). Use when the
+    /// deadline is an instant that matters — an epoch boundary, a delivery window.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Expiry as a lifetime in seconds from now. Preferred by default: unlike
+    /// `expires_at` it cannot be thrown off by client clock skew.
+    pub expires_in_secs: Option<i64>,
+
     // ── Per-user escrow settlement (config `per_user_escrow_settlement`) ──────
     //
     // Required only when that flag is on. The three fields below are inputs to
@@ -61,7 +74,7 @@ pub struct SubmitOrderRequest {
     /// Distinct from the HMAC `signature` on `CreateOrderRequest`.
     pub wallet_signature: Option<String>,
     /// The exact `expires_at` (unix seconds) that was signed. Sent explicitly
-    /// because the server's own 24h default would not match the signed bytes.
+    /// because the server's own default TTL would not match the signed bytes.
     pub signed_expires_at: Option<i64>,
 }
 
@@ -433,6 +446,18 @@ pub async fn submit_order(
         None
     };
 
+    // Resolve the order's lifetime before building it: an inadmissible expiry is
+    // a 400, not an order that rests unmatchable until the reaper collects it.
+    let expires_at = trading_core::order_policy::resolve_expires_at(
+        gridtokenx_telemetry::time::now(),
+        req.expires_at,
+        req.expires_in_secs,
+        signed_order.as_ref().map(|(_, _, exp)| *exp),
+        state.config.order_expiry.default_ttl_secs,
+        state.config.order_expiry.max_ttl_secs,
+    )
+    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.message().to_string()))?;
+
     let mut order = TradingOrder {
         id: signed_order.as_ref().map(|(id, _, _)| *id).unwrap_or_else(Uuid::new_v4),
         user_id: user.user_id,
@@ -442,12 +467,11 @@ pub async fn submit_order(
         price_per_kwh: price,
         filled_amount: Decimal::ZERO,
         status: OrderStatus::Pending,
-        // The signed expiry must be what we store, or the settlement-time payload
-        // would not match the bytes the user signed.
-        expires_at: match signed_order.as_ref() {
-            Some((_, _, exp)) => chrono::DateTime::from_timestamp(*exp, 0),
-            None => Some(gridtokenx_telemetry::time::now() + chrono::Duration::hours(24)),
-        },
+        // Client expiry, the signed expiry, or the configured default — resolved
+        // by `order_policy::resolve_expires_at` above so REST and gRPC cannot
+        // drift. A signed expiry still wins: the settlement-time payload has to
+        // match the bytes the user signed.
+        expires_at: Some(expires_at),
         created_at: Some(gridtokenx_telemetry::time::now()),
         filled_at: None,
         epoch_id: None,
@@ -569,6 +593,18 @@ pub async fn submit_order(
                     format!("Failed to persist order signature: {e}"),
                 )
             })?;
+    }
+
+    // Realtime matching: wake the matcher now that the order is fully durable —
+    // deliberately AFTER `set_wallet_signature`, because a cycle that matched the
+    // order before its signature landed would persist a settlement that can never
+    // execute on the per-user-escrow path. Fire-and-forget: `request_cycle` neither
+    // awaits nor fails, so submit latency is unchanged, and a wake-up arriving
+    // mid-cycle is held as a permit and served immediately after. Interval-segment
+    // orders are cleared by the uniform-price path, not the CDA matcher, so waking
+    // it for them would only buy a wasted book scan.
+    if order.market_segment == trading_core::types::MarketSegment::Realtime {
+        state.matcher.request_cycle();
     }
 
     Ok(Json(SubmitOrderResponse {

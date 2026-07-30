@@ -109,6 +109,132 @@ pub fn resolve_order_price(
     }
 }
 
+/// Why an order's expiry could not be resolved. Mapped by each edge to HTTP 400 /
+/// Connect `InvalidArgument`, like [`OrderPriceError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderExpiryError {
+    /// Both the absolute and relative forms were sent — they can disagree, so
+    /// there is no safe way to pick one.
+    BothForms,
+    /// An expiry was sent alongside `signed_expires_at`. The stored expiry must be
+    /// the signed one byte-for-byte (settlement re-derives the signed payload from
+    /// it), so a second, possibly-different value is refused rather than silently
+    /// dropped.
+    SignedConflict,
+    /// The expiry is not in the future. Such an order can never match — the engine
+    /// skips expired orders — so it would rest as dead weight until reaped.
+    NotInFuture,
+    /// The expiry is further out than `max_ttl_secs` allows. Unbounded lifetimes
+    /// let the active book grow without limit, and the matcher re-reads that whole
+    /// book every cycle.
+    BeyondMaxTtl,
+}
+
+impl OrderExpiryError {
+    /// Client-facing message, shared verbatim by the REST and gRPC edges.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::BothForms => "send either expires_at or expires_in_secs, not both",
+            Self::SignedConflict => {
+                "expires_at/expires_in_secs must not be sent with signed_expires_at — the signed expiry is authoritative"
+            }
+            Self::NotInFuture => "expiry must be in the future",
+            Self::BeyondMaxTtl => "expiry exceeds the maximum order lifetime (ORDER_MAX_TTL_SECS)",
+        }
+    }
+}
+
+/// Resolve the `expires_at` to store for a submitted order.
+///
+/// Precedence: `signed_expires_at` (authoritative under per-user-escrow
+/// settlement) → an explicit client expiry → `default_ttl_secs` from now.
+///
+/// The two client forms are equivalent but serve different callers: `expires_at`
+/// pins an absolute instant (aligning to an epoch boundary, say), while
+/// `expires_in_secs` is immune to client clock skew. Sending both is an error.
+///
+/// `max_ttl_secs` is applied to caller-supplied values only, never to
+/// `default_ttl_secs` — a config where the default exceeds the max would
+/// otherwise reject *every* order. (`Config::from_env` rejects that combination
+/// up front; this is the second line of defence.)
+///
+/// IOC/FOK orders never rest, so their expiry is inert — accepted, not rejected,
+/// so a client can send one uniform payload shape for every time-in-force.
+///
+/// # Errors
+/// Returns [`OrderExpiryError`] when the requested expiry is contradictory, in
+/// the past, or beyond the maximum lifetime.
+pub fn resolve_expires_at(
+    now: chrono::DateTime<chrono::Utc>,
+    requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    requested_ttl_secs: Option<i64>,
+    signed_expires_at: Option<i64>,
+    default_ttl_secs: u64,
+    max_ttl_secs: u64,
+) -> Result<chrono::DateTime<chrono::Utc>, OrderExpiryError> {
+    let client_supplied = requested_at.is_some() || requested_ttl_secs.is_some();
+
+    if let Some(signed) = signed_expires_at {
+        if client_supplied {
+            return Err(OrderExpiryError::SignedConflict);
+        }
+        // A signed expiry is still checked: signing a past (or absurdly distant)
+        // instant is a client bug that would otherwise rest an unmatchable order.
+        let signed_at =
+            chrono::DateTime::from_timestamp(signed, 0).ok_or(OrderExpiryError::NotInFuture)?;
+        return check_window(now, signed_at, max_ttl_secs);
+    }
+
+    if requested_at.is_some() && requested_ttl_secs.is_some() {
+        return Err(OrderExpiryError::BothForms);
+    }
+
+    if let Some(at) = requested_at {
+        return check_window(now, at, max_ttl_secs);
+    }
+
+    if let Some(ttl) = requested_ttl_secs {
+        // Reject non-positive TTLs here rather than letting `now + ttl` land in
+        // the past — the message ("must be in the future") is the same, and this
+        // avoids a duration overflow on an extreme negative value.
+        if ttl <= 0 {
+            return Err(OrderExpiryError::NotInFuture);
+        }
+        // `Duration::seconds` PANICS outside its representable range, so an
+        // absurd `expires_in_secs` would take the handler down rather than 400.
+        // `try_seconds` returns None there instead.
+        let at = chrono::Duration::try_seconds(ttl)
+            .and_then(|d| now.checked_add_signed(d))
+            .ok_or(OrderExpiryError::BeyondMaxTtl)?;
+        return check_window(now, at, max_ttl_secs);
+    }
+
+    // Nothing supplied: the configured default, unchecked against max_ttl_secs
+    // for the reason given above.
+    chrono::Duration::try_seconds(i64::try_from(default_ttl_secs).unwrap_or(i64::MAX))
+        .and_then(|d| now.checked_add_signed(d))
+        .ok_or(OrderExpiryError::BeyondMaxTtl)
+}
+
+/// Shared window check for every caller-supplied expiry.
+fn check_window(
+    now: chrono::DateTime<chrono::Utc>,
+    at: chrono::DateTime<chrono::Utc>,
+    max_ttl_secs: u64,
+) -> Result<chrono::DateTime<chrono::Utc>, OrderExpiryError> {
+    if at <= now {
+        return Err(OrderExpiryError::NotInFuture);
+    }
+    let horizon = chrono::Duration::try_seconds(i64::try_from(max_ttl_secs).unwrap_or(i64::MAX))
+        .and_then(|d| now.checked_add_signed(d))
+        .ok_or(OrderExpiryError::BeyondMaxTtl)?;
+    if at > horizon {
+        return Err(OrderExpiryError::BeyondMaxTtl);
+    }
+    Ok(at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +329,129 @@ mod tests {
             let p = resolve_order_price(OrderType::Limit, side, TimeInForce::Gtc, Some(bad));
             assert_eq!(p, Err(OrderPriceError::LimitNonPositive));
         }
+    }
+
+    // ── resolve_expires_at ───────────────────────────────────────────────────
+
+    /// Fixed "now" so every expiry case is deterministic.
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_800_000_000, 0).expect("valid timestamp")
+    }
+
+    /// Mirrors `OrderExpiryConfig::default()` so the fixture doesn't imply a TTL
+    /// the service no longer stamps. The assertions derive from the const, so the
+    /// resolver is still proven to use the value passed in, not a hardcoded one.
+    const DEFAULT_TTL: u64 = 15 * 60;
+    const MAX_TTL: u64 = 7 * 24 * 60 * 60;
+
+    fn resolve(
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        ttl: Option<i64>,
+        signed: Option<i64>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, OrderExpiryError> {
+        resolve_expires_at(now(), at, ttl, signed, DEFAULT_TTL, MAX_TTL)
+    }
+
+    /// Omitting an expiry falls back to the configured default TTL — the same
+    /// value at both edges, whatever `ORDER_DEFAULT_TTL_SECS` is set to.
+    #[test]
+    fn absent_expiry_falls_back_to_the_configured_default() {
+        let got = resolve(None, None, None).expect("default is admissible");
+        assert_eq!(got, now() + chrono::Duration::seconds(DEFAULT_TTL as i64));
+    }
+
+    /// Both client forms name the same instant when they agree.
+    #[test]
+    fn absolute_and_relative_forms_agree() {
+        let ttl = 3_600;
+        let absolute = now() + chrono::Duration::seconds(ttl);
+        assert_eq!(resolve(Some(absolute), None, None), Ok(absolute));
+        assert_eq!(resolve(None, Some(ttl), None), Ok(absolute));
+    }
+
+    /// Sending both is refused rather than silently picking one — they can
+    /// disagree, and guessing would store an expiry the client did not ask for.
+    #[test]
+    fn sending_both_forms_is_rejected() {
+        let at = now() + chrono::Duration::seconds(60);
+        assert_eq!(resolve(Some(at), Some(60), None), Err(OrderExpiryError::BothForms));
+    }
+
+    /// A past or now expiry can never match (the engine skips expired orders), so
+    /// it is a 400 instead of an order that rests as dead weight until reaped.
+    #[test]
+    fn past_or_present_expiry_is_rejected() {
+        assert_eq!(resolve(Some(now()), None, None), Err(OrderExpiryError::NotInFuture));
+        assert_eq!(
+            resolve(Some(now() - chrono::Duration::seconds(1)), None, None),
+            Err(OrderExpiryError::NotInFuture)
+        );
+        for ttl in [0, -1, -86_400, i64::MIN] {
+            assert_eq!(
+                resolve(None, Some(ttl), None),
+                Err(OrderExpiryError::NotInFuture),
+                "ttl {ttl} must be rejected without overflowing"
+            );
+        }
+    }
+
+    /// The horizon is inclusive: exactly max_ttl is fine, one second past is not.
+    /// Unbounded lifetimes would grow the active book the matcher re-reads every
+    /// cycle.
+    #[test]
+    fn client_expiry_is_capped_at_max_ttl() {
+        let at_limit = now() + chrono::Duration::seconds(MAX_TTL as i64);
+        assert_eq!(resolve(Some(at_limit), None, None), Ok(at_limit));
+        assert_eq!(
+            resolve(Some(at_limit + chrono::Duration::seconds(1)), None, None),
+            Err(OrderExpiryError::BeyondMaxTtl)
+        );
+        assert_eq!(resolve(None, Some(MAX_TTL as i64), None), Ok(at_limit));
+        assert_eq!(
+            resolve(None, Some(MAX_TTL as i64 + 1), None),
+            Err(OrderExpiryError::BeyondMaxTtl)
+        );
+        // An extreme TTL must report the cap, not panic on duration overflow.
+        assert_eq!(resolve(None, Some(i64::MAX), None), Err(OrderExpiryError::BeyondMaxTtl));
+    }
+
+    /// A signed expiry is authoritative: settlement re-derives the signed payload
+    /// from the stored value, so it must be kept byte-for-byte.
+    #[test]
+    fn signed_expiry_wins_and_is_still_validated() {
+        let signed = now() + chrono::Duration::seconds(600);
+        assert_eq!(resolve(None, None, Some(signed.timestamp())), Ok(signed));
+
+        // Signing a past instant is a client bug, not a licence to rest an
+        // unmatchable order.
+        assert_eq!(
+            resolve(None, None, Some((now() - chrono::Duration::seconds(1)).timestamp())),
+            Err(OrderExpiryError::NotInFuture)
+        );
+        assert_eq!(
+            resolve(None, None, Some((now() + chrono::Duration::days(30)).timestamp())),
+            Err(OrderExpiryError::BeyondMaxTtl)
+        );
+    }
+
+    /// A client expiry alongside a signed one is refused: storing either would be
+    /// wrong (the signed bytes must match) or surprising (silently dropped).
+    #[test]
+    fn client_expiry_with_a_signed_expiry_is_rejected() {
+        let signed = (now() + chrono::Duration::seconds(600)).timestamp();
+        let at = now() + chrono::Duration::seconds(60);
+        assert_eq!(resolve(Some(at), None, Some(signed)), Err(OrderExpiryError::SignedConflict));
+        assert_eq!(resolve(None, Some(60), Some(signed)), Err(OrderExpiryError::SignedConflict));
+    }
+
+    /// The default is exempt from the max check on purpose: a config with
+    /// default > max would otherwise 400 every order that omits an expiry.
+    /// `Config::from_env` rejects that combination, so this is defence in depth.
+    #[test]
+    fn default_is_not_capped_by_max_ttl() {
+        let long_default = 10 * 24 * 60 * 60;
+        let got = resolve_expires_at(now(), None, None, None, long_default, MAX_TTL)
+            .expect("default must never be rejected");
+        assert_eq!(got, now() + chrono::Duration::seconds(long_default as i64));
     }
 }

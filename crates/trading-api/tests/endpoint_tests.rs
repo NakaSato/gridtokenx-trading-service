@@ -1601,6 +1601,86 @@ async fn test_grpc_batch_execute_settlements_empty() {
 /// hardcoded Gtc/Realtime, leaving IOC and the interval (uniform-auction)
 /// segment unreachable from the API.
 #[tokio::test]
+async fn test_submit_order_expiry_forms_and_rejections() {
+    // `SubsecRound` for trunc_subsecs; `Utc` is not in this file's prelude.
+    use chrono::{SubsecRound, Utc};
+
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let user_id = Uuid::new_v4();
+
+    let submit = |extra: serde_json::Value| {
+        let mut body = json!({
+            "side": "sell", "order_type": "limit",
+            "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+        });
+        let (obj, add) = (body.as_object_mut().unwrap(), extra.as_object().unwrap().clone());
+        obj.extend(add);
+        request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body.to_string()))
+    };
+
+    // Omitted → the configured default: 15 min, one interval-clearing window.
+    let before = Utc::now();
+    assert_eq!(submit(json!({})).await.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        // Bounded loosely on BOTH sides: the handler stamps with the telemetry
+        // (NTP) clock while `before` comes from the local clock, so the measured
+        // span can exceed the nominal TTL by that offset.
+        let ttl = stored - before;
+        assert!(
+            ttl > chrono::Duration::seconds(840) && ttl < chrono::Duration::seconds(960),
+            "default expiry should be ~15m out, got {ttl}"
+        );
+    }
+
+    // Relative form: stored as now + ttl.
+    let before = Utc::now();
+    assert_eq!(submit(json!({"expires_in_secs": 900})).await.status(), StatusCode::OK);
+    {
+        let orders = mock.orders.lock().unwrap();
+        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        let ttl = stored - before;
+        assert!(
+            ttl > chrono::Duration::seconds(870) && ttl < chrono::Duration::seconds(960),
+            "expires_in_secs=900 should stamp ~15m out, got {ttl}"
+        );
+    }
+
+    // Absolute form: stored verbatim (to the second — Postgres/serde round-trip).
+    let target = (Utc::now() + chrono::Duration::hours(2)).trunc_subsecs(0);
+    assert_eq!(
+        submit(json!({"expires_at": target.to_rfc3339()})).await.status(),
+        StatusCode::OK
+    );
+    {
+        let orders = mock.orders.lock().unwrap();
+        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        assert_eq!(stored, target, "absolute expiry must be stored as sent");
+    }
+
+    // Rejections are 400s at admission, not orders resting unmatchably. Each
+    // must also leave nothing behind in the repo.
+    let count_before = mock.orders.lock().unwrap().len();
+    for (case, body) in [
+        ("past absolute", json!({"expires_at": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339()})),
+        ("zero ttl", json!({"expires_in_secs": 0})),
+        ("negative ttl", json!({"expires_in_secs": -60})),
+        ("beyond max ttl", json!({"expires_in_secs": 8 * 24 * 60 * 60})),
+        ("both forms", json!({"expires_at": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(), "expires_in_secs": 3600})),
+    ] {
+        let res = submit(body).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{case} must be rejected");
+    }
+    assert_eq!(
+        mock.orders.lock().unwrap().len(),
+        count_before,
+        "a rejected expiry must not persist an order"
+    );
+}
+
+#[tokio::test]
 async fn test_submit_order_parses_tif_and_segment() {
     let (state, mock) = setup_test_state_with_mock(test_oracle_key());
     let app = build_router(state);

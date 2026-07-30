@@ -13,6 +13,12 @@ pub struct MatcherService {
     /// `trading_core::charges`.
     charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     topology: Arc<dyn TopologySnapshot>,
+    /// Wake-up channel for realtime matching: order-accepting paths call
+    /// [`MatcherService::request_cycle`], `MatcherWorker` awaits
+    /// [`MatcherService::cycle_requested`]. Lives here rather than in the worker
+    /// so producers only need the `Arc<MatcherService>` that `AppState` already
+    /// carries — no extra wiring through the builder.
+    wake: tokio::sync::Notify,
 }
 
 impl MatcherService {
@@ -27,7 +33,29 @@ impl MatcherService {
             settlement_repo,
             charge_rates,
             topology,
+            wake: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Ask the matcher to run a cycle now. Called by every path that makes the
+    /// book potentially crossable (order submission), so a match happens on
+    /// arrival instead of on the next poll tick.
+    ///
+    /// Non-blocking and lossless-but-coalescing: `notify_one` stores a single
+    /// permit when the worker is mid-cycle, so a burst of arrivals during a
+    /// cycle produces exactly one follow-up cycle — never a missed wake-up, and
+    /// never one cycle queued per order. Safe to call from a request handler:
+    /// it cannot fail and does not await, so matching latency stays off the
+    /// submit path's critical section.
+    pub fn request_cycle(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Resolves once a cycle has been requested (immediately if a request
+    /// arrived while the worker was busy). Only `MatcherWorker` should await
+    /// this — a second consumer would steal wake-ups.
+    pub async fn cycle_requested(&self) {
+        self.wake.notified().await;
     }
 
     /// Run a matching cycle for all active orders
@@ -153,6 +181,17 @@ impl MatcherService {
     }
 }
 
+/// Lets order-placing services (e.g. `RecurringEvaluator`) wake the matcher
+/// through an `Arc<dyn MatchTrigger>` rather than depending on this concrete
+/// type. The call is fully qualified because the inherent `request_cycle`
+/// shadows the trait method — `self.request_cycle()` would read ambiguously
+/// here even though it resolves to the inherent one.
+impl trading_core::traits::MatchTrigger for MatcherService {
+    fn request_cycle(&self) {
+        MatcherService::request_cycle(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // unwrap is idiomatic in tests
@@ -162,6 +201,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::sync::Mutex;
+    use std::time::Duration;
     use uuid::Uuid;
     use trading_core::events::Event;
     use trading_core::models::{
@@ -627,5 +667,184 @@ mod tests {
 
         assert_eq!(matched, 0, "segments must not cross-match");
         assert!(orders.fills.lock().unwrap().is_empty());
+    }
+
+    /// Build a service over a book holding one crossing pair. The mock repo
+    /// serves the same pair on every read, so *each* cycle records a settlement —
+    /// which is what lets these tests count cycles.
+    fn crossing_book() -> (Arc<MockSettlementRepo>, Arc<MatcherService>) {
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10)],
+            sells: vec![order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20)],
+            fills: Mutex::new(Vec::new()),
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let service = Arc::new(MatcherService::new(
+            orders,
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        ));
+        (settlements, service)
+    }
+
+    /// Wait (in virtual time) for the mock to record a settlement, i.e. for one
+    /// matching cycle to complete. Polls on a `sleep` rather than `yield_now`:
+    /// under `start_paused` the clock only auto-advances while every task is
+    /// idle, and a bare yield-loop is always runnable — it would hang instead of
+    /// letting the worker's own timers fire.
+    async fn cycle_ran_within(repo: &MockSettlementRepo, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        while tokio::time::Instant::now() < deadline {
+            if !repo.settlements.lock().unwrap().is_empty() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        false
+    }
+
+    /// `tokio::time::interval` fires its first tick immediately, so every worker
+    /// runs one cycle at boot (intended — the book may already be crossable).
+    /// Consume that cycle so the following assertions see only wake-up-driven work.
+    async fn drain_boot_cycle(repo: &MockSettlementRepo) {
+        assert!(
+            cycle_ran_within(repo, Duration::from_secs(1)).await,
+            "expected the boot cycle from interval's immediate first tick"
+        );
+        repo.settlements.lock().unwrap().clear();
+    }
+
+    /// Realtime matching: an arriving order must trigger a cycle by itself.
+    ///
+    /// The fallback interval is an hour and the boot cycle is drained first, so
+    /// the only thing that can produce a settlement here is `request_cycle`. The
+    /// test fails (times out on virtual time) if the worker ever regresses to
+    /// tick-only matching — which no assertion on `run_matching_cycle` alone
+    /// could catch, since that method is cadence-agnostic.
+    #[tokio::test(start_paused = true)]
+    async fn realtime_worker_matches_on_order_arrival_not_on_the_tick() {
+        let (settlements, service) = crossing_book();
+        let worker = crate::workers::matcher::MatcherWorker::realtime(
+            service.clone(),
+            Duration::from_hours(1),
+            Duration::from_millis(5),
+        );
+        let handle = tokio::spawn(worker.run());
+        drain_boot_cycle(&settlements).await;
+
+        service.request_cycle();
+        let ran = cycle_ran_within(&settlements, Duration::from_secs(1)).await;
+
+        handle.abort();
+        assert!(
+            ran,
+            "no cycle within 1s of the wake-up while the fallback tick is 1h away \
+             — realtime matching regressed to tick-only"
+        );
+    }
+
+    /// The debounce is a real delay, not decoration: it is what collapses an
+    /// arrival burst into one cycle and floors the cycle rate. Guards against an
+    /// edit that drops the sleep and turns every single arrival into its own
+    /// full-book scan.
+    #[tokio::test(start_paused = true)]
+    async fn realtime_worker_waits_out_the_debounce_before_matching() {
+        const DEBOUNCE: Duration = Duration::from_millis(50);
+
+        let (settlements, service) = crossing_book();
+        let worker = crate::workers::matcher::MatcherWorker::realtime(
+            service.clone(),
+            Duration::from_hours(1),
+            DEBOUNCE,
+        );
+        let handle = tokio::spawn(worker.run());
+        drain_boot_cycle(&settlements).await;
+
+        let started = tokio::time::Instant::now();
+        service.request_cycle();
+        let ran = cycle_ran_within(&settlements, Duration::from_secs(1)).await;
+        let waited = started.elapsed();
+
+        handle.abort();
+        assert!(ran, "debounced cycle never ran");
+        assert!(
+            waited >= DEBOUNCE,
+            "matched after {waited:?} — the {DEBOUNCE:?} debounce was not honoured"
+        );
+    }
+
+    /// A wake-up must not let an EXPIRED order match, even though realtime
+    /// matching can fire a cycle long before the 10s `ReaperWorker` has flipped
+    /// that order to `Expired`.
+    ///
+    /// This is the one place the new wake-up path could have made expiry worse:
+    /// matching now happens ~5ms after an arrival rather than up to a tick later,
+    /// so a cycle far more often runs against orders the reaper has not yet
+    /// visited. Safety does not depend on the reaper — the engine skips expired
+    /// orders itself — and this pins that the service path passes `expires_at`
+    /// through for it to do so.
+    #[tokio::test(start_paused = true)]
+    async fn wake_up_does_not_match_an_expired_order() {
+        let mut sell = order(OrderSide::Sell, dec!(4.0), dec!(10.0), 20);
+        // Expired an hour ago, but still Active: exactly the window between an
+        // order lapsing and the reaper's next tick.
+        sell.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![order(OrderSide::Buy, dec!(5.0), dec!(10.0), 10)],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let service = Arc::new(MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        ));
+
+        let handle = tokio::spawn(
+            crate::workers::matcher::MatcherWorker::realtime(
+                service.clone(),
+                Duration::from_hours(1),
+                Duration::from_millis(5),
+            )
+            .run(),
+        );
+        service.request_cycle();
+        let matched = cycle_ran_within(&settlements, Duration::from_secs(1)).await;
+
+        handle.abort();
+        assert!(!matched, "an expired sell must never be matched");
+        assert!(
+            orders.fills.lock().unwrap().is_empty(),
+            "no fill may be written against an expired order"
+        );
+        assert_eq!(
+            *orders.expire_calls.lock().unwrap(),
+            0,
+            "the matcher must not reap — expiry is the ReaperWorker's job, and \
+             matching correctness must not depend on it having run"
+        );
+    }
+
+    /// Polling-only mode (`MATCHER_REALTIME=false`) must ignore wake-ups
+    /// entirely, so the flag is a genuine escape hatch to the old behaviour.
+    #[tokio::test(start_paused = true)]
+    async fn polling_worker_ignores_wake_ups() {
+        let (settlements, service) = crossing_book();
+        let worker =
+            crate::workers::matcher::MatcherWorker::new(service.clone(), Duration::from_hours(1));
+        let handle = tokio::spawn(worker.run());
+        drain_boot_cycle(&settlements).await;
+
+        service.request_cycle();
+        // Far longer than any debounce, far short of the 1h tick.
+        let ran = cycle_ran_within(&settlements, Duration::from_mins(1)).await;
+
+        handle.abort();
+        assert!(!ran, "polling-only worker must not match on a wake-up");
     }
 }

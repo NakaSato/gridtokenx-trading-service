@@ -751,3 +751,15 @@ pub trait VppRepository: Send + Sync {
         flex_down: f64,
     ) -> TraitResult<()>;
 }
+
+/// Wake-up signal for the continuous (CDA) matcher, so a service that places
+/// orders can have them matched on arrival instead of on the next fallback tick.
+///
+/// Deliberately sync and infallible: the only implementation stores a permit on
+/// a `Notify`, which cannot fail or block, so callers on a request path pay
+/// nothing. Implemented by `trading_logic::MatcherService`.
+pub trait MatchTrigger: Send + Sync {
+    /// Request a matching cycle. Coalescing, not queueing: several calls before
+    /// the matcher wakes collapse into one cycle.
+    fn request_cycle(&self);
+}

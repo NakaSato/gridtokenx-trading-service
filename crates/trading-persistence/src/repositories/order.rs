@@ -101,8 +101,8 @@ impl OrderRepository for PostgresOrderRepository {
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
-                epoch_id, market_segment
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                epoch_id, market_segment, expires_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(order.id)
@@ -122,6 +122,11 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(&order.blockchain_status)
         .bind(order.epoch_id)
         .bind(order.market_segment)
+        // `expires_at` was missing from this column list, so it was silently
+        // dropped on every insert: orders landed with NULL and the ReaperWorker
+        // (which matches on `expires_at < now()`) had nothing to reap, making
+        // order expiry inert for everything created through the API.
+        .bind(order.expires_at)
         .execute(&self.pool)
         .await?;
 
@@ -144,8 +149,8 @@ impl OrderRepository for PostgresOrderRepository {
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
-                epoch_id, market_segment
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                epoch_id, market_segment, expires_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             "#,
         )
         .bind(order.id)
@@ -165,6 +170,11 @@ impl OrderRepository for PostgresOrderRepository {
         .bind(&order.blockchain_status)
         .bind(order.epoch_id)
         .bind(order.market_segment)
+        // `expires_at` was missing from this column list, so it was silently
+        // dropped on every insert: orders landed with NULL and the ReaperWorker
+        // (which matches on `expires_at < now()`) had nothing to reap, making
+        // order expiry inert for everything created through the API.
+        .bind(order.expires_at)
         .execute(&mut *tx)
         .await?;
 
@@ -227,8 +237,21 @@ impl OrderRepository for PostgresOrderRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(orders
+        // Drop rows already past `expires_at`. Expiry is reaped asynchronously
+        // (ReaperWorker, 10s), so a lapsed order keeps its active status until the
+        // next tick — and `OrderBookEntry` carries no expiry, so no caller can
+        // filter it downstream. Every consumer of this method builds a *live book*
+        // view (REST/gRPC order book, price-alert best bid/ask), and the matcher
+        // would never fill such an order, so reporting it is phantom depth.
+        // Filtered in Rust against the telemetry (NTP) clock rather than a SQL
+        // `now()` so this compares against the same clock `expires_at` was
+        // written with — see `get_active_buy_orders`.
+        let now = gridtokenx_telemetry::time::now();
+        let orders = orders
             .into_iter()
+            .filter(|o| o.expires_at.is_none_or(|e| e > now));
+
+        Ok(orders
             .map(|o| OrderBookEntry {
                 order_id: o.id,
                 user_id: o.user_id,
@@ -256,8 +279,21 @@ impl OrderRepository for PostgresOrderRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(orders
+        // Drop rows already past `expires_at`. Expiry is reaped asynchronously
+        // (ReaperWorker, 10s), so a lapsed order keeps its active status until the
+        // next tick — and `OrderBookEntry` carries no expiry, so no caller can
+        // filter it downstream. Every consumer of this method builds a *live book*
+        // view (REST/gRPC order book, price-alert best bid/ask), and the matcher
+        // would never fill such an order, so reporting it is phantom depth.
+        // Filtered in Rust against the telemetry (NTP) clock rather than a SQL
+        // `now()` so this compares against the same clock `expires_at` was
+        // written with — see `get_active_buy_orders`.
+        let now = gridtokenx_telemetry::time::now();
+        let orders = orders
             .into_iter()
+            .filter(|o| o.expires_at.is_none_or(|e| e > now));
+
+        Ok(orders
             .map(|o| OrderBookEntry {
                 order_id: o.id,
                 user_id: o.user_id,

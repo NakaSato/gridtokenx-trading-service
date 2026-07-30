@@ -3,8 +3,10 @@
 //! Periodically materialises *due* recurring orders into real `trading_orders`
 //! rows, taking the same path as the REST create handler
 //! (`insert_order_with_event` + `OrderCreated` outbox event), then advances each
-//! rule's `next_execution_at` and execution counter. The matcher worker picks
-//! the placed orders up on its next cycle — this service never matches directly.
+//! rule's `next_execution_at` and execution counter. This service never matches
+//! directly — it wakes the matcher (`MatchTrigger`) once per batch, so a placed
+//! order is matched on arrival like an API-submitted one instead of waiting for
+//! the matcher's fallback tick.
 
 use std::sync::Arc;
 
@@ -15,23 +17,28 @@ use uuid::Uuid;
 use trading_core::events::{Event, OrderCreatedPayload};
 use trading_core::models::{RecurringOrder, TradingOrder};
 use trading_core::recurring::next_execution_at;
-use trading_core::traits::{OrderRepository, RecurringOrderRepository, TraitResult};
+use trading_core::traits::{MatchTrigger, OrderRepository, RecurringOrderRepository, TraitResult};
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 
 /// Async orchestrator that turns due recurring orders into placed orders.
 pub struct RecurringEvaluator {
     recurring_repo: Arc<dyn RecurringOrderRepository>,
     order_repo: Arc<dyn OrderRepository>,
+    /// Woken once per cycle that placed something, so recurring orders reach the
+    /// matcher as fast as API-submitted ones.
+    match_trigger: Arc<dyn MatchTrigger>,
 }
 
 impl RecurringEvaluator {
     pub fn new(
         recurring_repo: Arc<dyn RecurringOrderRepository>,
         order_repo: Arc<dyn OrderRepository>,
+        match_trigger: Arc<dyn MatchTrigger>,
     ) -> Self {
         Self {
             recurring_repo,
             order_repo,
+            match_trigger,
         }
     }
 
@@ -51,6 +58,7 @@ impl RecurringEvaluator {
         let epoch_id = self.order_repo.get_or_create_active_epoch().await?;
 
         let mut placed = 0usize;
+        let mut committed = false;
         for rule in due {
             // A limit order needs a price. Buys cap at `max_price_per_kwh`,
             // sells floor at `min_price_per_kwh`. A rule missing its side's
@@ -73,6 +81,10 @@ impl RecurringEvaluator {
                 warn!(recurring_id = %rule.id, error = %e, "Failed to place recurring order; will retry next cycle");
                 continue;
             }
+            // Tracked separately from `placed`: an order can be committed and yet
+            // not counted, because a failed schedule-advance below `continue`s
+            // past the increment. The matcher must still be woken for it.
+            committed = true;
 
             let next = next_execution_at(now, rule.interval_type, rule.interval_value);
             if let Err(e) = self
@@ -90,6 +102,12 @@ impl RecurringEvaluator {
 
         if placed > 0 {
             info!("Recurring evaluator placed {} order(s)", placed);
+        }
+        // One wake for the whole batch — the matcher reads the entire active book
+        // per cycle, so N placements need one cycle, not N. Fired after the loop,
+        // so it can never precede an order's commit.
+        if committed {
+            self.match_trigger.request_cycle();
         }
         Ok(placed)
     }
@@ -264,6 +282,24 @@ mod tests {
         }
     }
 
+    /// Counts `request_cycle` calls so tests can assert the matcher was woken.
+    #[derive(Default)]
+    struct SpyTrigger {
+        wakes: Mutex<usize>,
+    }
+
+    impl MatchTrigger for SpyTrigger {
+        fn request_cycle(&self) {
+            *self.wakes.lock().unwrap() += 1;
+        }
+    }
+
+    impl SpyTrigger {
+        fn wakes(&self) -> usize {
+            *self.wakes.lock().unwrap()
+        }
+    }
+
     /// A due Buy rule is materialized into a placed order priced at its
     /// `max_price_per_kwh`, and its schedule is advanced (total_executions + 1).
     #[tokio::test]
@@ -274,7 +310,11 @@ mod tests {
         recurring.due.lock().unwrap().push(rule);
         let orders = Arc::new(MockOrderRepo::default());
 
-        let evaluator = RecurringEvaluator::new(recurring.clone(), orders.clone());
+        let evaluator = RecurringEvaluator::new(
+            recurring.clone(),
+            orders.clone(),
+            Arc::new(SpyTrigger::default()),
+        );
         let placed = evaluator.run_cycle().await.unwrap();
 
         assert_eq!(placed, 1);
@@ -296,11 +336,63 @@ mod tests {
         recurring.due.lock().unwrap().push(rule);
         let orders = Arc::new(MockOrderRepo::default());
 
-        let evaluator = RecurringEvaluator::new(recurring.clone(), orders.clone());
+        let evaluator = RecurringEvaluator::new(
+            recurring.clone(),
+            orders.clone(),
+            Arc::new(SpyTrigger::default()),
+        );
         let placed = evaluator.run_cycle().await.unwrap();
 
         assert_eq!(placed, 0);
         assert!(orders.placed.lock().unwrap().is_empty(), "no order placed");
         assert!(recurring.advanced.lock().unwrap().is_empty(), "schedule not advanced");
+    }
+
+    /// A placed recurring order must wake the matcher, so it is matched on
+    /// arrival like an API-submitted order instead of waiting for the fallback
+    /// tick. One wake for the batch, not one per order.
+    #[tokio::test]
+    async fn run_cycle_wakes_the_matcher_once_for_the_batch() {
+        let recurring = Arc::new(MockRecurringRepo::default());
+        {
+            let mut due = recurring.due.lock().unwrap();
+            due.push(due_rule(OrderSide::Buy, Some(dec!(4.25)), None));
+            due.push(due_rule(OrderSide::Sell, None, Some(dec!(3.10))));
+        }
+        let orders = Arc::new(MockOrderRepo::default());
+        let trigger = Arc::new(SpyTrigger::default());
+
+        let evaluator =
+            RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
+        let placed = evaluator.run_cycle().await.unwrap();
+
+        assert_eq!(placed, 2, "both rules placed");
+        assert_eq!(
+            trigger.wakes(),
+            1,
+            "one wake per cycle — the matcher re-reads the whole book, so N \
+             placements do not need N cycles"
+        );
+    }
+
+    /// No placement, no wake: a cycle that placed nothing must not spend a full
+    /// book scan on an unchanged book.
+    #[tokio::test]
+    async fn run_cycle_does_not_wake_the_matcher_when_nothing_placed() {
+        let recurring = Arc::new(MockRecurringRepo::default());
+        // Unpriceable rule — skipped, so nothing is committed.
+        recurring
+            .due
+            .lock()
+            .unwrap()
+            .push(due_rule(OrderSide::Buy, None, None));
+        let orders = Arc::new(MockOrderRepo::default());
+        let trigger = Arc::new(SpyTrigger::default());
+
+        let evaluator =
+            RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
+        assert_eq!(evaluator.run_cycle().await.unwrap(), 0);
+
+        assert_eq!(trigger.wakes(), 0, "no placement must mean no wake");
     }
 }

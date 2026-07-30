@@ -68,7 +68,7 @@ sibling submodules — those must be checked out for the build.
 
 | Worker | Cadence | Role |
 |--------|---------|------|
-| `MatcherWorker` | every 1s | drains/matches realtime orders → `trading-engine` (CDA) |
+| `MatcherWorker` | on order arrival (+1s fallback tick) | drains/matches realtime orders → `trading-engine` (CDA) |
 | `ClearingWorker` | every 60s | uniform-price clears + closes 15-min interval epochs |
 | `ReaperWorker` | every 10s | expires orders past `expires_at` |
 | `SettlementWorker` | every 10s, batch 10 | settles through Chain Bridge |

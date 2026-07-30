@@ -26,6 +26,15 @@ pub struct Config {
     /// P2P energy market pricing parameters (env-configurable).
     #[serde(default)]
     pub market: MarketConfig,
+    /// Continuous-matcher cadence (event-driven wake-up + fallback tick).
+    /// `serde(default)` so a serialized `Config` written before this field
+    /// existed still deserializes — realtime-on defaults apply.
+    #[serde(default)]
+    pub matcher: MatcherConfig,
+    /// Order-lifetime policy (default / maximum `expires_at`). `serde(default)`
+    /// for the same reason as `matcher`.
+    #[serde(default)]
+    pub order_expiry: OrderExpiryConfig,
     pub encryption_secret: String,
     pub iam_service_url: String,
     pub internal_api_key: String,
@@ -162,6 +171,118 @@ impl Default for MarketConfig {
     }
 }
 
+/// Order-lifetime policy for the submit edges (`order_policy::resolve_expires_at`).
+///
+/// - `default_ttl_secs` — the expiry stamped on an order that names none. 15
+///   minutes, matching the interval-clearing window (`market_segment=interval`)
+///   and the aggregation/settlement bin, so a resting order does not outlive the
+///   window it was priced for. Raise `ORDER_DEFAULT_TTL_SECS` for a longer-lived
+///   book; clients wanting more can always send an explicit expiry up to
+///   `max_ttl_secs`.
+/// - `max_ttl_secs` — the furthest out a *client* may set an expiry. Bounded on
+///   purpose: every matching cycle re-reads the whole active book, so orders that
+///   never expire make each cycle progressively more expensive. Does not apply to
+///   `default_ttl_secs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderExpiryConfig {
+    pub default_ttl_secs: u64,
+    pub max_ttl_secs: u64,
+}
+
+impl Default for OrderExpiryConfig {
+    fn default() -> Self {
+        Self {
+            default_ttl_secs: 15 * 60,
+            max_ttl_secs: 7 * 24 * 60 * 60,
+        }
+    }
+}
+
+impl OrderExpiryConfig {
+    pub fn from_env() -> Result<Self> {
+        let d = OrderExpiryConfig::default();
+        let cfg = OrderExpiryConfig {
+            default_ttl_secs: env_u64("ORDER_DEFAULT_TTL_SECS", d.default_ttl_secs)?,
+            max_ttl_secs: env_u64("ORDER_MAX_TTL_SECS", d.max_ttl_secs)?,
+        };
+        // Zero would stamp an already-expired expiry on every order that omits
+        // one — unmatchable the instant it is written.
+        if cfg.default_ttl_secs == 0 {
+            return Err(anyhow::anyhow!("ORDER_DEFAULT_TTL_SECS must be > 0"));
+        }
+        if cfg.max_ttl_secs == 0 {
+            return Err(anyhow::anyhow!("ORDER_MAX_TTL_SECS must be > 0"));
+        }
+        // Caught here rather than per-request: the resolver deliberately exempts
+        // the default from the max check, so this combination would otherwise be
+        // a silent inconsistency (defaults allowed past a limit clients can't reach).
+        if cfg.default_ttl_secs > cfg.max_ttl_secs {
+            return Err(anyhow::anyhow!(
+                "ORDER_DEFAULT_TTL_SECS ({}) must not exceed ORDER_MAX_TTL_SECS ({})",
+                cfg.default_ttl_secs,
+                cfg.max_ttl_secs
+            ));
+        }
+        Ok(cfg)
+    }
+}
+
+/// Matching cadence for the continuous (CDA) matcher.
+///
+/// The matcher is **event-driven**: every accepted realtime order wakes the
+/// `MatcherWorker` immediately (`MatcherService::request_cycle`), so a crossing
+/// pair is matched within ~`debounce_ms` of arrival instead of waiting out a
+/// poll tick. The two knobs bound that:
+///
+/// - `debounce_ms` — how long a wake-up waits before running, so a burst of
+///   arrivals coalesces into one cycle. It doubles as the minimum gap between
+///   consecutive cycles, capping the matcher at `1000 / debounce_ms` cycles per
+///   second: each cycle re-reads the whole active book, so an unthrottled
+///   one-cycle-per-order loop would hammer Postgres under load. 0 = no floor.
+/// - `interval_ms` — the fallback tick, kept because arrivals are not the only
+///   thing that makes the book crossable: an order can be inserted by another
+///   replica. Every in-process insert path (REST, gRPC, `RecurringEvaluator`)
+///   does wake the matcher, so this is a safety net rather than the mechanism.
+///   Order *expiry* needs neither a wake-up nor the tick: reaping only removes
+///   liquidity (which cannot create a cross), and the engine already refuses to
+///   match an expired order whether or not the reaper has caught it yet.
+///
+/// `realtime_enabled = false` reverts to pure `interval_ms` polling (the
+/// pre-event-driven behaviour) without a redeploy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatcherConfig {
+    pub realtime_enabled: bool,
+    pub debounce_ms: u64,
+    pub interval_ms: u64,
+}
+
+impl Default for MatcherConfig {
+    fn default() -> Self {
+        Self {
+            realtime_enabled: true,
+            debounce_ms: 5,
+            interval_ms: 1_000,
+        }
+    }
+}
+
+impl MatcherConfig {
+    pub fn from_env() -> Result<Self> {
+        let d = MatcherConfig::default();
+        Ok(MatcherConfig {
+            realtime_enabled: env_bool("MATCHER_REALTIME", d.realtime_enabled)?,
+            debounce_ms: env_u64("MATCHER_DEBOUNCE_MS", d.debounce_ms)?,
+            // A zero fallback interval would make `tokio::time::interval` tick
+            // in a tight loop with no yield between cycles — reject it rather
+            // than melt a CPU on a typo.
+            interval_ms: match env_u64("MATCHER_INTERVAL_MS", d.interval_ms)? {
+                0 => return Err(anyhow::anyhow!("MATCHER_INTERVAL_MS must be > 0")),
+                v => v,
+            },
+        })
+    }
+}
+
 fn env_dec(key: &str, default: Decimal) -> Result<Decimal> {
     match env::var(key) {
         Ok(v) => v
@@ -177,6 +298,30 @@ fn env_u32(key: &str, default: u32) -> Result<u32> {
             .parse::<u32>()
             .map_err(|e| anyhow::anyhow!("invalid u32 for {key}: {e}")),
         Err(_) => Ok(default),
+    }
+}
+
+fn env_u64(key: &str, default: u64) -> Result<u64> {
+    match env::var(key) {
+        Ok(v) => v
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("invalid u64 for {key}: {e}")),
+        Err(_) => Ok(default),
+    }
+}
+
+/// Boolean env var, aborting on a malformed value rather than silently taking
+/// the default — same accepted spellings as `TRADE_SETTLEMENT_ENABLED`.
+fn env_bool(key: &str, default: bool) -> Result<bool> {
+    match env::var(key) {
+        Err(_) => Ok(default),
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(true),
+            "false" | "0" | "no" | "off" => Ok(false),
+            other => Err(anyhow::anyhow!(
+                "{key} must be a boolean (true/false/1/0/yes/no/on/off), got '{other}'"
+            )),
+        },
     }
 }
 
@@ -284,6 +429,8 @@ impl Config {
                 }
             },
             market: MarketConfig::from_env()?,
+            matcher: MatcherConfig::from_env()?,
+            order_expiry: OrderExpiryConfig::from_env()?,
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_GRPC_URL")
                 .or_else(|_| env::var("IAM_SERVICE_URL"))
@@ -370,5 +517,19 @@ mod tests {
         assert_eq!(m.intra_zone_loss_factor, Decimal::new(101, 2));
         assert_eq!(m.cross_zone_loss_factor, Decimal::new(103, 2));
         assert_eq!(m.loss_allocation_model, "proportional");
+    }
+
+    /// The default order lifetime is one interval-clearing window (15 min), not an
+    /// arbitrary number: an order that names no expiry must not outlive the window
+    /// it was priced for. Pinned here because nothing else would notice a drift —
+    /// docker-compose sets no `ORDER_*_TTL_SECS`, so this default is what deploys run.
+    #[test]
+    fn order_expiry_default_is_one_clearing_window() {
+        let e = OrderExpiryConfig::default();
+        assert_eq!(e.default_ttl_secs, 15 * 60);
+        // The resolver exempts the default from the max check, so `from_env` guards
+        // the combination instead; the shipped defaults must satisfy it.
+        assert!(e.default_ttl_secs <= e.max_ttl_secs);
+        assert!(e.default_ttl_secs > 0);
     }
 }

@@ -327,9 +327,12 @@ impl ServiceBuilder {
 
         // Recurring-order & price-alert automation (Phase 6). Both read/write
         // through the same repos + outbox as the REST layer.
+        // The matcher doubles as the evaluator's `MatchTrigger`, so an order it
+        // places is matched on arrival rather than on the fallback tick.
         let recurring_evaluator = Arc::new(trading_logic::RecurringEvaluator::new(
             recurring_repo.clone(),
             order_repo.clone(),
+            matcher_service.clone(),
         ));
 
         let trigger_evaluator = Arc::new(trading_logic::TriggerEvaluator::new(
