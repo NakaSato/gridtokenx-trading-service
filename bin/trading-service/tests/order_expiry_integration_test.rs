@@ -14,13 +14,11 @@ use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 use trading_persistence::repositories::PostgresOrderRepository;
 use uuid::Uuid;
 
+mod common;
+
 #[tokio::test]
 async fn test_expire_stale_orders_e2e() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
-        });
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url)
         .await
         .expect("Failed to connect to postgres");
@@ -183,11 +181,7 @@ async fn test_expire_stale_orders_e2e() {
 /// no outbox event — while a genuinely live order still fills and emits.
 #[tokio::test]
 async fn test_fill_does_not_resurrect_terminal_order() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
-        });
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url)
         .await
         .expect("Failed to connect to postgres");

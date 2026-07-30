@@ -22,6 +22,8 @@ use trading_logic::ClearingService;
 use trading_persistence::repositories::{PostgresOrderRepository, PostgresSettlementRepository};
 use uuid::Uuid;
 
+mod common;
+
 /// Zero wheeling, unit loss → uniform price is the clean bid/ask midpoint.
 struct NoFee;
 impl TopologySnapshot for NoFee {
@@ -73,11 +75,7 @@ fn interval_order(
 
 #[tokio::test]
 async fn test_interval_order_clears_end_to_end() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
-        });
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     // Buyer + seller ids. No `users` rows are seeded: the FK they were inserted

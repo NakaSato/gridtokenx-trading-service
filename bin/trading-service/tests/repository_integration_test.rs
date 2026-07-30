@@ -9,12 +9,12 @@ use trading_core::models::{TradingOrder, Settlement, SettlementStatus};
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 use trading_persistence::repositories::{PostgresMeterRepository, PostgresOrderRepository, PostgresSettlementRepository};
 
+mod common;
+
 #[tokio::test]
 async fn test_postgres_order_repository_e2e() {
     // 1. Establish central database connection
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let db_url = common::test_db_url();
 
     let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
 
@@ -182,9 +182,7 @@ async fn test_postgres_order_repository_e2e() {
 /// `meter_id` into the map's `meter_serial` id space.
 #[tokio::test]
 async fn test_meter_repository_reads_read_model() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let meter_id = Uuid::new_v4();
@@ -235,9 +233,7 @@ async fn test_meter_repository_reads_read_model() {
 /// worker).
 #[tokio::test]
 async fn test_market_segment_round_trips() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let user_id = Uuid::new_v4(); // no `users` seed needed — see the note above
@@ -315,9 +311,7 @@ async fn test_market_segment_round_trips() {
 /// and the book would advertise depth the matcher will never fill.
 #[tokio::test]
 async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let db_url = common::test_db_url();
     let pool = PgPool::connect(&db_url).await.expect("connect");
 
     let user_id = Uuid::new_v4();

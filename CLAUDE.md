@@ -22,7 +22,13 @@ cargo test -p trading-engine             # one crate
 cargo test test_order_matching -- --nocapture   # one test
 
 # Integration tests live in bin/trading-service/tests/ (run any by --test <file stem>).
-# Those marked below need a live Postgres; settlement_cas_retry_test is self-contained.
+# The DB-backed ones run against `<db>_test`, NEVER the service's own database —
+# `tests/common::test_db_url()` rewrites the name even when DATABASE_URL points at
+# the live one, because the running trading-service's settlement/matcher workers
+# mutate fixture rows mid-test. Provision it once:
+#   ./scripts/setup-test-db.sh            # clone the schema (idempotent)
+#   ./scripts/setup-test-db.sh --recreate # rebuild it
+# Override wholesale with TRADING_TEST_DATABASE_URL.
 cargo test -p trading-service --test repository_integration_test   # needs Postgres
 cargo test -p trading-service --test settlement_integration_test   # needs Postgres
 cargo test -p trading-service --test api_routing_test

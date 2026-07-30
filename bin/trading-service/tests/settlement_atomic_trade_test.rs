@@ -17,13 +17,10 @@ use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
 use trading_persistence::repositories::PostgresSettlementRepository;
 use uuid::Uuid;
 
+mod common;
+
 async fn connect() -> PgPool {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading"
-                .to_string()
-        });
+    let db_url = common::test_db_url();
     PgPool::connect(&db_url)
         .await
         .expect("Failed to connect to postgres")

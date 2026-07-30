@@ -229,6 +229,9 @@ impl TradingService for TradingGrpcService {
                     order.price_per_kwh,
                     order.zone_id.unwrap_or(0),
                     seed,
+                    // Row expiry → Order PDA (0 = no expiry). Resolved by
+                    // order_policy::resolve_expires_at above, not by the program.
+                    order.expires_at.map_or(0, |t| t.timestamp()),
                 )
                 .await
             {

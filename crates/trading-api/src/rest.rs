@@ -510,7 +510,18 @@ pub async fn submit_order(
         let is_buy = matches!(side, OrderSide::Buy);
         match state
             .blockchain
-            .place_order_on_chain(user.user_id, is_buy, amount, price, req.zone_id, seed)
+            // The same expiry stored on the row, so the Order PDA states this
+            // order's real lifetime instead of the program's old 24h default.
+            // `None` maps to the on-chain no-expiry sentinel (0).
+            .place_order_on_chain(
+                user.user_id,
+                is_buy,
+                amount,
+                price,
+                req.zone_id,
+                seed,
+                order.expires_at.map_or(0, |t| t.timestamp()),
+            )
             .await
         {
             Ok((sig, pda)) => {

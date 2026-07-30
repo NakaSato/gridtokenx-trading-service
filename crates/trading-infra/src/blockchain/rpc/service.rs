@@ -466,6 +466,7 @@ impl BlockchainService {
         energy_amount_atomic: u64,
         price_atomic: u64,
         zone_id: u32,
+        expires_at_unix: i64,
     ) -> Result<(Signature, Pubkey)> {
         use std::str::FromStr;
         let authority = self.get_authority_keypair().await?;
@@ -484,6 +485,7 @@ impl BlockchainService {
             price_atomic,
             funder,
             zone_id,
+            expires_at_unix,
         )?;
 
         // Pick the mint/program/amount for the escrow this side must fund.
@@ -555,6 +557,7 @@ impl BlockchainService {
         order_type: &str,
         erc_id: Option<&str>,
         zone_id: u32,
+        expires_at_unix: i64,
     ) -> Result<(Signature, String, u64)> {
         use std::str::FromStr;
         let market = Pubkey::from_str(market_pubkey)?;
@@ -577,6 +580,7 @@ impl BlockchainService {
                 erc_id,
                 authority.pubkey(),
                 zone_id,
+                expires_at_unix,
             )?;
 
         let sig = self

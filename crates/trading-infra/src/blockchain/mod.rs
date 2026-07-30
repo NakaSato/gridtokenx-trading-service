@@ -99,6 +99,7 @@ impl BlockchainGateway for BlockchainService {
         price_per_kwh: rust_decimal::Decimal,
         zone_id: i32,
         order_id_seed: u64,
+        expires_at_unix: i64,
     ) -> TraitResult<(String, String)> {
         use rust_decimal::prelude::ToPrimitive;
         use trading_core::error::ApiError;
@@ -120,7 +121,15 @@ impl BlockchainGateway for BlockchainService {
             .ok_or_else(|| ApiError::Validation("price out of range".to_string()))?;
 
         let (sig, pda) = self
-            .place_order_on_chain(&wallet, order_id_seed, is_buy, energy_atomic, price_atomic, zone_id as u32)
+            .place_order_on_chain(
+                &wallet,
+                order_id_seed,
+                is_buy,
+                energy_atomic,
+                price_atomic,
+                zone_id as u32,
+                expires_at_unix,
+            )
             .await
             .map_err(|e| ApiError::Internal(format!("place_order_on_chain: {}", e)))?;
         Ok((sig.to_string(), pda.to_string()))
@@ -396,6 +405,7 @@ impl BlockchainGateway for BlockchainService {
         order_side: &str,
         erc_id: Option<&str>,
         zone_id: u32,
+        expires_at_unix: i64,
     ) -> TraitResult<(String, String, u64)> {
         let signer = self.get_custodial_signer(user_id).await.map_err(|e| {
             trading_core::error::ApiError::Internal(format!("Failed to get custodial signer: {}", e))
@@ -410,6 +420,7 @@ impl BlockchainGateway for BlockchainService {
                 order_side,
                 erc_id,
                 zone_id,
+                expires_at_unix,
             )
             .await
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))?;

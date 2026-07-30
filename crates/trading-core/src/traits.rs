@@ -567,6 +567,13 @@ pub trait BlockchainGateway: Send + Sync {
     /// Custodial order placement (Option A): record the order PDA + fund its escrow
     /// on the user's behalf, platform-signed. Returns (signature, order_pda). Default
     /// is unsupported so mock/non-chain gateways need no override.
+    ///
+    /// `expires_at_unix` is the expiry already resolved for this order by
+    /// [`crate::order_policy::resolve_expires_at`], in absolute unix seconds
+    /// (`0` = no expiry). It is passed on to the Order PDA rather than left to the
+    /// program, which used to stamp its own 24h lifetime — so the row and the PDA
+    /// state the same expiry. A past value is rejected on chain (`OrderExpired`).
+    #[allow(clippy::too_many_arguments)]
     async fn place_order_on_chain(
         &self,
         _user_id: Uuid,
@@ -575,6 +582,7 @@ pub trait BlockchainGateway: Send + Sync {
         _price_per_kwh: Decimal,
         _zone_id: i32,
         _order_id_seed: u64,
+        _expires_at_unix: i64,
     ) -> TraitResult<(String, String)> {
         Err(ApiError::Internal(
             "place_order_on_chain not supported by this gateway".to_string(),
@@ -593,6 +601,11 @@ pub trait BlockchainGateway: Send + Sync {
     async fn sync_total_supply(&self) -> TraitResult<String>;
 
     /// Execute on-chain create_order with custodial signing.
+    ///
+    /// `expires_at_unix` is the order's expiry in absolute unix seconds, `0` for
+    /// none — see [`Self::place_order_on_chain`]. `create_{buy,sell}_order` stores
+    /// it verbatim and rejects a past value.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_create_order(
         &self,
         user_id: Uuid,
@@ -602,6 +615,7 @@ pub trait BlockchainGateway: Send + Sync {
         order_side: &str,
         erc_id: Option<&str>,
         zone_id: u32,
+        expires_at_unix: i64,
     ) -> TraitResult<(String, String, u64)>;
 }
 

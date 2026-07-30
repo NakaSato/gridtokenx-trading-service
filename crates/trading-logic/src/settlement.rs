@@ -532,6 +532,7 @@ mod tests {
             _order_side: &str,
             _erc_id: Option<&str>,
             _zone_id: u32,
+            _expires_at_unix: i64,
         ) -> TraitResult<(String, String, u64)> {
             unimplemented!()
         }

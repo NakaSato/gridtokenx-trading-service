@@ -261,7 +261,7 @@ impl BlockchainGateway for MockSystem {
     async fn execute_batched_settlements(&self, _s: Vec<Settlement>) -> TraitResult<Vec<SettlementTransaction>> { Ok(vec![]) }
     async fn issue_erc(&self, _u: Uuid, _m: &str, _a: Decimal) -> TraitResult<String> { Ok("erc_sig".to_string()) }
     async fn sync_total_supply(&self) -> TraitResult<String> { Ok("sync_sig".to_string()) }
-    async fn execute_create_order(&self, _u: Uuid, _m: &str, _a: u64, _p: u64, _s: &str, _e: Option<&str>, _z: u32) -> TraitResult<(String, String, u64)> {
+    async fn execute_create_order(&self, _u: Uuid, _m: &str, _a: u64, _p: u64, _s: &str, _e: Option<&str>, _z: u32, _x: i64) -> TraitResult<(String, String, u64)> {
         Ok(("sig".to_string(), "pda".to_string(), 1))
     }
 }

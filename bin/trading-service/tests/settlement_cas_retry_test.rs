@@ -23,18 +23,15 @@ use trading_core::models::TradingOrder;
 use trading_persistence::repositories::{PostgresOrderRepository, PostgresSettlementRepository};
 use uuid::Uuid;
 
+mod common;
+
 const MAX_SETTLEMENT_RETRIES: i32 = 5;
 const STALE_PROCESSING_SECS: i64 = 300;
 
 /// Connect to the dev/test Postgres, or return `None` if unreachable so the test
 /// can skip instead of fail in infra-less environments.
 async fn try_pool() -> Option<PgPool> {
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading"
-                .to_string()
-        });
+    let db_url = common::test_db_url();
     PgPool::connect(&db_url).await.ok()
 }
 

@@ -16,12 +16,12 @@ use trading_api::startup::build_router;
 use gridtokenx_blockchain_core::auth::{INTERNAL_ROLE_HEADER, GATEWAY_SECRET_HEADER};
 use trading_api::auth::USER_ID_HEADER;
 
+mod common;
+
 #[tokio::test]
 async fn test_api_routing_e2e() {
     // 1. Establish database connection
-    let db_url = std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("TRADING_DATABASE_URL"))
-        .unwrap_or_else(|_| "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string());
+    let db_url = common::test_db_url();
 
     let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
 

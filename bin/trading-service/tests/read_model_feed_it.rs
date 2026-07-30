@@ -32,6 +32,8 @@ use trading_persistence::repositories::read_model::{
     PgMeterReadModelRepository, PgWalletReadModelRepository,
 };
 
+mod common;
+
 /// Returns `false` (and prints a skip line) unless `RUN_DB_IT` is set. Call at
 /// the top of every `#[tokio::test]` so host `cargo test` skips the DB work.
 fn db_it_enabled() -> bool {
@@ -43,11 +45,7 @@ fn db_it_enabled() -> bool {
 }
 
 async fn connect() -> PgPool {
-    let db_url = std::env::var("TRADING_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            "postgresql://gridtokenx_user:gridtokenx_password@localhost:7001/gridtokenx_trading".to_string()
-        });
+    let db_url = common::test_db_url();
     PgPool::connect(&db_url)
         .await
         .expect("connect to gridtokenx_trading")
