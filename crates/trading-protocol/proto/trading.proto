@@ -68,6 +68,11 @@ message SubmitOrderRequest {
   optional int32 zone_id = 8;
   optional string time_in_force = 9; // "gtc" (default), "ioc", "fok"
   optional string market_segment = 10; // "realtime" (default), "interval"
+  // Order lifetime; send at most one. Omitted → ORDER_DEFAULT_TTL_SECS.
+  // Mirrors the REST edge (rest.rs SubmitOrderRequest) so the two transports
+  // offer the same control; resolved by order_policy::resolve_expires_at.
+  optional string expires_at = 11;     // absolute, RFC 3339
+  optional int64 expires_in_secs = 12; // relative to now, seconds
 }
 
 message UpdateOrderRequest {

@@ -1547,6 +1547,70 @@ async fn test_grpc_submit_order_invalid_side_rejected() {
     assert!(svc.submit_order(ctx(), owned_view(&submit)).await.is_err());
 }
 
+/// gRPC reaches the same expiry policy as REST: both forms work, and the same
+/// inputs are refused. Previously this transport could not express an expiry at
+/// all and silently took the default, so a gRPC client had no way to bound an
+/// order's life.
+#[tokio::test]
+async fn test_grpc_submit_order_expiry_forms_and_rejections() {
+    use chrono::Utc;
+
+    let svc = grpc_service();
+    let base = |extra: SubmitOrderRequest| SubmitOrderRequest {
+        user_id: Uuid::new_v4().to_string(),
+        side: "sell".into(),
+        order_type: "limit".into(),
+        energy_amount: 5.0,
+        price_per_kwh: 4.0,
+        zone_id: Some(1),
+        ..extra
+    };
+
+    // Relative form.
+    let req = base(SubmitOrderRequest { expires_in_secs: Some(900), ..Default::default() });
+    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "expires_in_secs must be accepted");
+
+    // Absolute form, RFC 3339.
+    let req = base(SubmitOrderRequest {
+        expires_at: Some((Utc::now() + chrono::Duration::hours(2)).to_rfc3339()),
+        ..Default::default()
+    });
+    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "RFC 3339 expires_at must be accepted");
+
+    // Omitted → the configured default, as before.
+    let req = base(SubmitOrderRequest::default());
+    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "an absent expiry must still default");
+
+    // Refusals mirror REST. A malformed timestamp must NOT fall back to the
+    // default — that would hand back a lifetime the client never asked for.
+    for (case, req) in [
+        ("past absolute", base(SubmitOrderRequest {
+            expires_at: Some((Utc::now() - chrono::Duration::hours(1)).to_rfc3339()),
+            ..Default::default()
+        })),
+        ("unparseable absolute", base(SubmitOrderRequest {
+            expires_at: Some("next tuesday".into()),
+            ..Default::default()
+        })),
+        ("zero ttl", base(SubmitOrderRequest { expires_in_secs: Some(0), ..Default::default() })),
+        ("negative ttl", base(SubmitOrderRequest { expires_in_secs: Some(-60), ..Default::default() })),
+        ("beyond max ttl", base(SubmitOrderRequest {
+            expires_in_secs: Some(8 * 24 * 60 * 60),
+            ..Default::default()
+        })),
+        ("both forms", base(SubmitOrderRequest {
+            expires_at: Some((Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+            expires_in_secs: Some(3600),
+            ..Default::default()
+        })),
+    ] {
+        assert!(
+            svc.submit_order(ctx(), owned_view(&req)).await.is_err(),
+            "{case} must be rejected"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_grpc_submit_order_invalid_user_rejected() {
     let svc = grpc_service();

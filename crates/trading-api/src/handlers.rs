@@ -136,6 +136,34 @@ impl TradingService for TradingGrpcService {
                 ConnectError::new(ErrorCode::Internal, "Failed to resolve active epoch")
             })?;
 
+        // Order lifetime, resolved through the same policy as the REST edge so the
+        // two transports cannot drift. `expires_at` arrives as an RFC 3339 string
+        // (proto has no timestamp type here); a malformed one is InvalidArgument
+        // rather than a silent fallback to the default, which would hand back a
+        // lifetime the client did not ask for.
+        let requested_expires_at = match request.expires_at.as_deref() {
+            None => None,
+            Some(raw) => Some(
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .map_err(|e| {
+                        ConnectError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("Invalid expires_at (expected RFC 3339): {e}"),
+                        )
+                    })?
+                    .with_timezone(&chrono::Utc),
+            ),
+        };
+        let expires_at = trading_core::order_policy::resolve_expires_at(
+            gridtokenx_telemetry::time::now(),
+            requested_expires_at,
+            request.expires_in_secs,
+            None,
+            self.state.config.order_expiry.default_ttl_secs,
+            self.state.config.order_expiry.max_ttl_secs,
+        )
+        .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.message()))?;
+
         let order = TradingOrder {
             id: Uuid::new_v4(),
             user_id,
@@ -145,22 +173,7 @@ impl TradingService for TradingGrpcService {
             price_per_kwh: price,
             filled_amount: Decimal::ZERO,
             status: OrderStatus::Pending,
-            // The configured default, shared with the REST edge rather than a
-            // second hard-coded 24h. `SubmitOrderRequest` (trading.proto) carries
-            // no expiry field, so there is no client value to resolve here — the
-            // `None`s are the client forms this transport cannot express. Adding
-            // one is a proto change, i.e. a cross-service contract change.
-            expires_at: Some(
-                trading_core::order_policy::resolve_expires_at(
-                    gridtokenx_telemetry::time::now(),
-                    None,
-                    None,
-                    None,
-                    self.state.config.order_expiry.default_ttl_secs,
-                    self.state.config.order_expiry.max_ttl_secs,
-                )
-                .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.message()))?,
-            ),
+            expires_at: Some(expires_at),
             created_at: Some(gridtokenx_telemetry::time::now()),
             filled_at: None,
             epoch_id: Some(epoch_id),

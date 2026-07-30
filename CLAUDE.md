@@ -138,7 +138,8 @@ Loaded by `trading_core::config::Config::from_env()` (`crates/trading-core/src/c
 `ENCRYPTION_SECRET`, `KAFKA_EVENTS_ENABLED` + `KAFKA_BOOTSTRAP_SERVERS` + `KAFKA_TOPIC_PREFIX`,
 `TRADING_ROLE` (`api`|`matcher`), `MATCHER_REALTIME` + `MATCHER_DEBOUNCE_MS` + `MATCHER_INTERVAL_MS`
 (matching cadence — see `MatcherConfig`), `ORDER_DEFAULT_TTL_SECS` + `ORDER_MAX_TTL_SECS`
-(order lifetime — see `OrderExpiryConfig`), `PLATFORM_USER_ID`, `ORACLE_FEED_IN_TARIFF`,
+(order lifetime — see `OrderExpiryConfig`; both REST and gRPC accept a per-order
+`expires_at`/`expires_in_secs`), `PLATFORM_USER_ID`, `ORACLE_FEED_IN_TARIFF`,
 `AGGREGATOR_BRIDGE_PUBLIC_KEY`, and the `SOLANA_*_PROGRAM_ID` set (sensible localnet defaults baked in).
 
 `test-api.sh` is a manual REST smoke test against `:8093` (`BASE_URL=... ./test-api.sh`; needs a
