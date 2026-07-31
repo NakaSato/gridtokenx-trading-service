@@ -508,18 +508,24 @@ impl SettlementRepository for PostgresSettlementRepository {
         let hours = i32::try_from(window_hours.max(0)).unwrap_or(24);
         let row = sqlx::query_as::<_, MarketPriceRow>(
             r#"
+            -- Column names are the SCHEMA's, not the domain's: settlements stores
+            -- `price_per_kwh` (there is no `price`) and `blockchain_confirmed_at`
+            -- (there is no `confirmed_at`). Both were wrong here, so every call
+            -- 500'd with `column "price" does not exist` — the endpoint had never
+            -- worked. Runtime SQLx means nothing catches this at compile time; the
+            -- 40_trading case is what pins it.
             SELECT
-                SUM(price * energy_amount) / NULLIF(SUM(energy_amount), 0) AS vwap,
-                MAX(price)              AS high,
-                MIN(price)              AS low,
+                SUM(price_per_kwh * energy_amount) / NULLIF(SUM(energy_amount), 0) AS vwap,
+                MAX(price_per_kwh)      AS high,
+                MIN(price_per_kwh)      AS low,
                 SUM(energy_amount)      AS volume_kwh,
                 COUNT(*)                AS trade_count,
                 (
-                    SELECT s2.price
+                    SELECT s2.price_per_kwh
                     FROM settlements s2
                     WHERE s2.status = 'completed'
                       AND ($2::bool OR s2.created_at >= NOW() - make_interval(hours => $1::int))
-                    ORDER BY COALESCE(s2.confirmed_at, s2.created_at) DESC
+                    ORDER BY COALESCE(s2.blockchain_confirmed_at, s2.created_at) DESC
                     LIMIT 1
                 ) AS last_price
             FROM settlements
