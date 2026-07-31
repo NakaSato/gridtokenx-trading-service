@@ -455,14 +455,14 @@ mod tests {
             _ids: &[Uuid],
         ) -> TraitResult<Vec<Settlement>> {
             self.claim_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.claim_returns.lock().unwrap().clone())
+            Ok(self.claim_returns.lock().expect("fixture mutex poisoned").clone())
         }
 
         async fn settlements_with_lapsed_orders(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
             if self.lapsed_query_fails {
                 return Err(ApiError::Internal("expiry lookup unavailable".into()));
             }
-            let lapsed = self.lapsed.lock().unwrap();
+            let lapsed = self.lapsed.lock().expect("fixture mutex poisoned");
             Ok(ids.iter().copied().filter(|id| lapsed.contains(id)).collect())
         }
 
@@ -474,7 +474,7 @@ mod tests {
             _error: Option<&str>,
             _event: &Event,
         ) -> TraitResult<()> {
-            self.completed_with_event.lock().unwrap().push((
+            self.completed_with_event.lock().expect("fixture mutex poisoned").push((
                 id,
                 status.to_string(),
                 tx_hash.map(str::to_string),
@@ -489,7 +489,7 @@ mod tests {
             tx_hash: Option<&str>,
             error: Option<&str>,
         ) -> TraitResult<()> {
-            self.completed_plain.lock().unwrap().push((
+            self.completed_plain.lock().expect("fixture mutex poisoned").push((
                 id,
                 status.to_string(),
                 tx_hash.map(str::to_string),
@@ -504,7 +504,7 @@ mod tests {
             _max_retries: i32,
             _error: Option<&str>,
         ) -> TraitResult<u64> {
-            self.reset_ids.lock().unwrap().extend_from_slice(ids);
+            self.reset_ids.lock().expect("fixture mutex poisoned").extend_from_slice(ids);
             Ok(0)
         }
 
@@ -626,9 +626,9 @@ mod tests {
             self.batch_calls.fetch_add(1, Ordering::SeqCst);
             self.sent
                 .lock()
-                .unwrap()
+                .expect("fixture mutex poisoned")
                 .extend(_settlements.iter().map(|s| s.id));
-            match self.batch.lock().unwrap().take() {
+            match self.batch.lock().expect("fixture mutex poisoned").take() {
                 Some(BatchResult::Ok(r)) => Ok(r),
                 Some(BatchResult::Err(m)) => Err(ApiError::Blockchain(m)),
                 None => Ok(Vec::new()),
@@ -692,7 +692,7 @@ mod tests {
             action: &str,
             _details: &str,
         ) -> TraitResult<()> {
-            self.actions.lock().unwrap().push(action.to_string());
+            self.actions.lock().expect("fixture mutex poisoned").push(action.to_string());
             Ok(())
         }
     }
@@ -722,13 +722,13 @@ mod tests {
             .expect("settle should succeed");
 
         assert_eq!(out.len(), 1);
-        let completed = repo.completed_with_event.lock().unwrap();
+        let completed = repo.completed_with_event.lock().expect("fixture mutex poisoned");
         assert_eq!(completed.len(), 1, "exactly one completion write");
         assert_eq!(completed[0].0, id);
         assert_eq!(completed[0].1, SettlementStatus::Completed.to_string());
         assert_eq!(completed[0].2.as_deref(), Some("SIG_OK"));
         // A minted settlement is never reset for retry.
-        assert!(repo.reset_ids.lock().unwrap().is_empty());
+        assert!(repo.reset_ids.lock().expect("fixture mutex poisoned").is_empty());
     }
 
     /// 2. A claimed settlement absent from the chain's tx_results is released for
@@ -753,11 +753,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         // Only the minted one is completed.
-        let completed = repo.completed_with_event.lock().unwrap();
+        let completed = repo.completed_with_event.lock().expect("fixture mutex poisoned");
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].0, minted);
         // The unminted one (and only it) is reset for retry.
-        let reset = repo.reset_ids.lock().unwrap();
+        let reset = repo.reset_ids.lock().expect("fixture mutex poisoned");
         assert_eq!(*reset, vec![unminted]);
     }
 
@@ -783,17 +783,17 @@ mod tests {
             .expect("the live settlement should still settle");
 
         // The doomed settlement never reached the chain; the live one did.
-        assert_eq!(*chain.sent.lock().unwrap(), vec![live]);
+        assert_eq!(*chain.sent.lock().expect("fixture mutex poisoned"), vec![live]);
         assert_eq!(out.len(), 1);
 
         // Parked terminally, with the real cause…
-        let plain = repo.completed_plain.lock().unwrap();
+        let plain = repo.completed_plain.lock().expect("fixture mutex poisoned");
         assert_eq!(plain.len(), 1, "exactly one status write for the lapsed row");
         assert_eq!(plain[0].0, lapsed);
         assert_eq!(plain[0].1, SettlementStatus::PermanentlyFailed.to_string());
         // …and NOT queued for a retry that could never succeed.
         assert!(
-            repo.reset_ids.lock().unwrap().is_empty(),
+            repo.reset_ids.lock().expect("fixture mutex poisoned").is_empty(),
             "a lapsed settlement must not consume the retry budget"
         );
     }
@@ -819,7 +819,7 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(chain.batch_calls.load(Ordering::SeqCst), 0, "no chain call");
         assert_eq!(
-            repo.completed_plain.lock().unwrap()[0].1,
+            repo.completed_plain.lock().expect("fixture mutex poisoned")[0].1,
             SettlementStatus::PermanentlyFailed.to_string()
         );
     }
@@ -844,7 +844,7 @@ mod tests {
             .await
             .expect("all-lapsed batch is not an error");
 
-        let plain = repo.completed_plain.lock().unwrap();
+        let plain = repo.completed_plain.lock().expect("fixture mutex poisoned");
         let recorded = plain[0].3.clone().expect("a reason is recorded");
         assert!(recorded.contains("order expired"), "states the expiry: {recorded}");
         assert!(
@@ -871,8 +871,8 @@ mod tests {
             .expect("a failed expiry lookup must not block settlement");
 
         assert_eq!(out.len(), 1);
-        assert_eq!(*chain.sent.lock().unwrap(), vec![a]);
-        assert!(repo.completed_plain.lock().unwrap().is_empty(), "nothing parked");
+        assert_eq!(*chain.sent.lock().expect("fixture mutex poisoned"), vec![a]);
+        assert!(repo.completed_plain.lock().expect("fixture mutex poisoned").is_empty(), "nothing parked");
     }
 
     /// 3. Blockchain error → whole claimed batch reset, settle returns Err, nothing
@@ -896,10 +896,10 @@ mod tests {
         assert!(matches!(err, ApiError::Blockchain(_)));
 
         // Nothing completed.
-        assert!(repo.completed_with_event.lock().unwrap().is_empty());
-        assert!(repo.completed_plain.lock().unwrap().is_empty());
+        assert!(repo.completed_with_event.lock().expect("fixture mutex poisoned").is_empty());
+        assert!(repo.completed_plain.lock().expect("fixture mutex poisoned").is_empty());
         // Whole claimed batch reset.
-        let mut reset = repo.reset_ids.lock().unwrap().clone();
+        let mut reset = repo.reset_ids.lock().expect("fixture mutex poisoned").clone();
         reset.sort();
         let mut expected = vec![a, b];
         expected.sort();
