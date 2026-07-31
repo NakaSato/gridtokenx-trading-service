@@ -261,7 +261,41 @@ impl TradingService for TradingGrpcService {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("order {}: on-chain placement failed (left for retry): {}", order.id, e)
+                    // Same rule as the REST path, different remedy: here the row is already
+                    // durable, so a final program rejection is neutralised by cancelling the
+                    // order rather than by refusing the request. Leaving it Active would let
+                    // the CDA match an order that can never settle — the incident where 14
+                    // settlements burned their retry budget after `Custom 3007` placements.
+                    let msg = e.to_string();
+                    if trading_core::error::is_deterministic_chain_rejection(&msg) {
+                        tracing::warn!(
+                            "order {}: the program refused on-chain placement; cancelling so it \
+                             cannot be matched into an unsettleable trade: {}",
+                            order.id,
+                            msg
+                        );
+                        if let Err(e2) = self
+                            .state
+                            .order_repo
+                            .update_order_status(order.id, trading_core::types::OrderStatus::Cancelled)
+                            .await
+                        {
+                            tracing::error!(
+                                "order {}: placement was refused on-chain but the order could not \
+                                 be cancelled ({}); it remains matchable and its settlement cannot land",
+                                order.id,
+                                e2
+                            );
+                        }
+                    } else {
+                        // No verdict reached — keep best-effort, but say what that costs.
+                        tracing::warn!(
+                            "order {}: on-chain placement failed to reach a verdict; left with a NULL \
+                             order_pda, which nothing retries, so its settlement cannot land: {}",
+                            order.id,
+                            msg
+                        );
+                    }
                 }
             }
         }

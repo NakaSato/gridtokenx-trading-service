@@ -158,6 +158,31 @@ only honoured when the service runs with `CHAIN_BRIDGE_INSECURE=true` and `GATEW
 
 ---
 
+## Order placement: a program rejection is final, and nothing retries placement
+
+Custodial placement (`place_order_on_chain`, REST `rest/orders.rs` + gRPC `handlers.rs`) used
+to be uniformly "best-effort: left for retry". Two things made that wrong, and both are now
+handled — read this before relaxing it back:
+
+- **No retry exists.** No worker looks for `order_pda IS NULL`; the workers are matcher,
+  settlement, clearing, read_model_feed, reaper, recurring, supply_sync, trigger. So an order
+  that fails placement is never placed later.
+- **A program rejection is deterministic.** `trading_core::error::is_deterministic_chain_rejection`
+  splits "the program executed and refused this" (`InstructionError`) from "no verdict was
+  reached" (timeout, blockhash, connection). The first can never succeed on resubmission.
+
+Behaviour: a deterministic rejection now **refuses the order** — REST returns 422 before the row
+is inserted, gRPC cancels the already-durable row. A transport failure keeps the old best-effort
+path (a validator blip must not reject a customer's order), and its log now states the real cost.
+
+Why it matters, from a real incident: 18 orders were submitted for zones with no initialized
+`ZoneMarket` and rejected `{"InstructionError":[0,{"Custom":3007}]}` (`AccountOwnedByWrongProgram`).
+Each was accepted with `order_pda = NULL`, matched by the CDA, and its settlement then failed 5×
+(*"buy order … has no on-chain PDA; skipping"*) before landing in `permanently_failed` with
+`"not included in on-chain batch result"` — a message naming the symptom, not the cause. `zone_id`
+comes straight from the request and is not validated against initialized markets, so any zone id a
+client invents reproduces it; `scripts/init-zones.sh` (in the superproject) creates missing markets.
+
 ## Domain notes
 
 - **GRID** = energy token, **GRX** = currency token (see superproject `docs/glossary.md`).

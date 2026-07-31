@@ -77,3 +77,64 @@ impl From<anyhow::Error> for ApiError {
 
 /// Convenience `Result` alias.
 pub type Result<T> = std::result::Result<T, ApiError>;
+
+/// Did the chain *execute* this transaction and the program reject it?
+///
+/// The distinction matters because the two failure classes need opposite handling and
+/// were previously treated alike. An `InstructionError` means the transaction reached the
+/// program, which then refused it: with identical inputs that verdict is deterministic, so
+/// resubmitting produces the same rejection forever. A transport failure (timeout, no
+/// connection, expired blockhash) never reached that verdict and is worth retrying.
+///
+/// Grounded in an observed incident: 18 orders were placed into zones with no initialized
+/// `ZoneMarket`, each rejected `{"InstructionError":[0,{"Custom":3007}]}`
+/// (`AccountOwnedByWrongProgram`). Placement was treated as best-effort "left for retry",
+/// so those orders were accepted with `order_pda = NULL`, matched by the CDA, and their 14
+/// settlements then failed 5 times each before being parked `permanently_failed`. Nothing
+/// retries placement — no worker looks for a NULL PDA — so "left for retry" never happened.
+///
+/// Matching on the serialized error text is deliberate: the gateway trait returns
+/// `ApiError`, so the structured `TransactionError` is already stringified by the time any
+/// caller sees it, and re-plumbing that type is a larger change than this predicate.
+pub fn is_deterministic_chain_rejection(message: &str) -> bool {
+    message.contains("InstructionError")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_deterministic_chain_rejection;
+
+    /// The observed zone-market rejection: executed, and refused by the program.
+    #[test]
+    fn program_rejection_is_deterministic() {
+        assert!(is_deterministic_chain_rejection(
+            "place_order_on_chain: order placement 2BjUZ4t confirmation failed: transaction 2BjUZ4t \
+             failed on-chain: {\"InstructionError\":[0,{\"Custom\":3007}]}"
+        ));
+    }
+
+    /// Any program error qualifies, not just 3007 — the point is that the verdict is final.
+    #[test]
+    fn other_instruction_errors_are_deterministic_too() {
+        assert!(is_deterministic_chain_rejection(
+            "{\"InstructionError\":[0,{\"Custom\":6024}]}"
+        ));
+        assert!(is_deterministic_chain_rejection(
+            "{\"InstructionError\":[1,\"InvalidAccountData\"]}"
+        ));
+    }
+
+    /// Transport failures never got a verdict, so they stay retryable — misclassifying
+    /// these would turn a validator blip into a rejected customer order.
+    #[test]
+    fn transport_failures_are_not_deterministic() {
+        for msg in [
+            "error sending request for url (http://127.0.0.1:8899/): operation timed out",
+            "RPC response error -32005: node is behind by 42 slots",
+            "blockhash not found",
+            "connection refused",
+        ] {
+            assert!(!is_deterministic_chain_rejection(msg), "{msg} must stay retryable");
+        }
+    }
+}

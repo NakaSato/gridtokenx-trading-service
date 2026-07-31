@@ -315,7 +315,43 @@ pub async fn submit_order(
                 order.blockchain_status = Some("confirmed".to_string());
             }
             Err(e) => {
-                tracing::warn!("order {}: on-chain placement failed (left for retry): {}", order.id, e);
+                // A program rejection is FINAL: the transaction executed and the program
+                // refused it, so resubmitting the same order gets the same answer. Accepting
+                // it anyway is what produced the observed incident — 18 orders in zones with
+                // no `ZoneMarket` were rejected `Custom 3007`, kept with `order_pda = NULL`,
+                // matched by the CDA, and their settlements then burned five retries each
+                // before being parked `permanently_failed` blaming the wrong thing. Nothing
+                // retries placement (no worker looks for a NULL PDA), so the old
+                // "left for retry" was never true. Refuse the order instead — this runs
+                // BEFORE the row is inserted, so nothing is persisted.
+                let msg = e.to_string();
+                if trading_core::error::is_deterministic_chain_rejection(&msg) {
+                    tracing::warn!(
+                        "order {} REJECTED: the program refused on-chain placement, so this order \
+                         could never settle: {}",
+                        order.id,
+                        msg
+                    );
+                    return Err((
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        format!(
+                            "on-chain placement was rejected by the trading program, so this order \
+                             cannot be accepted: {msg}. If this is a zone-market error (Custom 3007), \
+                             zone {} has no initialized market — see scripts/init-zones.sh.",
+                            req.zone_id
+                        ),
+                    ));
+                }
+                // Transport failure: no verdict was reached, so keep the existing
+                // best-effort behaviour rather than turning a validator blip into a
+                // rejected order. The order still rests with a NULL PDA and its settlement
+                // will not land until placement is retried — which nothing currently does.
+                tracing::warn!(
+                    "order {}: on-chain placement failed to reach a verdict; accepted with NULL \
+                     order_pda and NOT retried by anything, so its settlement cannot land: {}",
+                    order.id,
+                    msg
+                );
             }
         }
     }
