@@ -385,6 +385,34 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(claimed.into_iter().map(Into::into).collect())
     }
 
+    async fn settlements_with_lapsed_orders(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Both legs are checked: either one lapsing is enough for the on-chain
+        // guard to reject the pair. `expires_at IS NULL` is the no-expiry case and
+        // must not match. The comparison is `<= now()` to mirror the on-chain rule
+        // exactly (`now < expires_at` is live, so equality is already lapsed) —
+        // a settlement this reports as lapsed is one the chain would reject.
+        // Same-database join: `settlements` and `trading_orders` are both owned by
+        // this service (no cross-service join).
+        let rows = sqlx::query(
+            "SELECT s.id \
+             FROM settlements s \
+             JOIN trading_orders bo ON bo.id = s.buy_order_id \
+             JOIN trading_orders so ON so.id = s.sell_order_id \
+             WHERE s.id = ANY($1) \
+               AND ((bo.expires_at IS NOT NULL AND bo.expires_at <= NOW()) \
+                 OR (so.expires_at IS NOT NULL AND so.expires_at <= NOW()))",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(|r| r.get::<Uuid, _>("id")).collect())
+    }
+
     async fn reset_settlements_for_retry(
         &self,
         ids: &[Uuid],

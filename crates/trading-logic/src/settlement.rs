@@ -103,6 +103,23 @@ impl SettlementService {
         claimed: Vec<Settlement>,
     ) -> TraitResult<Vec<trading_core::models::SettlementTransaction>> {
         use std::collections::{HashMap, HashSet};
+
+        // EXPIRY PRE-FLIGHT. A settlement whose buy or sell order has lapsed cannot
+        // land: every on-chain path rejects a lapsed order (`OrderExpired`). Sending
+        // it anyway costs a round trip, then the generic unminted path resets it to
+        // `pending`, and the worker re-sends it once per tick until the retry budget
+        // is gone — finally parking it as `permanently_failed` with the misleading
+        // reason "not included in on-chain batch result". Fail it here instead, once,
+        // with the real cause, and never occupy a batch slot with it again.
+        //
+        // Deliberately NOT retryable: unlike a transient RPC failure, time only makes
+        // this worse, so it goes straight to the terminal state for reconciliation
+        // rather than through `reset_settlements_for_retry`.
+        let claimed = self.park_lapsed_settlements(claimed).await;
+        if claimed.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let by_id: HashMap<Uuid, Settlement> = claimed.iter().cloned().map(|s| (s.id, s)).collect();
 
         let tx_results = match self
@@ -232,6 +249,77 @@ impl SettlementService {
 
         Ok(tx_results)
     }
+
+    /// Park every claimed settlement whose order has lapsed in `permanently_failed`,
+    /// returning the ones still worth sending on-chain.
+    ///
+    /// Failure to *ask* the repository is not a reason to stop settling: if the query
+    /// errors, this degrades to the previous behaviour (attempt everything) and logs,
+    /// because a doomed attempt is recoverable while refusing to settle live trades is
+    /// a self-inflicted outage.
+    async fn park_lapsed_settlements(&self, claimed: Vec<Settlement>) -> Vec<Settlement> {
+        let ids: Vec<Uuid> = claimed.iter().map(|s| s.id).collect();
+        let lapsed: Vec<Uuid> = match self.repo.settlements_with_lapsed_orders(&ids).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "Could not check settlement order expiry ({}); attempting all {} claimed settlement(s)",
+                    e,
+                    claimed.len()
+                );
+                return claimed;
+            }
+        };
+        if lapsed.is_empty() {
+            return claimed;
+        }
+
+        let lapsed_set: std::collections::HashSet<Uuid> = lapsed.iter().copied().collect();
+        warn!(
+            "{} claimed settlement(s) reference a lapsed order and can never settle on-chain; \
+             parking as {} without an on-chain attempt",
+            lapsed.len(),
+            SettlementStatus::PermanentlyFailed
+        );
+
+        for settlement in claimed.iter().filter(|s| lapsed_set.contains(&s.id)) {
+            let reason = format!(
+                "order expired before settlement (buy {} / sell {}); on-chain settlement would be rejected OrderExpired",
+                settlement.buy_order_id, settlement.sell_order_id
+            );
+            if let Err(e) = self
+                .repo
+                .update_settlement_status(
+                    settlement.id,
+                    &SettlementStatus::PermanentlyFailed.to_string(),
+                    None,
+                    Some(&reason),
+                )
+                .await
+            {
+                // Left in `processing`; the stale-processing reclaim will pick it up
+                // and this pre-flight will park it again on the next pass.
+                error!(
+                    "Settlement {} references a lapsed order but could not be parked: {}",
+                    settlement.id, e
+                );
+                continue;
+            }
+            let _ = self
+                .audit
+                .log_action(
+                    settlement.buyer_id,
+                    "settlement_expired",
+                    &format!("Settlement {} not attempted: {}", settlement.id, reason),
+                )
+                .await;
+        }
+
+        claimed
+            .into_iter()
+            .filter(|s| !lapsed_set.contains(&s.id))
+            .collect()
+    }
 }
 
 /// Max times a settlement is retried before it is parked in `permanently_failed`
@@ -316,12 +404,31 @@ mod tests {
         /// ids passed to `reset_settlements_for_retry` (flattened across calls).
         reset_ids: Mutex<Vec<Uuid>>,
         claim_calls: AtomicUsize,
+        /// What the expiry pre-flight should report as lapsed.
+        lapsed: Mutex<Vec<Uuid>>,
+        /// Make the expiry pre-flight query fail, to prove settlement degrades to
+        /// attempting everything rather than stalling.
+        lapsed_query_fails: bool,
     }
 
     impl FakeRepo {
         fn with_claim(returns: Vec<Settlement>) -> Self {
             Self {
                 claim_returns: Mutex::new(returns),
+                ..Default::default()
+            }
+        }
+        fn with_claim_and_lapsed(returns: Vec<Settlement>, lapsed: Vec<Uuid>) -> Self {
+            Self {
+                claim_returns: Mutex::new(returns),
+                lapsed: Mutex::new(lapsed),
+                ..Default::default()
+            }
+        }
+        fn with_failing_lapsed_query(returns: Vec<Settlement>) -> Self {
+            Self {
+                claim_returns: Mutex::new(returns),
+                lapsed_query_fails: true,
                 ..Default::default()
             }
         }
@@ -335,6 +442,14 @@ mod tests {
         ) -> TraitResult<Vec<Settlement>> {
             self.claim_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.claim_returns.lock().unwrap().clone())
+        }
+
+        async fn settlements_with_lapsed_orders(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+            if self.lapsed_query_fails {
+                return Err(ApiError::Internal("expiry lookup unavailable".into()));
+            }
+            let lapsed = self.lapsed.lock().unwrap();
+            Ok(ids.iter().copied().filter(|id| lapsed.contains(id)).collect())
         }
 
         async fn update_settlement_status_with_event(
@@ -465,6 +580,9 @@ mod tests {
     struct FakeChain {
         batch: Mutex<Option<BatchResult>>,
         batch_calls: AtomicUsize,
+        /// Settlement ids actually handed to the chain — the expiry pre-flight is only
+        /// worth anything if a doomed settlement never appears here.
+        sent: Mutex<Vec<Uuid>>,
     }
 
     impl FakeChain {
@@ -472,12 +590,14 @@ mod tests {
             Self {
                 batch: Mutex::new(Some(BatchResult::Ok(results))),
                 batch_calls: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
             }
         }
         fn err(msg: &str) -> Self {
             Self {
                 batch: Mutex::new(Some(BatchResult::Err(msg.to_string()))),
                 batch_calls: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
             }
         }
     }
@@ -489,6 +609,10 @@ mod tests {
             _settlements: Vec<Settlement>,
         ) -> TraitResult<Vec<SettlementTransaction>> {
             self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            self.sent
+                .lock()
+                .unwrap()
+                .extend(_settlements.iter().map(|s| s.id));
             match self.batch.lock().unwrap().take() {
                 Some(BatchResult::Ok(r)) => Ok(r),
                 Some(BatchResult::Err(m)) => Err(ApiError::Blockchain(m)),
@@ -620,6 +744,90 @@ mod tests {
         // The unminted one (and only it) is reset for retry.
         let reset = repo.reset_ids.lock().unwrap();
         assert_eq!(*reset, vec![unminted]);
+    }
+
+    /// A settlement whose order has lapsed is parked terminally WITHOUT an on-chain
+    /// attempt, while its live batch-mate settles normally. The chain rejects a lapsed
+    /// order, so attempting it would waste a round trip per worker tick and then park it
+    /// with the generic unminted reason — five retries later and blaming the wrong thing.
+    #[tokio::test]
+    async fn lapsed_settlement_is_parked_without_a_chain_attempt() {
+        let live = Uuid::new_v4();
+        let lapsed = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim_and_lapsed(
+            vec![make_settlement(live), make_settlement(lapsed)],
+            vec![lapsed],
+        ));
+        let chain = Arc::new(FakeChain::ok(vec![tx_for(live, "SIG_LIVE")]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(live), make_settlement(lapsed)])
+            .await
+            .expect("the live settlement should still settle");
+
+        // The doomed settlement never reached the chain; the live one did.
+        assert_eq!(*chain.sent.lock().unwrap(), vec![live]);
+        assert_eq!(out.len(), 1);
+
+        // Parked terminally, with the real cause…
+        let plain = repo.completed_plain.lock().unwrap();
+        assert_eq!(plain.len(), 1, "exactly one status write for the lapsed row");
+        assert_eq!(plain[0].0, lapsed);
+        assert_eq!(plain[0].1, SettlementStatus::PermanentlyFailed.to_string());
+        // …and NOT queued for a retry that could never succeed.
+        assert!(
+            repo.reset_ids.lock().unwrap().is_empty(),
+            "a lapsed settlement must not consume the retry budget"
+        );
+    }
+
+    /// When every claimed settlement is lapsed there is nothing to send, so the chain is
+    /// not called at all (rather than being handed an empty/doomed batch).
+    #[tokio::test]
+    async fn all_lapsed_skips_the_chain_entirely() {
+        let lapsed = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim_and_lapsed(
+            vec![make_settlement(lapsed)],
+            vec![lapsed],
+        ));
+        let chain = Arc::new(FakeChain::ok(vec![]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(lapsed)])
+            .await
+            .expect("an all-lapsed batch is not an error");
+
+        assert!(out.is_empty());
+        assert_eq!(chain.batch_calls.load(Ordering::SeqCst), 0, "no chain call");
+        assert_eq!(
+            repo.completed_plain.lock().unwrap()[0].1,
+            SettlementStatus::PermanentlyFailed.to_string()
+        );
+    }
+
+    /// The pre-flight is an optimisation, never a gate: if the expiry lookup itself
+    /// fails, settlement proceeds for everything. Refusing to settle live trades because
+    /// a helper query is down would be a self-inflicted outage.
+    #[tokio::test]
+    async fn failing_expiry_lookup_still_settles_everything() {
+        let a = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_failing_lapsed_query(vec![make_settlement(a)]));
+        let chain = Arc::new(FakeChain::ok(vec![tx_for(a, "SIG_A")]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(a)])
+            .await
+            .expect("a failed expiry lookup must not block settlement");
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(*chain.sent.lock().unwrap(), vec![a]);
+        assert!(repo.completed_plain.lock().unwrap().is_empty(), "nothing parked");
     }
 
     /// 3. Blockchain error → whole claimed batch reset, settle returns Err, nothing

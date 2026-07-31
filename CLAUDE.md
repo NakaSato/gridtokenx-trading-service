@@ -94,7 +94,14 @@ All collaborators are `Arc<dyn Trait>` traits defined in `trading-core/src/trait
   `MatcherService::request_cycle`, waking it within `MATCHER_DEBOUNCE_MS` (default 5ms) of an order
   landing; `MATCHER_INTERVAL_MS` (default 1s) is only a safety-net tick.
   `MATCHER_REALTIME=false` reverts to tick-only polling.
-- **SettlementWorker** — settles in batches of 10 every 10s via Chain Bridge.
+- **SettlementWorker** — settles in batches of 10 every 10s via Chain Bridge. A claimed
+  settlement whose buy or sell order has **lapsed** is parked `permanently_failed` before any
+  on-chain attempt (`SettlementService::park_lapsed_settlements`): the on-chain paths reject a
+  lapsed order (`OrderExpired`), so retrying is guaranteed to fail and would otherwise burn all
+  5 retries and then blame "not included in on-chain batch result". The pre-flight is an
+  optimisation, never a gate — if its expiry lookup fails, every settlement is attempted as
+  before, because refusing to settle live trades over a broken helper query would be a
+  self-inflicted outage.
 - **SupplySyncWorker** — polls blockchain to sync tokenized supply; graceful-degrades on repeated failure.
 - **OracleConsumer** — consumes oracle readings off the EventBus, feeds settlement.
 - **AuditWorker / OutboxWorker** — async audit logging and transactional-outbox event publishing.

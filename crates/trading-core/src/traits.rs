@@ -194,6 +194,24 @@ pub trait SettlementRepository: Send + Sync {
     /// of a nil/hardcoded UUID that would FK-fail.
     async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid>;
 
+    /// Of `ids`, the settlements whose buy or sell order has already lapsed.
+    ///
+    /// Such a settlement can never land: every on-chain pairing/settlement path
+    /// rejects a lapsed order (`OrderExpired`), so attempting it burns the whole
+    /// retry budget and then parks the row with a misleading generic reason.
+    /// Callers use this to fail it fast, with the real cause, without a doomed
+    /// on-chain round trip.
+    ///
+    /// A NULL order expiry means "no expiry" — the same meaning as the on-chain
+    /// `0` sentinel — and never counts as lapsed.
+    ///
+    /// Defaulted to "none known" so the pre-flight is a pure optimisation: an
+    /// implementation that does not override it (test fakes) leaves the caller
+    /// behaving exactly as it did before, attempting every claimed settlement.
+    async fn settlements_with_lapsed_orders(&self, _ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+        Ok(Vec::new())
+    }
+
     /// Insert an order-match ledger row (the `order_matches` table). Records the
     /// crossing of a buy/sell order; `settlement_id` links it to the settlement
     /// created for the same fill, `zone_id` tags it for sharded analytics.
