@@ -283,10 +283,22 @@ impl SettlementService {
         );
 
         for settlement in claimed.iter().filter(|s| lapsed_set.contains(&s.id)) {
-            let reason = format!(
+            let mut reason = format!(
                 "order expired before settlement (buy {} / sell {}); on-chain settlement would be rejected OrderExpired",
                 settlement.buy_order_id, settlement.sell_order_id
             );
+            // Expiry is usually the LAST thing to go wrong, not the first: an order lapses
+            // while a settlement is already failing for some other reason and being retried
+            // (observed on live data — every stranded settlement examined had minutes of TTL
+            // margin left when it was created). Overwriting `error_message` with the expiry
+            // reason would erase the failure that actually started it and leave the real
+            // cause undiagnosable, so any earlier error is carried forward here.
+            if let Some(prior) = settlement.error_message.as_deref() {
+                reason.push_str(&format!(
+                    "; earlier failure after {} attempt(s), which is the cause to investigate: {}",
+                    settlement.retry_count, prior
+                ));
+            }
             if let Err(e) = self
                 .repo
                 .update_settlement_status(
@@ -399,8 +411,10 @@ mod tests {
         claim_returns: Mutex<Vec<Settlement>>,
         /// (id, status, tx_hash) for every `update_settlement_status_with_event`.
         completed_with_event: Mutex<Vec<(Uuid, String, Option<String>)>>,
-        /// (id, status, tx_hash) for every plain `update_settlement_status`.
-        completed_plain: Mutex<Vec<(Uuid, String, Option<String>)>>,
+        /// (id, status, tx_hash, error_message) for every plain `update_settlement_status`.
+        /// The error is recorded because the expiry pre-flight's whole diagnostic value is
+        /// in what it writes there.
+        completed_plain: Mutex<Vec<(Uuid, String, Option<String>, Option<String>)>>,
         /// ids passed to `reset_settlements_for_retry` (flattened across calls).
         reset_ids: Mutex<Vec<Uuid>>,
         claim_calls: AtomicUsize,
@@ -473,12 +487,13 @@ mod tests {
             id: Uuid,
             status: &str,
             tx_hash: Option<&str>,
-            _error: Option<&str>,
+            error: Option<&str>,
         ) -> TraitResult<()> {
             self.completed_plain.lock().unwrap().push((
                 id,
                 status.to_string(),
                 tx_hash.map(str::to_string),
+                error.map(str::to_string),
             ));
             Ok(())
         }
@@ -807,6 +822,36 @@ mod tests {
             repo.completed_plain.lock().unwrap()[0].1,
             SettlementStatus::PermanentlyFailed.to_string()
         );
+    }
+
+    /// Parking a lapsed settlement must not erase why it was failing in the first place.
+    /// On live data every stranded settlement examined still had minutes of TTL margin when
+    /// it was created — it broke for some other reason, was retried, and only lapsed along
+    /// the way. So expiry is typically the last symptom, and an expiry-only error_message
+    /// would bury the actual cause.
+    #[tokio::test]
+    async fn parking_a_lapsed_settlement_keeps_the_earlier_failure() {
+        let id = Uuid::new_v4();
+        let mut s = make_settlement(id);
+        s.retry_count = 3;
+        s.error_message = Some("escrow account not found".into());
+        let repo = Arc::new(FakeRepo::with_claim_and_lapsed(vec![s.clone()], vec![id]));
+        let chain = Arc::new(FakeChain::ok(vec![]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain, audit);
+
+        svc.execute_batched_settlements(vec![s])
+            .await
+            .expect("all-lapsed batch is not an error");
+
+        let plain = repo.completed_plain.lock().unwrap();
+        let recorded = plain[0].3.clone().expect("a reason is recorded");
+        assert!(recorded.contains("order expired"), "states the expiry: {recorded}");
+        assert!(
+            recorded.contains("escrow account not found"),
+            "must carry the earlier cause forward: {recorded}"
+        );
+        assert!(recorded.contains('3'), "and how many attempts it survived: {recorded}");
     }
 
     /// The pre-flight is an optimisation, never a gate: if the expiry lookup itself
