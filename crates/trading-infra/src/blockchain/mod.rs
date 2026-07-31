@@ -168,13 +168,19 @@ impl BlockchainGateway for BlockchainService {
         })?;
 
         // MUST pass the token program explicitly. `get_token_balance(owner, mint)`
-        // derives the ATA under Token-2022, which is right for energy and wrong
-        // for this mint — the currency mint is owned by the CLASSIC SPL Token
-        // program. Deriving under the wrong program gives a different, unfunded
-        // address, and because a missing ATA is legitimately zero, the caller sees
-        // a confident `0` for a wallet holding real baht instead of an error.
-        // Observed exactly that: 0.000000 reported against 55.0275 on-chain.
-        self.get_token_balance_with_program(&owner, &mint, &spl_token::id())
+        // derives the ATA under Token-2022, which is right for energy and not
+        // necessarily right for this mint. Deriving under the wrong program gives a
+        // different, unfunded address, and because a missing ATA is legitimately
+        // zero, the caller sees a confident `0` for a wallet holding real baht
+        // instead of an error. Observed twice, in both directions: 0.000000 against
+        // 55.0275 on-chain when this derived under Token-2022, and 0.000000 against
+        // 23.925 when it was pinned to classic SPL after CURRENCY_TOKEN_MINT moved
+        // to the treasury's Token-2022 THBC.
+        //
+        // So it is resolved from config rather than hardcoded — the SAME source the
+        // settlement path and the ATA derivations use, which is what stops the read
+        // path and the write path from disagreeing about where the money is.
+        self.get_token_balance_with_program(&owner, &mint, &currency_token_program())
             .await
             .map_err(|e| trading_core::error::ApiError::Internal(e.to_string()))
     }
