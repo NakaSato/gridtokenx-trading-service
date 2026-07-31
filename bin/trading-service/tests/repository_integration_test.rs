@@ -447,6 +447,13 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
     let future = Utc::now() + chrono::Duration::minutes(30);
 
     let mut idx = 0i64;
+    // `Filled`, not `Active`, and deliberately so on two counts. It is what a settled
+    // trade's orders actually look like, and — because the reaper only touches OPEN
+    // statuses — it keeps these rows invisible to `expire_stale_orders`. These fixtures
+    // carry PAST expiries, so if this test ever aborts before its cleanup runs (a failing
+    // assertion, a panic), leftover Active rows would be reaped by
+    // order_expiry_integration_test and fail ITS exact-set assertion. That is not
+    // hypothetical: it happened while this test was being written.
     let make_order = |side: OrderSide, expires_at: Option<chrono::DateTime<Utc>>, i: i64| TradingOrder {
         id: Uuid::new_v4(),
         user_id,
@@ -454,8 +461,8 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
         side,
         energy_amount: dec!(1.0),
         price_per_kwh: dec!(2.0),
-        filled_amount: dec!(0.0),
-        status: OrderStatus::Active,
+        filled_amount: dec!(1.0),
+        status: OrderStatus::Filled,
         expires_at,
         created_at: Some(Utc::now()),
         filled_at: None,
