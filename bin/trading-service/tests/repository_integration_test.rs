@@ -412,3 +412,163 @@ async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
     sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
 }
+
+/// `settlements_with_lapsed_orders` against a real database.
+///
+/// This is the query behind the settlement expiry pre-flight, and it is written with the
+/// runtime SQLx API — nothing checks its columns or joins at compile time, so a typo would
+/// only surface as the pre-flight silently erroring and degrading to "attempt everything".
+/// It is exercised here against the actual schema, with both legs and both boundaries.
+#[tokio::test]
+async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
+    let pool = PgPool::connect(&common::test_db_url())
+        .await
+        .expect("connect to the *_test database");
+    let order_repo = PostgresOrderRepository::new(pool.clone());
+    let settlement_repo = PostgresSettlementRepository::new(pool.clone());
+
+    let user_id = Uuid::new_v4();
+    let epoch_id = Uuid::new_v4();
+    // Id-derived, not wall-clock: parallel tests would collide on epoch_number.
+    let epoch_number = (epoch_id.as_u128() as u64 >> 1) as i64;
+    sqlx::query(
+        "INSERT INTO market_epochs (id, epoch_number, start_time, end_time, status) \
+         VALUES ($1, $2, $3, $4, 'pending')",
+    )
+    .bind(epoch_id)
+    .bind(epoch_number)
+    .bind(Utc::now())
+    .bind(Utc::now() + chrono::Duration::minutes(15))
+    .execute(&pool)
+    .await
+    .expect("insert epoch");
+
+    let past = Utc::now() - chrono::Duration::minutes(5);
+    let future = Utc::now() + chrono::Duration::minutes(30);
+
+    let mut idx = 0i64;
+    let make_order = |side: OrderSide, expires_at: Option<chrono::DateTime<Utc>>, i: i64| TradingOrder {
+        id: Uuid::new_v4(),
+        user_id,
+        order_type: OrderType::Limit,
+        side,
+        energy_amount: dec!(1.0),
+        price_per_kwh: dec!(2.0),
+        filled_amount: dec!(0.0),
+        status: OrderStatus::Active,
+        expires_at,
+        created_at: Some(Utc::now()),
+        filled_at: None,
+        epoch_id: Some(epoch_id),
+        zone_id: Some(1),
+        meter_id: None,
+        refund_tx_signature: None,
+        order_pda: None,
+        order_index: Some(i),
+        session_token: None,
+        blockchain_status: None,
+        blockchain_tx_hash: None,
+        blockchain_error: None,
+        retry_count: 0,
+        time_in_force: TimeInForce::Gtc,
+        market_segment: trading_core::types::MarketSegment::Realtime,
+    };
+
+    // Each case is one settlement over a (buy, sell) pair with the given expiries.
+    let cases: Vec<(&str, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, bool)> = vec![
+        ("both legs no expiry (the NULL sentinel)", None, None, false),
+        ("both legs still live", Some(future), Some(future), false),
+        ("buy leg lapsed", Some(past), Some(future), true),
+        ("sell leg lapsed, buy has no expiry", None, Some(past), true),
+        ("both legs lapsed", Some(past), Some(past), true),
+    ];
+
+    let mut expected_lapsed: Vec<Uuid> = Vec::new();
+    let mut all_ids: Vec<Uuid> = Vec::new();
+    let mut labels: Vec<(Uuid, &str)> = Vec::new();
+
+    for (label, buy_exp, sell_exp, should_be_lapsed) in cases {
+        idx += 1;
+        let buy = make_order(OrderSide::Buy, buy_exp, idx);
+        idx += 1;
+        let sell = make_order(OrderSide::Sell, sell_exp, idx);
+        order_repo.insert_order(&buy).await.expect("insert buy order");
+        order_repo.insert_order(&sell).await.expect("insert sell order");
+
+        let settlement = Settlement {
+            id: Uuid::new_v4(),
+            trade_id: None,
+            epoch_id,
+            buyer_id: user_id,
+            seller_id: user_id,
+            buy_order_id: buy.id,
+            sell_order_id: sell.id,
+            energy_amount: dec!(1.0),
+            price: dec!(2.0),
+            total_amount: dec!(2.0),
+            fee_amount: dec!(0.0),
+            net_amount: dec!(2.0),
+            status: SettlementStatus::Pending,
+            blockchain_tx: None,
+            created_at: Utc::now(),
+            confirmed_at: None,
+            wheeling_charge: None,
+            loss_factor: None,
+            loss_cost: None,
+            effective_energy: None,
+            buyer_zone_id: Some(1),
+            seller_zone_id: Some(1),
+            buyer_session_token: None,
+            seller_session_token: None,
+            erc_certificate_id: None,
+            erc_transfer_tx: None,
+            retry_count: 0,
+            error_message: None,
+        };
+        settlement_repo
+            .insert_settlement(&settlement)
+            .await
+            .expect("insert settlement");
+
+        all_ids.push(settlement.id);
+        labels.push((settlement.id, label));
+        if should_be_lapsed {
+            expected_lapsed.push(settlement.id);
+        }
+    }
+
+    let mut got = settlement_repo
+        .settlements_with_lapsed_orders(&all_ids)
+        .await
+        .expect("the lapsed-order query must run against the real schema");
+    got.sort();
+    let mut want = expected_lapsed.clone();
+    want.sort();
+
+    for (id, label) in &labels {
+        let flagged = got.contains(id);
+        let should = want.contains(id);
+        assert_eq!(flagged, should, "case '{label}' — flagged={flagged}, expected={should}");
+    }
+    assert_eq!(got, want, "exactly the lapsed settlements, nothing else");
+
+    // Only ids that were ASKED about come back: pass a single live settlement and a
+    // single lapsed one, and the other lapsed rows must not leak into the result.
+    let subset = vec![labels[1].0, expected_lapsed[0]];
+    let scoped = settlement_repo
+        .settlements_with_lapsed_orders(&subset)
+        .await
+        .expect("scoped query");
+    assert_eq!(scoped, vec![expected_lapsed[0]], "the query must respect its id filter");
+
+    // Empty input must not become "every lapsed settlement in the table".
+    assert!(settlement_repo
+        .settlements_with_lapsed_orders(&[])
+        .await
+        .expect("empty query")
+        .is_empty());
+
+    sqlx::query("DELETE FROM settlements WHERE epoch_id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+}
