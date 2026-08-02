@@ -453,11 +453,29 @@ impl BlockchainService {
         Ok(pda)
     }
 
-    /// Custodial order placement (Option A): record the order PDA + fund the relevant
-    /// escrow on the user's behalf, all platform-signed (no user signature). A buy
-    /// order funds the buyer's CURRENCY escrow (GRX, classic SPL); a sell order funds
-    /// the seller's ENERGY escrow (GRID, Token-2022). `funder_source` is the platform's
-    /// ATA for that mint (must be pre-funded). Returns (signature, order_pda).
+    /// Custodial order placement (Option A): record the order PDA, platform-signed
+    /// (no user signature). Returns (signature, order_pda).
+    ///
+    /// This deliberately does NOT fund `[b"escrow", user, mint]`. It used to, and the
+    /// transfer was unspendable in both settlement modes:
+    ///
+    /// - **Custodial mode** (`per_user_escrow_settlement = false`, the only mode that
+    ///   reaches this function from REST): `execute_atomic_settlement` is handed the
+    ///   platform's pooled ATA as `buyer_currency_escrow`/`seller_energy_escrow`
+    ///   (`blockchain/settlement.rs:214-220`, which even says
+    ///   `// party ATAs unused for this model`). The per-user escrow PDA is never
+    ///   read, so every placement moved platform tokens into an account settlement
+    ///   ignores — and `withdraw_escrow` lets that user take them
+    ///   (`trading/src/instructions/escrow.rs:166-196`). Nothing refunded them either:
+    ///   `refund_escrow_to_buyer` has no callers. Measured 2026-08-01: 8 THBC parked in
+    ///   one test user's escrow across two buys, one of them cancelled.
+    /// - **Per-user mode**: each party funds their own escrow by wallet-signed
+    ///   `deposit_escrow`, which is the entire point of the flag. Platform-funding it
+    ///   here would defeat that.
+    ///
+    /// So the funding leg is dropped, not made conditional — there is no mode that
+    /// wants it. The pooled ATA still pays the seller in custodial mode; that is the
+    /// model's known economics, not this function's business.
     pub async fn place_order_on_chain(
         &self,
         user_wallet: &Pubkey,
@@ -488,42 +506,8 @@ impl BlockchainService {
             expires_at_unix,
         )?;
 
-        // Pick the mint/program/amount for the escrow this side must fund.
-        let (mint, token_program, fund_amount) = if is_buy {
-            let currency_mint = Pubkey::from_str(
-                &std::env::var("CURRENCY_TOKEN_MINT")
-                    .map_err(|_| anyhow::anyhow!("CURRENCY_TOKEN_MINT unset"))?,
-            )?;
-            // Currency (THBC, 6-dec) owed = energy(kWh, 9-dec atomic) * price(6-dec atomic) / 1e9.
-            // NOT GRX: GRX is the 9-dec *energy* mint funded by the sell branch below —
-            // one mint, two role names (see docs/blockchain-tokens.md §1). The /1e9 strips
-            // the energy side's 9-dec scaling, leaving a 6-dec currency amount.
-            let amount = (energy_amount_atomic as u128)
-                .saturating_mul(price_atomic as u128)
-                / 1_000_000_000u128;
-            (
-                currency_mint,
-                crate::blockchain::currency_token_program(),
-                amount as u64,
-            )
-        } else {
-            let energy_mint = self.core.instruction_builder.get_mint_pda()?;
-            (energy_mint, spl_token_2022::id(), energy_amount_atomic)
-        };
-
-        let funder_source =
-            self.calculate_ata_address_with_program(&funder, &mint, &token_program)?;
-        let fund_ix = self.core.instruction_builder.build_fund_escrow_custodial_instruction(
-            funder,
-            &mint,
-            funder_source,
-            user_wallet,
-            fund_amount,
-            token_program,
-        )?;
-
         let signature = self
-            .execute_batched_instructions(&[&authority], vec![record_ix, fund_ix])
+            .execute_batched_instructions(&[&authority], vec![record_ix])
             .await?;
 
         // Submission only proves the bridge accepted the tx for broadcast, not that
