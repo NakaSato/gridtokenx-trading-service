@@ -332,14 +332,15 @@ impl PgMeterReadModelRepository {
 /// no such columns, so there is no event/backfill source for them.
 const METER_UPSERT: &str = r#"
     INSERT INTO meter_read_model
-        (serial_number, meter_id, user_id, zone_id, status, updated_at)
-    VALUES ($1, $2, $3, $4, $5, now())
+        (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, now())
     ON CONFLICT (serial_number) DO UPDATE SET
-        meter_id   = EXCLUDED.meter_id,
-        user_id    = EXCLUDED.user_id,
-        zone_id    = EXCLUDED.zone_id,
-        status     = EXCLUDED.status,
-        updated_at = EXCLUDED.updated_at
+        meter_id    = EXCLUDED.meter_id,
+        user_id     = EXCLUDED.user_id,
+        zone_id     = EXCLUDED.zone_id,
+        status      = EXCLUDED.status,
+        is_verified = EXCLUDED.is_verified,
+        updated_at  = EXCLUDED.updated_at
     WHERE meter_read_model.updated_at <= EXCLUDED.updated_at
 "#;
 
@@ -352,6 +353,7 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
             .bind(rec.user_id)
             .bind(rec.zone_id)
             .bind(rec.status.as_deref())
+            .bind(rec.is_verified)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -375,8 +377,9 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
             }
             let res = sqlx::query(
                 r#"INSERT INTO meter_read_model
-                       (serial_number, meter_id, user_id, zone_id, status, updated_at)
-                   SELECT serial_number, id, user_id, zone_id, status, now()
+                       (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
+                   SELECT serial_number, id, user_id, zone_id, status,
+                          COALESCE(is_verified, false), now()
                      FROM meters
                    ON CONFLICT (serial_number) DO NOTHING"#,
             )
@@ -385,8 +388,15 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
             return Ok(res.rows_affected());
         };
 
+        // `is_verified` is the sell-side gate's input, so it is snapshotted from
+        // the source alongside `status` — the two answer different questions
+        // (possession proven vs. operating state) and are not interchangeable.
+        // COALESCE because the source column is nullable; a NULL means "never
+        // verified", which must read as false rather than dropping the row.
         let rows = sqlx::query(
-            r#"SELECT serial_number, id, user_id, zone_id, status FROM meters"#,
+            r#"SELECT serial_number, id, user_id, zone_id, status,
+                      COALESCE(is_verified, false) AS is_verified
+                 FROM meters"#,
         )
         .fetch_all(source)
         .await?;
@@ -395,8 +405,8 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
         for row in rows {
             let res = sqlx::query(
                 r#"INSERT INTO meter_read_model
-                       (serial_number, meter_id, user_id, zone_id, status, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, now())
+                       (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, now())
                    ON CONFLICT (serial_number) DO NOTHING"#,
             )
             .bind(row.get::<String, _>("serial_number"))
@@ -404,6 +414,7 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
             .bind(row.get::<Uuid, _>("user_id"))
             .bind(row.get::<Option<i32>, _>("zone_id"))
             .bind(row.get::<Option<String>, _>("status"))
+            .bind(row.get::<bool, _>("is_verified"))
             .execute(&self.pool)
             .await?;
             inserted += res.rows_affected();

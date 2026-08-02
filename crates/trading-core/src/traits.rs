@@ -689,6 +689,11 @@ pub struct MeterReadModelRecord {
     pub user_id: Uuid,
     pub zone_id: Option<i32>,
     pub status: Option<String>,
+    /// Whether metering has verified possession of the device. Mirrors
+    /// `meters.is_verified`; drives the sell-side gate. Deliberately NOT derived
+    /// from `status` — that column carries the meter's *operating* status
+    /// (`active`/`maintenance`), which is a different question.
+    pub is_verified: bool,
 }
 
 /// Local read-model of IAM `user_wallets` (`iam_wallet_read_model`).
@@ -756,6 +761,31 @@ pub trait MeterRepository: Send + Sync {
     /// `meters.id` → `serial_number` for the given ids. Ids with no meter row
     /// are absent from the map rather than erroring.
     async fn get_serials_for_ids(&self, ids: &[Uuid]) -> TraitResult<HashMap<Uuid, String>>;
+
+    /// Identity + ownership + verification state for a meter named by serial.
+    /// `None` when no such meter is mirrored here.
+    async fn lookup_by_serial(&self, serial: &str) -> TraitResult<Option<MeterIdentity>>;
+
+    /// Same as [`Self::lookup_by_serial`] for a caller that already holds the
+    /// `meters.id` (the gRPC edge and any client passing `meter_id` directly).
+    async fn lookup_by_id(&self, meter_id: Uuid) -> TraitResult<Option<MeterIdentity>>;
+
+    /// Whether `user_id` owns at least one verified meter. Answers the sell-side
+    /// gate for an order that names no meter — without it, omitting
+    /// `meter_serial` would be a one-field bypass of the whole rule.
+    async fn has_verified_meter(&self, user_id: Uuid) -> TraitResult<bool>;
+}
+
+/// A meter as the sell-side gate needs to see it: who owns it and whether
+/// metering has verified possession of the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeterIdentity {
+    /// `meters.id` — what `trading_orders.meter_id` stores.
+    pub meter_id: Uuid,
+    /// Owning user, for the ownership half of the check.
+    pub user_id: Uuid,
+    /// Mirror of `meters.is_verified`.
+    pub is_verified: bool,
 }
 
 /// Virtual Power Plant (VPP) persistence.

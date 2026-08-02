@@ -124,6 +124,60 @@ impl TradingService for TradingGrpcService {
         )
         .map_err(|e| ConnectError::new(ErrorCode::InvalidArgument, e.message()))?;
 
+        // ── Sell-side meter-verification gate ────────────────────────────────
+        // Same rule, same shared policy, as the REST edge: a sell must be backed
+        // by a meter the seller owns and metering has verified. Enforced before
+        // the epoch lookup so a refused order costs no writes.
+        let meter = match (!request.meter_id.is_empty())
+            .then(|| Uuid::parse_str(request.meter_id))
+            .transpose()
+            .map_err(|e| {
+                ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid meter_id: {e}"))
+            })? {
+            Some(id) => Some(
+                self.state
+                    .meter_repo
+                    .lookup_by_id(id)
+                    .await
+                    .map_err(|e| {
+                        error!("meter lookup failed: {e}");
+                        ConnectError::new(ErrorCode::Internal, "Failed to resolve meter")
+                    })?
+                    .ok_or_else(|| {
+                        ConnectError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("unknown meter_id: {id}"),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+
+        let has_verified_meter =
+            if trading_core::order_policy::needs_any_verified_meter_lookup(side, meter.as_ref()) {
+                self.state
+                    .meter_repo
+                    .has_verified_meter(user_id)
+                    .await
+                    .map_err(|e| {
+                        error!("verified-meter lookup failed: {e}");
+                        ConnectError::new(ErrorCode::Internal, "Failed to resolve meter")
+                    })?
+            } else {
+                false
+            };
+        if let Err(e) = trading_core::order_policy::check_sell_eligibility(
+            user_id,
+            side,
+            meter.as_ref(),
+            has_verified_meter,
+        ) {
+            tracing::warn!("sell order from {user_id} refused: {e:?}");
+            // PermissionDenied mirrors REST's 403: well-formed request, caller
+            // simply not authorized to sell yet.
+            return Err(ConnectError::new(ErrorCode::PermissionDenied, e.message()));
+        }
+
         // Resolve the active market epoch so the matcher's settlement and
         // order_matches inserts satisfy their NOT NULL FK to market_epochs.
         let epoch_id = self
@@ -178,11 +232,10 @@ impl TradingService for TradingGrpcService {
             filled_at: None,
             epoch_id: Some(epoch_id),
             zone_id: request.zone_id,
-            meter_id: if request.meter_id.is_empty() {
-                None
-            } else {
-                Uuid::parse_str(request.meter_id).ok()
-            },
+            // Already parsed and existence-checked by the gate above; reuse that
+            // result rather than re-parsing (the old `.ok()` silently dropped a
+            // malformed id, storing NULL for an order the client meant to bind).
+            meter_id: meter.map(|m| m.meter_id),
             refund_tx_signature: None,
             order_pda: None,
             order_index: None,

@@ -44,18 +44,69 @@ struct MockSystem {
     pub published_events: Mutex<Vec<Event>>,
     pub price_alerts: Mutex<Vec<PriceAlert>>,
     pub recurring: Mutex<Vec<RecurringOrder>>,
+    /// Meters this mock knows, as `(serial, identity)`. Backs both meter lookups.
+    pub meters: Mutex<Vec<(String, MeterIdentity)>>,
+    /// What `has_verified_meter` answers for any user.
+    pub seller_has_verified_meter: Mutex<HasVerifiedMeter>,
+}
+
+/// `has_verified_meter`'s answer, wrapped so its `Default` is **true**.
+///
+/// Most tests in this file are not about the sell-side meter gate; defaulting it
+/// to false would turn every existing sell-order test into a 403 about meters.
+/// The gate's own tests set it explicitly.
+pub struct HasVerifiedMeter(pub bool);
+
+impl Default for HasVerifiedMeter {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 #[async_trait]
 impl MeterRepository for MockSystem {
-    async fn resolve_id_by_serial(&self, _serial: &str) -> TraitResult<Option<Uuid>> {
-        Ok(None)
+    async fn resolve_id_by_serial(&self, serial: &str) -> TraitResult<Option<Uuid>> {
+        Ok(self
+            .meters
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(s, _)| s == serial)
+            .map(|(_, m)| m.meter_id))
     }
     async fn get_serials_for_ids(
         &self,
-        _ids: &[Uuid],
+        ids: &[Uuid],
     ) -> TraitResult<std::collections::HashMap<Uuid, String>> {
-        Ok(std::collections::HashMap::new())
+        Ok(self
+            .meters
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, m)| ids.contains(&m.meter_id))
+            .map(|(s, m)| (m.meter_id, s.clone()))
+            .collect())
+    }
+    async fn lookup_by_serial(&self, serial: &str) -> TraitResult<Option<MeterIdentity>> {
+        Ok(self
+            .meters
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(s, _)| s == serial)
+            .map(|(_, m)| *m))
+    }
+    async fn lookup_by_id(&self, meter_id: Uuid) -> TraitResult<Option<MeterIdentity>> {
+        Ok(self
+            .meters
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, m)| m.meter_id == meter_id)
+            .map(|(_, m)| *m))
+    }
+    async fn has_verified_meter(&self, _user_id: Uuid) -> TraitResult<bool> {
+        Ok(self.seller_has_verified_meter.lock().unwrap().0)
     }
 }
 
@@ -2031,4 +2082,180 @@ async fn create_quote_rejects_non_positive_energy() {
         "energy_amount_kwh": "abc", "agreed_price": "4.50"
     })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "non-numeric energy rejected");
+}
+
+// ── Sell-side meter-verification gate ────────────────────────────────────────
+//
+// A prosumer may not open a sell order until the meter behind it is verified.
+// The rule itself is unit-tested in `trading_core::order_policy`; these pin that
+// BOTH submit edges actually reach it, and that a refusal happens before any
+// order row is written.
+
+/// Registers `serial` on the mock as a meter owned by `owner`, and returns its
+/// `meters.id`.
+fn mock_meter(mock: &MockSystem, serial: &str, owner: Uuid, is_verified: bool) -> Uuid {
+    let meter_id = Uuid::new_v4();
+    mock.meters.lock().unwrap().push((
+        serial.to_string(),
+        MeterIdentity { meter_id, user_id: owner, is_verified },
+    ));
+    meter_id
+}
+
+#[tokio::test]
+async fn sell_naming_an_unverified_meter_is_refused_and_stores_nothing() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let seller = Uuid::new_v4();
+    mock_meter(&mock, "SN-UNVERIFIED", seller, false);
+    // Even with another verified meter to their name, the NAMED meter governs.
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
+
+    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
+        "side": "sell", "order_type": "limit",
+        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+        "meter_serial": "SN-UNVERIFIED"
+    }).to_string())).await;
+
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "unverified meter must not sell");
+    assert!(
+        mock.orders.lock().unwrap().is_empty(),
+        "a refused sell must not reach the book — the refusal runs before the insert"
+    );
+}
+
+#[tokio::test]
+async fn sell_naming_a_verified_meter_is_admitted_and_binds_the_meter_id() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let seller = Uuid::new_v4();
+    let meter_id = mock_meter(&mock, "SN-VERIFIED", seller, true);
+    // No blanket verified meter: the named one alone must carry the order.
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(false);
+
+    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
+        "side": "sell", "order_type": "limit",
+        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+        "meter_serial": "SN-VERIFIED"
+    }).to_string())).await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let orders = mock.orders.lock().unwrap();
+    assert_eq!(
+        orders.last().expect("order stored").meter_id,
+        Some(meter_id),
+        "the serial must be resolved to meters.id, not stored raw"
+    );
+}
+
+#[tokio::test]
+async fn sell_naming_someone_elses_meter_is_refused() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let seller = Uuid::new_v4();
+    mock_meter(&mock, "SN-THEIRS", Uuid::new_v4(), true);
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
+
+    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
+        "side": "sell", "order_type": "limit",
+        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+        "meter_serial": "SN-THEIRS"
+    }).to_string())).await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "a verified meter belonging to another user must not back this seller's ask"
+    );
+}
+
+#[tokio::test]
+async fn meterless_sell_requires_a_verified_meter_but_buying_never_does() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let user_id = Uuid::new_v4();
+    // The bypass this closes: omitting meter_serial must not skip the gate.
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(false);
+
+    let body = |side: &str| json!({
+        "side": side, "order_type": "limit",
+        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+    }).to_string();
+
+    let res = request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body("sell"))).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN, "meterless sell without any verified meter");
+
+    // A consumer needs no meter to bid — the gate must not touch buys.
+    let res = request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body("buy"))).await;
+    assert_eq!(res.status(), StatusCode::OK, "buy orders are never gated on meters");
+
+    // Once the seller owns any verified meter, the meterless sell is admitted.
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
+    let res = request(app, "POST", "/api/v1/orders", user_id, Body::from(body("sell"))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn grpc_submit_reaches_the_same_gate() {
+    // The two edges share `order_policy::check_sell_eligibility`; this pins that
+    // gRPC actually calls it, so the rule cannot be enforced on REST only.
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let svc = TradingGrpcService::new(state);
+    let seller = Uuid::new_v4();
+    let unverified = mock_meter(&mock, "SN-GRPC", seller, false);
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(false);
+
+    let sell = |meter_id: String| SubmitOrderRequest {
+        user_id: seller.to_string(),
+        side: "sell".into(),
+        order_type: "limit".into(),
+        energy_amount: 5.0,
+        price_per_kwh: 4.0,
+        zone_id: Some(1),
+        meter_id,
+        ..Default::default()
+    };
+
+    // Named-but-unverified meter → refused.
+    let req = sell(unverified.to_string());
+    assert!(
+        svc.submit_order(ctx(), owned_view(&req)).await.is_err(),
+        "gRPC must refuse a sell on an unverified meter"
+    );
+
+    // No meter named, no verified meter owned → refused (same bypass closed).
+    let req = sell(String::new());
+    assert!(
+        svc.submit_order(ctx(), owned_view(&req)).await.is_err(),
+        "gRPC must refuse a meterless sell from a seller with no verified meter"
+    );
+    assert!(mock.orders.lock().unwrap().is_empty(), "nothing may be stored");
+
+    // A verified meter admits it, and the id is bound to the stored order.
+    let verified = mock_meter(&mock, "SN-GRPC-OK", seller, true);
+    let req = sell(verified.to_string());
+    svc.submit_order(ctx(), owned_view(&req)).await.expect("verified meter admits the sell");
+    assert_eq!(
+        mock.orders.lock().unwrap().last().expect("order stored").meter_id,
+        Some(verified)
+    );
+}
+
+#[tokio::test]
+async fn submit_refuses_a_meter_id_naming_no_known_meter() {
+    // Previously an unknown/malformed meter_id was stored as NULL, which would
+    // silently downgrade a meter-bound sell into an ungated meterless one.
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let seller = Uuid::new_v4();
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
+
+    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
+        "side": "sell", "order_type": "limit",
+        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+        "meter_id": Uuid::new_v4()
+    }).to_string())).await;
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "unknown meter_id is refused");
+    assert!(mock.orders.lock().unwrap().is_empty());
 }

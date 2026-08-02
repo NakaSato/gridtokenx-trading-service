@@ -5,7 +5,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use trading_core::traits::{MeterRepository, TraitResult};
+use trading_core::traits::{MeterIdentity, MeterRepository, TraitResult};
 
 pub struct PostgresMeterRepository {
     pool: PgPool,
@@ -54,5 +54,57 @@ impl MeterRepository for PostgresMeterRepository {
             out.insert(id, serial);
         }
         Ok(out)
+    }
+
+    async fn lookup_by_serial(&self, serial: &str) -> TraitResult<Option<MeterIdentity>> {
+        let row = sqlx::query(
+            "SELECT meter_id, user_id, is_verified FROM meter_read_model WHERE serial_number = $1",
+        )
+        .bind(serial)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|r| {
+            Ok(MeterIdentity {
+                meter_id: r.try_get("meter_id")?,
+                user_id: r.try_get("user_id")?,
+                is_verified: r.try_get("is_verified")?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn lookup_by_id(&self, meter_id: Uuid) -> TraitResult<Option<MeterIdentity>> {
+        let row = sqlx::query(
+            "SELECT meter_id, user_id, is_verified FROM meter_read_model WHERE meter_id = $1",
+        )
+        .bind(meter_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|r| {
+            Ok(MeterIdentity {
+                meter_id: r.try_get("meter_id")?,
+                user_id: r.try_get("user_id")?,
+                is_verified: r.try_get("is_verified")?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn has_verified_meter(&self, user_id: Uuid) -> TraitResult<bool> {
+        // EXISTS, not COUNT: the gate only asks "at least one", and a seller with
+        // a large fleet should not pay to count it on every order. Served by the
+        // partial index `idx_meter_read_model_verified_user`.
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM meter_read_model WHERE user_id = $1 AND is_verified
+             )",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists)
     }
 }

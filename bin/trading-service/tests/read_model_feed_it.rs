@@ -234,33 +234,40 @@ async fn meter_upsert_inserts_then_updates() {
         user_id,
         zone_id: Some(2),
         status: Some("active".to_string()),
+        is_verified: false,
     };
     repo.upsert_meter(&rec).await.expect("insert meter");
 
     // Same serial, changed status → update in place (conflict on serial_number).
+    // `is_verified` flips too: that is the MeterUpdated event a verification
+    // emits, and the sell-side gate reads the result, so the upsert must carry
+    // the transition rather than leaving a stale false behind.
     let updated = MeterReadModelRecord {
         status: Some("suspended".to_string()),
+        is_verified: true,
         ..rec.clone()
     };
     repo.upsert_meter(&updated).await.expect("update meter");
 
-    let (count, status): (i64, Option<String>) = {
+    let (count, status, verified): (i64, Option<String>, bool) = {
         let count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM meter_read_model WHERE serial_number = $1")
                 .bind(&serial)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM meter_read_model WHERE serial_number = $1")
-                .bind(&serial)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        (count, status)
+        let row: (Option<String>, bool) = sqlx::query_as(
+            "SELECT status, is_verified FROM meter_read_model WHERE serial_number = $1",
+        )
+        .bind(&serial)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (count, row.0, row.1)
     };
     assert_eq!(count, 1, "conflict on serial must update, not duplicate");
     assert_eq!(status.as_deref(), Some("suspended"));
+    assert!(verified, "the verification transition must reach the mirror");
 
     cleanup_user(&pool, user_id).await;
 }
@@ -426,14 +433,19 @@ async fn backfill_meters_mirrors_source_rows() {
     for i in 0..2 {
         let serial = format!("bf-sn-{}-{i}", &user_id.to_string()[..8]);
         serials.push(serial.clone());
+        // One verified, one not: the backfill must carry `is_verified` through
+        // per-row, not collapse it to a constant. Note `status` is 'active' for
+        // BOTH — it is the operating status and says nothing about verification,
+        // which is exactly why the gate needs its own column.
         sqlx::query(
-            r#"INSERT INTO meters (id, serial_number, user_id, zone_id, status)
-               VALUES ($1, $2, $3, 1, 'active')
+            r#"INSERT INTO meters (id, serial_number, user_id, zone_id, status, is_verified)
+               VALUES ($1, $2, $3, 1, 'active', $4)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(Uuid::new_v4())
         .bind(&serial)
         .bind(user_id)
+        .bind(i == 0)
         .execute(&pool)
         .await
         .unwrap();
@@ -453,6 +465,19 @@ async fn backfill_meters_mirrors_source_rows() {
             .await
             .unwrap();
     assert_eq!(mirrored, source_count, "read-model must mirror seeded meters");
+
+    let verified: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM meter_read_model WHERE user_id = $1 AND is_verified",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        verified, 1,
+        "backfill must carry is_verified per-row (1 of the 2 seeded meters is verified), \
+         not derive it from the identical 'active' operating status"
+    );
 
     cleanup_user(&pool, user_id).await;
     cleanup_source(&pool, user_id).await;

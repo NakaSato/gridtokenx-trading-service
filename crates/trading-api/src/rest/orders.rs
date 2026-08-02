@@ -14,9 +14,9 @@ use super::*;
     request_body = SubmitOrderRequest,
     responses(
         (status = 200, description = "Order accepted (status `open`)", body = SubmitOrderResponse),
-        (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination", body = String),
+        (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination, or an unknown meter_serial/meter_id", body = String),
         (status = 401, description = "Missing or invalid user id header", body = String),
-        (status = 403, description = "Caller role not allowed", body = String),
+        (status = 403, description = "Caller role not allowed, or a sell order with no verified meter behind it", body = String),
         (status = 500, description = "Database or epoch resolution error", body = String),
     ),
     security(("gateway_role" = [], "user_id" = [])),
@@ -128,12 +128,14 @@ pub async fn submit_order(
 
     // `meter_serial` is the id space every user-facing surface holds (the grid
     // map's node ids). Resolve it to `meters.id` here — sending a serial through
-    // as `meter_id` violates `trading_orders_meter_id_fkey`.
-    let meter_id = match req.meter_serial.as_deref() {
+    // as `meter_id` violates `trading_orders_meter_id_fkey`. The full identity
+    // (owner + verification state) comes back in the same round-trip, because
+    // the sell-side gate below needs it.
+    let meter = match req.meter_serial.as_deref() {
         Some(serial) => {
             let resolved = state
                 .meter_repo
-                .resolve_id_by_serial(serial)
+                .lookup_by_serial(serial)
                 .await
                 .map_err(|e| {
                     (
@@ -148,8 +150,69 @@ pub async fn submit_order(
                 )
             })?)
         }
-        None => req.meter_id,
+        // A client that sent `meter_id` directly gets the same treatment: an id
+        // naming no mirrored meter is refused rather than silently ungated.
+        None => match req.meter_id {
+            Some(id) => Some(
+                state
+                    .meter_repo
+                    .lookup_by_id(id)
+                    .await
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Database error: {}", e),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            format!("unknown meter_id: {id}"),
+                        )
+                    })?,
+            ),
+            None => None,
+        },
     };
+    let meter_id = meter.map(|m| m.meter_id);
+
+    // ── Sell-side meter-verification gate ────────────────────────────────────
+    // Selling energy is a claim to have produced it; the meter is what
+    // substantiates the claim, and registration alone does not — it records an
+    // unproven assertion that a serial is yours. Refuse here, before the row is
+    // inserted and before any on-chain placement, so an ungrounded sell never
+    // reaches the book. Buys are untouched.
+    let has_verified_meter =
+        if trading_core::order_policy::needs_any_verified_meter_lookup(side, meter.as_ref()) {
+            state
+                .meter_repo
+                .has_verified_meter(user.user_id)
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Database error: {}", e),
+                    )
+                })?
+        } else {
+            false
+        };
+    if let Err(e) = trading_core::order_policy::check_sell_eligibility(
+        user.user_id,
+        side,
+        meter.as_ref(),
+        has_verified_meter,
+    ) {
+        tracing::warn!(
+            "sell order from {} refused: {:?} (meter_serial={:?})",
+            user.user_id,
+            e,
+            req.meter_serial
+        );
+        // 403, not 400: the request is well-formed and the caller is
+        // authenticated — they are simply not authorized to sell yet.
+        return Err((axum::http::StatusCode::FORBIDDEN, e.message().to_string()));
+    }
 
     // ── Per-user escrow settlement: verify the wallet signature ──────────────
     // With this flag on, settlement spends the parties' OWN escrow PDAs via

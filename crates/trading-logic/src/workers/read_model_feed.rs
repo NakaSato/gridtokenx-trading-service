@@ -93,6 +93,31 @@ struct MeterData {
     zone_id: Option<i32>,
     #[serde(default)]
     status: Option<String>,
+    /// Explicit verification flag. Absent on events emitted by a meter-service
+    /// older than the sell-side gate — [`MeterData::verified`] falls back to the
+    /// derived `status` string there.
+    #[serde(default)]
+    is_verified: Option<bool>,
+}
+
+impl MeterData {
+    /// Whether this event says the meter is verified — the input to Trading's
+    /// sell-side gate.
+    ///
+    /// Prefers the explicit `is_verified`; falls back to `status == "verified"`
+    /// for events from an older producer. Anything else — including the
+    /// operating status `"active"` that the boot backfill and older producers
+    /// put in this field — reads as NOT verified. That default matters: `status`
+    /// carries two unrelated vocabularies, so treating an unrecognised value as
+    /// verified would fail the gate open for precisely the meters whose state is
+    /// unknown.
+    fn verified(&self) -> bool {
+        self.is_verified.unwrap_or_else(|| {
+            self.status
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("verified"))
+        })
+    }
 }
 
 /// The projection decision derived from a parsed [`FeedEvent`], with all I/O
@@ -171,6 +196,7 @@ fn classify(event: FeedEvent) -> FeedAction {
         },
         "MeterRegistered" | "MeterUpdated" => match serde_json::from_value::<MeterData>(data) {
             Ok(d) => FeedAction::UpsertMeter(MeterReadModelRecord {
+                is_verified: d.verified(),
                 serial_number: d.serial_number,
                 meter_id: d.meter_id,
                 user_id: d.user_id,
@@ -596,7 +622,8 @@ mod tests {
                 "meter_id": mid,
                 "user_id": uid,
                 "zone_id": 7,
-                "status": "active"
+                "status": "active",
+                "is_verified": true
             }
         }));
         match action {
@@ -606,8 +633,79 @@ mod tests {
                 assert_eq!(rec.user_id, uid);
                 assert_eq!(rec.zone_id, Some(7));
                 assert_eq!(rec.status.as_deref(), Some("active"));
+                assert!(rec.is_verified);
             }
             other => panic!("expected UpsertMeter, got {other:?}"),
+        }
+    }
+
+    // ── Verification flag (sell-side gate input) ─────────────────────────────
+
+    /// `is_verified` on the record a `MeterRegistered` payload projects to.
+    fn projected_verified(data: serde_json::Value) -> bool {
+        match classify_envelope(json!({ "event_type": "MeterRegistered", "data": data })) {
+            FeedAction::UpsertMeter(rec) => rec.is_verified,
+            other => panic!("expected UpsertMeter, got {other:?}"),
+        }
+    }
+
+    fn meter_data(extra: serde_json::Value) -> serde_json::Value {
+        let mut base = json!({
+            "serial_number": "SN-V",
+            "meter_id": Uuid::new_v4(),
+            "user_id": Uuid::new_v4(),
+        });
+        let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) else {
+            panic!("both must be objects")
+        };
+        for (k, v) in e {
+            b.insert(k.clone(), v.clone());
+        }
+        base
+    }
+
+    #[test]
+    fn explicit_is_verified_wins_over_status() {
+        // The producer's explicit flag is authoritative, in both directions —
+        // `status` is a derived string and must never override it.
+        assert!(projected_verified(meter_data(
+            json!({ "status": "unverified", "is_verified": true })
+        )));
+        assert!(!projected_verified(meter_data(
+            json!({ "status": "verified", "is_verified": false })
+        )));
+    }
+
+    #[test]
+    fn absent_is_verified_falls_back_to_the_status_string() {
+        // Events from a meter-service older than the gate carry only `status`.
+        assert!(projected_verified(meter_data(
+            json!({ "status": "verified" })
+        )));
+        assert!(projected_verified(meter_data(
+            json!({ "status": "VERIFIED" })
+        )));
+        assert!(!projected_verified(meter_data(
+            json!({ "status": "unverified" })
+        )));
+    }
+
+    #[test]
+    fn unknown_or_missing_status_is_not_verified() {
+        // SECURITY: `status` carries two unrelated vocabularies — the derived
+        // verified/unverified from the event, and the meter's OPERATING status
+        // ('active', from the boot backfill and older producers). An 'active'
+        // meter has proven nothing, so it must not open the sell gate. Anything
+        // unrecognised, including absent, fails CLOSED.
+        for status in [
+            json!({ "status": "active" }),
+            json!({ "status": "maintenance" }),
+            json!({}),
+        ] {
+            assert!(
+                !projected_verified(meter_data(status.clone())),
+                "status {status} must not read as verified"
+            );
         }
     }
 

@@ -52,9 +52,14 @@ API (zero `query!`/`query_as!` macros, no `.sqlx/` dir). Consequences:
 
 ### Migrations
 
-`migrations/` here is empty (only `.keep`). The trading schema is **not** owned by this service —
-the DB is provisioned externally (superproject `just migrate` / IAM). Don't add a
-`sqlx::migrate!` call expecting local migrations; point `DATABASE_URL` at an already-migrated DB.
+`migrations/` is **no longer empty** — since the DB-per-service split Trading owns the
+`gridtokenx_trading` schema and its migrations live here (`docs/db-split-phase1.md`).
+
+**Nothing applies them automatically.** The service has no `sqlx::migrate!` call at boot, and
+there is no CI: apply them yourself with `sqlx migrate run` against `gridtokenx_trading`, then
+point `DATABASE_URL` at the migrated DB. A missing migration surfaces as a runtime column
+error, not a build failure — `cargo` needs no database (runtime SQLx, see above), so the build
+stays green against a stale schema.
 
 ---
 
@@ -182,6 +187,42 @@ Each was accepted with `order_pda = NULL`, matched by the CDA, and its settlemen
 `"not included in on-chain batch result"` — a message naming the symptom, not the cause. `zone_id`
 comes straight from the request and is not validated against initialized markets, so any zone id a
 client invents reproduces it; `scripts/init-zones.sh` (in the superproject) creates missing markets.
+
+## A sell order requires a verified meter
+
+Selling energy is a claim to have produced it, and the meter is the only thing that
+substantiates the claim. Both submit edges refuse a sell (**403** / Connect
+`PermissionDenied`) unless the seller has one, **before** the row is inserted and before any
+on-chain placement — so an ungrounded ask never reaches the book. Buys are untouched: a
+consumer needs no meter to bid.
+
+- **The rule lives once**, in `trading_core::order_policy::check_sell_eligibility` (pure,
+  unit-tested), with `needs_any_verified_meter_lookup` deciding when the extra query is worth
+  taking. REST (`rest/orders.rs`) and gRPC (`handlers.rs`) both call the pair, so the two
+  transports cannot drift — the same reason `resolve_order_price`/`resolve_expires_at` live
+  there.
+- **A sell naming no meter still needs one.** The seller must own at least one verified meter
+  (`MeterRepository::has_verified_meter`), otherwise omitting `meter_serial` would be a
+  one-field bypass of the entire rule.
+- **A meter the seller does not own reports "not yours", never "not verified"** — the second
+  would confirm the serial is registered and disclose its state. An unknown `meter_serial` /
+  `meter_id` is a 400: it used to be stored as NULL, silently downgrading a meter-bound sell
+  into an ungated meterless one.
+- **The input is `meter_read_model.is_verified`**, mirrored from metering `meters.is_verified`
+  by the `MeterRegistered`/`MeterUpdated` feed + boot backfill. It is deliberately **not**
+  derived from `meter_read_model.status`: that column holds three vocabularies (`'active'`
+  from the backfill = the meter's *operating* status; `'verified'`/`'unverified'` from the
+  event; `'active'` again as the DDL default), so reading it would treat a backfilled meter as
+  verified and fail the gate **open**. The feed prefers the event's explicit `is_verified` and
+  falls back to `status == "verified"` only for older producers; anything unrecognised reads
+  as unverified.
+- **Migration `20260801000000` grandfathers pre-existing rows to verified.** Every meter
+  mirrored before this feature was auto-verified at registration under the old rule; starting
+  them false would have revoked the sell right of every prosumer already trading. The column
+  DEFAULT is `false`, so any future insert path that forgets it fails closed.
+- Meters become verified via meter-service `POST /api/v1/me/meters/{serial}/verify`, which
+  attests against signature-verified telemetry. Test harnesses that only exercise the CDA seed
+  the projection directly — `tests/e2e/lib/db.py::ensure_sellable` in the superproject.
 
 ## Domain notes
 

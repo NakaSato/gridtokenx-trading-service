@@ -6,7 +6,9 @@
 //! identical. Keep it here, once, as pure sync logic so the edges can't drift.
 
 use rust_decimal::Decimal;
+use uuid::Uuid;
 
+use crate::traits::MeterIdentity;
 use crate::types::{OrderSide, OrderType, TimeInForce};
 
 /// Ceiling bid for a market BUY with no slippage cap: above any realistic energy
@@ -235,10 +237,205 @@ fn check_window(
     Ok(at)
 }
 
+// ── Sell-side meter-verification gate ────────────────────────────────────────
+
+/// Why a sell order was refused on meter grounds. Each edge maps these to its
+/// own transport error, like [`OrderPriceError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SellEligibilityError {
+    /// The order named a meter the seller does not own. Deliberately not
+    /// distinguished from "no such meter": a distinct error would turn order
+    /// submission into an oracle for which serials exist and who holds them.
+    MeterNotOwned,
+    /// The seller owns the named meter, but metering has not verified possession
+    /// of the device. This is the headline rule.
+    MeterUnverified,
+    /// The order named no meter and the seller owns no verified meter at all.
+    /// Without this case, omitting `meter_serial` would bypass the entire gate.
+    NoVerifiedMeter,
+}
+
+impl SellEligibilityError {
+    /// Client-facing message, shared verbatim by the REST and gRPC edges.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MeterNotOwned => "the meter named on this order is not registered to you",
+            Self::MeterUnverified => {
+                "this meter is not verified — verify it (POST /api/v1/me/meters/{serial}/verify) before opening a sell order"
+            }
+            Self::NoVerifiedMeter => {
+                "you have no verified meter — register a meter and verify it (POST /api/v1/me/meters/{serial}/verify) before selling energy"
+            }
+        }
+    }
+}
+
+/// Whether the edge must look up "does this seller own any verified meter?".
+///
+/// Exists so the extra query is taken **only** on the path that needs it — a buy
+/// order, or a sell that already names a meter, must not pay for it. Pairing it
+/// with [`check_sell_eligibility`] keeps the decision of *when to ask* in the
+/// same shared place as the decision of *what the answer means*, so the REST and
+/// gRPC edges cannot drift on either half.
+#[must_use]
+pub fn needs_any_verified_meter_lookup(side: OrderSide, meter: Option<&MeterIdentity>) -> bool {
+    matches!(side, OrderSide::Sell) && meter.is_none()
+}
+
+/// Decide whether `seller` may open this sell order.
+///
+/// Selling energy is a claim to have produced it, and the meter is the only
+/// thing that substantiates the claim. Registration alone does not: it records
+/// an unproven assertion that a serial belongs to you. So a sell is admitted
+/// only when a meter the seller owns has been verified by metering.
+///
+/// Buy orders are unaffected — a consumer needs no meter to bid.
+///
+/// `seller_has_verified_meter` is only consulted when no meter is named; pass
+/// `false` when [`needs_any_verified_meter_lookup`] says the lookup is not
+/// needed, since it is then unused.
+///
+/// # Errors
+/// Returns [`SellEligibilityError`] when the seller has not substantiated the
+/// claim: the named meter is not theirs, is unverified, or they own no verified
+/// meter at all.
+pub fn check_sell_eligibility(
+    seller: Uuid,
+    side: OrderSide,
+    meter: Option<&MeterIdentity>,
+    seller_has_verified_meter: bool,
+) -> Result<(), SellEligibilityError> {
+    if !matches!(side, OrderSide::Sell) {
+        return Ok(());
+    }
+
+    let Some(meter) = meter else {
+        return if seller_has_verified_meter {
+            Ok(())
+        } else {
+            Err(SellEligibilityError::NoVerifiedMeter)
+        };
+    };
+
+    // Ownership first: an unverified meter belonging to someone else must report
+    // "not yours", never "not verified" — the latter would confirm the serial is
+    // registered and tell the caller what state it is in.
+    if meter.user_id != seller {
+        return Err(SellEligibilityError::MeterNotOwned);
+    }
+    if !meter.is_verified {
+        return Err(SellEligibilityError::MeterUnverified);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    // ── Sell-side meter-verification gate ────────────────────────────────────
+
+    fn meter(owner: Uuid, is_verified: bool) -> MeterIdentity {
+        MeterIdentity {
+            meter_id: Uuid::new_v4(),
+            user_id: owner,
+            is_verified,
+        }
+    }
+
+    #[test]
+    fn sell_with_own_verified_meter_is_admitted() {
+        let seller = Uuid::new_v4();
+        assert_eq!(
+            check_sell_eligibility(seller, OrderSide::Sell, Some(&meter(seller, true)), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn sell_with_own_unverified_meter_is_refused() {
+        // The headline rule: registration is a claim, verification is the proof.
+        let seller = Uuid::new_v4();
+        assert_eq!(
+            check_sell_eligibility(seller, OrderSide::Sell, Some(&meter(seller, false)), false),
+            Err(SellEligibilityError::MeterUnverified)
+        );
+    }
+
+    #[test]
+    fn owning_another_verified_meter_does_not_excuse_the_named_one() {
+        // `seller_has_verified_meter = true` must NOT rescue an order that names
+        // a specific unverified meter — otherwise one verified meter would
+        // launder every other meter the seller owns.
+        let seller = Uuid::new_v4();
+        assert_eq!(
+            check_sell_eligibility(seller, OrderSide::Sell, Some(&meter(seller, false)), true),
+            Err(SellEligibilityError::MeterUnverified)
+        );
+    }
+
+    #[test]
+    fn sell_naming_someone_elses_meter_is_refused_as_not_owned() {
+        let seller = Uuid::new_v4();
+        let stranger = Uuid::new_v4();
+        // Verified or not, another user's meter reports the same error — the
+        // response must not disclose the meter's verification state.
+        for verified in [true, false] {
+            assert_eq!(
+                check_sell_eligibility(
+                    seller,
+                    OrderSide::Sell,
+                    Some(&meter(stranger, verified)),
+                    true
+                ),
+                Err(SellEligibilityError::MeterNotOwned)
+            );
+        }
+    }
+
+    #[test]
+    fn sell_without_a_meter_requires_any_verified_meter() {
+        // Closes the bypass: omitting meter_serial must not skip the gate.
+        let seller = Uuid::new_v4();
+        assert_eq!(
+            check_sell_eligibility(seller, OrderSide::Sell, None, false),
+            Err(SellEligibilityError::NoVerifiedMeter)
+        );
+        assert_eq!(
+            check_sell_eligibility(seller, OrderSide::Sell, None, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn buy_orders_are_never_gated() {
+        // A consumer needs no meter to bid, with or without one named.
+        let buyer = Uuid::new_v4();
+        let stranger = Uuid::new_v4();
+        assert_eq!(
+            check_sell_eligibility(buyer, OrderSide::Buy, None, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_sell_eligibility(buyer, OrderSide::Buy, Some(&meter(stranger, false)), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn any_verified_lookup_is_taken_only_for_a_meterless_sell() {
+        let owner = Uuid::new_v4();
+        let m = meter(owner, true);
+        assert!(needs_any_verified_meter_lookup(OrderSide::Sell, None));
+        assert!(
+            !needs_any_verified_meter_lookup(OrderSide::Sell, Some(&m)),
+            "a named meter already answers the question — don't pay for the query"
+        );
+        assert!(!needs_any_verified_meter_lookup(OrderSide::Buy, None));
+        assert!(!needs_any_verified_meter_lookup(OrderSide::Buy, Some(&m)));
+    }
 
     #[test]
     fn market_buy_no_cap_uses_ceiling() {
