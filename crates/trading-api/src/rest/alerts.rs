@@ -4,7 +4,11 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{Deserialize, ToSchema, Serialize, PriceAlert, PriceAlertResponse, AlertStatus, CreatePriceAlertRequest, State, Json, ServiceRole, UserContext, AppState, Decimal, FromStr, AlertCondition, NewPriceAlert, Path, Uuid};
+use super::{
+    AlertCondition, AlertStatus, AppState, CreatePriceAlertRequest, Decimal, Deserialize, FromStr,
+    Json, NewPriceAlert, Path, PriceAlert, PriceAlertResponse, Serialize, ServiceRole, State,
+    ToSchema, UserContext, Uuid,
+};
 
 /// Map a stored alert to the frontend wire shape. `symbol` falls back to "" when
 /// `note` is null; `is_active` is true only while status == active.
@@ -56,7 +60,10 @@ pub async fn create_price_alert(
         .map_err(|_| {
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                format!("Invalid condition: {} (expected above|below|crosses)", req.condition),
+                format!(
+                    "Invalid condition: {} (expected above|below|crosses)",
+                    req.condition
+                ),
             )
         })?;
 
@@ -120,7 +127,9 @@ pub async fn list_price_alerts(
             )
         })?;
 
-    Ok(Json(alerts.iter().map(build_price_alert_response).collect()))
+    Ok(Json(
+        alerts.iter().map(build_price_alert_response).collect(),
+    ))
 }
 
 /// Delete a price alert owned by the user.

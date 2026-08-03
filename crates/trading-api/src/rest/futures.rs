@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{Deserialize, ToSchema, State, ServiceRole, AppState, Json, Uuid, UserContext, Path};
+use super::{AppState, Deserialize, Json, Path, ServiceRole, State, ToSchema, UserContext, Uuid};
 
 /// List futures products.
 #[utoipa::path(

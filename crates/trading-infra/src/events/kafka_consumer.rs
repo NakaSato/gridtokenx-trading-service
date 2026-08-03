@@ -42,7 +42,11 @@ impl KafkaConsumer {
     /// Subscribe to configured topics and seek to start of history.
     #[allow(clippy::unused_async)] // API symmetry with the other subscribe paths
     pub async fn subscribe_from_beginning(&self) -> Result<()> {
-        let topic_names: Vec<&str> = self.topics.iter().map(std::string::String::as_str).collect();
+        let topic_names: Vec<&str> = self
+            .topics
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         self.consumer.subscribe(&topic_names)?;
 
         info!("Subscribed to topics: {:?}", topic_names);
@@ -129,7 +133,11 @@ impl KafkaConsumer {
         F: Fn(Event) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        let topic_names: Vec<&str> = self.topics.iter().map(std::string::String::as_str).collect();
+        let topic_names: Vec<&str> = self
+            .topics
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         self.consumer.subscribe(&topic_names)?;
 
         info!(

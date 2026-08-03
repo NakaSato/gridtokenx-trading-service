@@ -5,7 +5,7 @@ use trading_core::traits::IdentityGateway;
 use uuid::Uuid;
 
 /// A Solana Signer implementation that delegates signing to the IAM Identity Service.
-/// Note: Since the Signer trait is synchronous but gRPC is asynchronous, 
+/// Note: Since the Signer trait is synchronous but gRPC is asynchronous,
 /// we use a `block_on` or specialized handling for the synchronous methods.
 pub struct CustodialSigner {
     user_id: Uuid,
@@ -48,11 +48,12 @@ impl Signer for CustodialSigner {
 
         let sig_bytes = tokio::task::block_in_place(|| {
             handle.block_on(async move {
-                gateway.sign_message(user_id, wallet_address, message_vec).await
+                gateway
+                    .sign_message(user_id, wallet_address, message_vec)
+                    .await
             })
-        }).map_err(|e| {
-            solana_sdk::signer::SignerError::Custom(format!("IAM signing failed: {e}"))
-        })?;
+        })
+        .map_err(|e| solana_sdk::signer::SignerError::Custom(format!("IAM signing failed: {e}")))?;
 
         Signature::try_from(sig_bytes.as_slice()).map_err(|e| {
             solana_sdk::signer::SignerError::Custom(format!("Invalid signature received: {e}"))

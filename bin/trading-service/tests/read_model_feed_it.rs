@@ -178,7 +178,11 @@ async fn promoting_second_wallet_demotes_first() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(primaries, vec!["wallet-B".to_string()], "only B stays primary");
+    assert_eq!(
+        primaries,
+        vec!["wallet-B".to_string()],
+        "only B stays primary"
+    );
 
     cleanup_user(&pool, user_id).await;
 }
@@ -267,7 +271,10 @@ async fn meter_upsert_inserts_then_updates() {
     };
     assert_eq!(count, 1, "conflict on serial must update, not duplicate");
     assert_eq!(status.as_deref(), Some("suspended"));
-    assert!(verified, "the verification transition must reach the mirror");
+    assert!(
+        verified,
+        "the verification transition must reach the mirror"
+    );
 
     cleanup_user(&pool, user_id).await;
 }
@@ -464,7 +471,10 @@ async fn backfill_meters_mirrors_source_rows() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(mirrored, source_count, "read-model must mirror seeded meters");
+    assert_eq!(
+        mirrored, source_count,
+        "read-model must mirror seeded meters"
+    );
 
     let verified: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM meter_read_model WHERE user_id = $1 AND is_verified",

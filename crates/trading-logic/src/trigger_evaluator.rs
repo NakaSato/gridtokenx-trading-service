@@ -78,7 +78,10 @@ impl TriggerEvaluator {
         }
 
         if fired > 0 {
-            info!("Trigger evaluator fired {} price alert(s) at price {}", fired, price);
+            info!(
+                "Trigger evaluator fired {} price alert(s) at price {}",
+                fired, price
+            );
         }
         Ok(fired)
     }
@@ -133,21 +136,37 @@ mod tests {
     fn above_fires_at_or_over_target() {
         assert!(condition_met(AlertCondition::Above, dec!(0.30), dec!(0.25)));
         assert!(condition_met(AlertCondition::Above, dec!(0.25), dec!(0.25)));
-        assert!(!condition_met(AlertCondition::Above, dec!(0.20), dec!(0.25)));
+        assert!(!condition_met(
+            AlertCondition::Above,
+            dec!(0.20),
+            dec!(0.25)
+        ));
     }
 
     #[test]
     fn below_fires_at_or_under_target() {
         assert!(condition_met(AlertCondition::Below, dec!(0.20), dec!(0.25)));
         assert!(condition_met(AlertCondition::Below, dec!(0.25), dec!(0.25)));
-        assert!(!condition_met(AlertCondition::Below, dec!(0.30), dec!(0.25)));
+        assert!(!condition_met(
+            AlertCondition::Below,
+            dec!(0.30),
+            dec!(0.25)
+        ));
     }
 
     #[test]
     fn crosses_fires_within_band() {
         // 0.1% of 0.25 = 0.00025
-        assert!(condition_met(AlertCondition::Crosses, dec!(0.2502), dec!(0.25)));
-        assert!(!condition_met(AlertCondition::Crosses, dec!(0.26), dec!(0.25)));
+        assert!(condition_met(
+            AlertCondition::Crosses,
+            dec!(0.2502),
+            dec!(0.25)
+        ));
+        assert!(!condition_met(
+            AlertCondition::Crosses,
+            dec!(0.26),
+            dec!(0.25)
+        ));
     }
 
     fn book_entry(side: OrderSide, price: Decimal) -> OrderBookEntry {
@@ -194,7 +213,12 @@ mod tests {
         async fn get_active_alerts(&self) -> TraitResult<Vec<PriceAlert>> {
             Ok(self.active.lock().unwrap().clone())
         }
-        async fn mark_triggered_with_event(&self, id: Uuid, price: Decimal, _event: &Event) -> TraitResult<()> {
+        async fn mark_triggered_with_event(
+            &self,
+            id: Uuid,
+            price: Decimal,
+            _event: &Event,
+        ) -> TraitResult<()> {
             self.triggered.lock().unwrap().push((id, price));
             Ok(())
         }
@@ -221,20 +245,68 @@ mod tests {
         async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
             Ok(self.book.clone())
         }
-        async fn insert_order(&self, _order: &TradingOrder) -> TraitResult<()> { unimplemented!() }
-        async fn insert_order_with_event(&self, _order: &TradingOrder, _event: &Event) -> TraitResult<()> { unimplemented!() }
-        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { unimplemented!() }
-        async fn get_order(&self, _id: Uuid) -> TraitResult<Option<TradingOrder>> { unimplemented!() }
-        async fn get_orders_by_user(&self, _u: Uuid, _l: i64, _o: i64) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
-        async fn get_active_orders_by_zone(&self, _z: i32) -> TraitResult<Vec<OrderBookEntry>> { unimplemented!() }
-        async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
-        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> { unimplemented!() }
-        async fn update_filled_amount(&self, _id: Uuid, _f: Decimal, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
-        async fn update_filled_amount_with_event(&self, _id: Uuid, _f: Decimal, _s: OrderStatus, _e: &Event) -> TraitResult<()> { unimplemented!() }
-        async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
-        async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
-        async fn cancel_order(&self, _id: Uuid, _u: Uuid) -> TraitResult<bool> { unimplemented!() }
-        async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
+        async fn insert_order(&self, _order: &TradingOrder) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn insert_order_with_event(
+            &self,
+            _order: &TradingOrder,
+            _event: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+            unimplemented!()
+        }
+        async fn get_order(&self, _id: Uuid) -> TraitResult<Option<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn get_orders_by_user(
+            &self,
+            _u: Uuid,
+            _l: i64,
+            _o: i64,
+        ) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn get_active_orders_by_zone(&self, _z: i32) -> TraitResult<Vec<OrderBookEntry>> {
+            unimplemented!()
+        }
+        async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_filled_amount(
+            &self,
+            _id: Uuid,
+            _f: Decimal,
+            _s: OrderStatus,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_filled_amount_with_event(
+            &self,
+            _id: Uuid,
+            _f: Decimal,
+            _s: OrderStatus,
+            _e: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, _id: Uuid, _u: Uuid) -> TraitResult<bool> {
+            unimplemented!()
+        }
+        async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
     }
 
     /// Current price = midpoint of best bid (0.20) and best ask (0.30) = 0.25; an
@@ -246,23 +318,36 @@ mod tests {
         let alerts = Arc::new(MockAlertRepo::default());
         alerts.active.lock().unwrap().push(a);
         let orders = Arc::new(MockOrderRepo {
-            book: vec![book_entry(OrderSide::Buy, dec!(0.20)), book_entry(OrderSide::Sell, dec!(0.30))],
+            book: vec![
+                book_entry(OrderSide::Buy, dec!(0.20)),
+                book_entry(OrderSide::Sell, dec!(0.30)),
+            ],
         });
 
         let evaluator = TriggerEvaluator::new(alerts.clone(), orders);
         let fired = evaluator.run_cycle().await.unwrap();
 
         assert_eq!(fired, 1);
-        assert_eq!(alerts.triggered.lock().unwrap().as_slice(), &[(alert_id, dec!(0.25))]);
+        assert_eq!(
+            alerts.triggered.lock().unwrap().as_slice(),
+            &[(alert_id, dec!(0.25))]
+        );
     }
 
     /// An alert whose condition the current price does not satisfy is not fired.
     #[tokio::test]
     async fn run_cycle_skips_unmet_alert() {
         let alerts = Arc::new(MockAlertRepo::default());
-        alerts.active.lock().unwrap().push(alert(AlertCondition::Above, dec!(0.40))); // mid 0.25 < 0.40
+        alerts
+            .active
+            .lock()
+            .unwrap()
+            .push(alert(AlertCondition::Above, dec!(0.40))); // mid 0.25 < 0.40
         let orders = Arc::new(MockOrderRepo {
-            book: vec![book_entry(OrderSide::Buy, dec!(0.20)), book_entry(OrderSide::Sell, dec!(0.30))],
+            book: vec![
+                book_entry(OrderSide::Buy, dec!(0.20)),
+                book_entry(OrderSide::Sell, dec!(0.30)),
+            ],
         });
 
         let evaluator = TriggerEvaluator::new(alerts.clone(), orders);
@@ -276,7 +361,11 @@ mod tests {
     #[tokio::test]
     async fn run_cycle_noop_on_empty_book() {
         let alerts = Arc::new(MockAlertRepo::default());
-        alerts.active.lock().unwrap().push(alert(AlertCondition::Above, dec!(0.01)));
+        alerts
+            .active
+            .lock()
+            .unwrap()
+            .push(alert(AlertCondition::Above, dec!(0.01)));
         let orders = Arc::new(MockOrderRepo { book: vec![] });
 
         let evaluator = TriggerEvaluator::new(alerts.clone(), orders);

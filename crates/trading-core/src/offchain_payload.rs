@@ -148,13 +148,13 @@ mod tests {
         // Pinned byte-for-byte — this is the cross-language contract. The TS test
         // in the frontend asserts this exact string for the same inputs.
         let expected = concat!(
-            "0102030405060708090a0b0c0d0e0f10",                                 // order_id
+            "0102030405060708090a0b0c0d0e0f10", // order_id
             "abababababababababababababababababababababababababababababababab", // user (32B)
-            "00f2052a01000000",                                                 // 5_000_000_000 LE
-            "a025260000000000",                                                 // 2_500_000 LE
-            "01",                                                               // side = sell
-            "01000000",                                                         // zone_id = 1
-            "00d2496b00000000",                                                 // 1_800_000_000 LE
+            "00f2052a01000000",                 // 5_000_000_000 LE
+            "a025260000000000",                 // 2_500_000 LE
+            "01",                               // side = sell
+            "01000000",                         // zone_id = 1
+            "00d2496b00000000",                 // 1_800_000_000 LE
         );
         assert_eq!(hex(&fixture()), expected);
     }

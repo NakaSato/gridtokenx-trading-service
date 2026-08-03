@@ -105,7 +105,13 @@ async fn test_expire_stale_orders_e2e() {
 
     // A,D: open + already expired → must be reaped.
     let a = insert(OrderStatus::Active, OrderSide::Buy, dec!(0.0), Some(past)).await;
-    let d = insert(OrderStatus::PartiallyFilled, OrderSide::Sell, dec!(4.0), Some(past)).await;
+    let d = insert(
+        OrderStatus::PartiallyFilled,
+        OrderSide::Sell,
+        dec!(4.0),
+        Some(past),
+    )
+    .await;
     // B: open but not yet expired. C: open, never expires. E: terminal (filled),
     // expired — its status is outside the open set, so the reaper ignores it.
     let b = insert(OrderStatus::Active, OrderSide::Buy, dec!(0.0), Some(future)).await;
@@ -155,7 +161,10 @@ async fn test_expire_stale_orders_e2e() {
         .await
         .unwrap()
         .get("n");
-        assert!(count >= 1, "reaped order {id} must have an OrderUpdate event");
+        assert!(
+            count >= 1,
+            "reaped order {id} must have an OrderUpdate event"
+        );
     }
 
     // Cleanup — orders no longer cascade away with their owner: the
@@ -252,13 +261,23 @@ async fn test_fill_does_not_resurrect_terminal_order() {
     let repo = PostgresOrderRepository::new(pool.clone());
 
     // Terminal row: fill must be a no-op.
-    repo.update_filled_amount_with_event(t, dec!(10.0), OrderStatus::Filled, &ev(t, dec!(10.0), OrderStatus::Filled))
-        .await
-        .expect("update on terminal order returns Ok (no-op)");
+    repo.update_filled_amount_with_event(
+        t,
+        dec!(10.0),
+        OrderStatus::Filled,
+        &ev(t, dec!(10.0), OrderStatus::Filled),
+    )
+    .await
+    .expect("update on terminal order returns Ok (no-op)");
     // Live row: fill applies.
-    repo.update_filled_amount_with_event(l, dec!(10.0), OrderStatus::Filled, &ev(l, dec!(10.0), OrderStatus::Filled))
-        .await
-        .expect("update on live order");
+    repo.update_filled_amount_with_event(
+        l,
+        dec!(10.0),
+        OrderStatus::Filled,
+        &ev(l, dec!(10.0), OrderStatus::Filled),
+    )
+    .await
+    .expect("update on live order");
 
     let status_of = |id: Uuid| {
         let pool = pool.clone();
@@ -271,7 +290,11 @@ async fn test_fill_does_not_resurrect_terminal_order() {
                 .get::<String, _>("status")
         }
     };
-    assert_eq!(status_of(t).await, "expired", "terminal order NOT resurrected to filled");
+    assert_eq!(
+        status_of(t).await,
+        "expired",
+        "terminal order NOT resurrected to filled"
+    );
     assert_eq!(status_of(l).await, "filled", "live order filled");
 
     // The terminal no-op emits no outbox event; the live fill emits exactly one.
@@ -289,8 +312,15 @@ async fn test_fill_does_not_resurrect_terminal_order() {
             .get::<i64, _>("n")
         }
     };
-    assert_eq!(event_count(t).await, 0, "no phantom fill event for terminal order");
-    assert!(event_count(l).await >= 1, "live fill emits an OrderUpdate event");
+    assert_eq!(
+        event_count(t).await,
+        0,
+        "no phantom fill event for terminal order"
+    );
+    assert!(
+        event_count(l).await >= 1,
+        "live fill emits an OrderUpdate event"
+    );
 
     // Explicit order cleanup — no cross-domain FK cascade any more (see above).
     sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")

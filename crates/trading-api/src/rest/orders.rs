@@ -4,7 +4,13 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{info, Serialize, ToSchema, SubmitOrderRequest, SubmitOrderResponse, State, Json, ServiceRole, UserContext, AppState, Decimal, FromStr, OrderSide, OrderType, TimeInForce, Uuid, TradingOrder, OrderStatus, OrderBookResponse, Path, ActiveOrderMetersResponse, ActiveOrderMeter, HashMap, ListOrdersResponse, ListOrdersParams, Query, OrderData, Pagination, QuoteRequest, QuoteResponse, QuoteBreakdown, dec_f64, GridMetrics};
+use super::{
+    dec_f64, info, ActiveOrderMeter, ActiveOrderMetersResponse, AppState, Decimal, FromStr,
+    GridMetrics, HashMap, Json, ListOrdersParams, ListOrdersResponse, OrderBookResponse, OrderData,
+    OrderSide, OrderStatus, OrderType, Pagination, Path, Query, QuoteBreakdown, QuoteRequest,
+    QuoteResponse, Serialize, ServiceRole, State, SubmitOrderRequest, SubmitOrderResponse,
+    TimeInForce, ToSchema, TradingOrder, UserContext, Uuid,
+};
 
 /// Submit a spot order (limit or market) into the CDA or interval market.
 #[utoipa::path(
@@ -62,7 +68,12 @@ pub async fn submit_order(
         _ => OrderType::Limit,
     };
 
-    let time_in_force = match req.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
+    let time_in_force = match req
+        .time_in_force
+        .as_deref()
+        .map(str::to_lowercase)
+        .as_deref()
+    {
         // A market order with no explicit TIF defaults to IOC — it should fill at
         // whatever's resting and never sit in the book as a price-less GTC order.
         // A limit order defaults to GTC.
@@ -107,7 +118,12 @@ pub async fn submit_order(
     )
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.message().to_string()))?;
 
-    let market_segment = match req.market_segment.as_deref().map(str::to_lowercase).as_deref() {
+    let market_segment = match req
+        .market_segment
+        .as_deref()
+        .map(str::to_lowercase)
+        .as_deref()
+    {
         None | Some("realtime") => trading_core::types::MarketSegment::Realtime,
         Some("interval") => trading_core::types::MarketSegment::Interval,
         Some(other) => {
@@ -310,7 +326,9 @@ pub async fn submit_order(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.message().to_string()))?;
 
     let mut order = TradingOrder {
-        id: signed_order.as_ref().map_or_else(Uuid::new_v4, |(id, _, _)| *id),
+        id: signed_order
+            .as_ref()
+            .map_or_else(Uuid::new_v4, |(id, _, _)| *id),
         user_id: user.user_id,
         order_type,
         side,
@@ -356,7 +374,9 @@ pub async fn submit_order(
         && (state.config.trade_settlement_enabled || req.custodial_sign.unwrap_or(false))
     {
         let seed = u64::from_le_bytes(
-            order.id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes"),
+            order.id.as_bytes()[0..8]
+                .try_into()
+                .expect("uuid has 16 bytes"),
         );
         let is_buy = matches!(side, OrderSide::Buy);
         match state
@@ -443,17 +463,18 @@ pub async fn submit_order(
     // event can never be lost relative to the state change (the outbox row is
     // written atomically with the order; OutboxWorker relays it later). Mirrors
     // the ConnectRPC submit path in handlers.rs.
-    let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
-        id: order.id,
-        user_id: order.user_id,
-        order_type: order.order_type.to_string(),
-        side: order.side.to_string(),
-        energy_amount: order.energy_amount,
-        price_per_kwh: order.price_per_kwh,
-        status: order.status.to_string(),
-        zone_id: order.zone_id,
-        created_at: order.created_at,
-    });
+    let event =
+        trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
+            id: order.id,
+            user_id: order.user_id,
+            order_type: order.order_type.to_string(),
+            side: order.side.to_string(),
+            energy_amount: order.energy_amount,
+            price_per_kwh: order.price_per_kwh,
+            status: order.status.to_string(),
+            zone_id: order.zone_id,
+            created_at: order.created_at,
+        });
 
     let insert_res = state
         .order_repo
@@ -508,7 +529,9 @@ pub async fn submit_order(
     Ok(Json(SubmitOrderResponse {
         id: order.id,
         status: "open".to_string(),
-        created_at: order.created_at.unwrap_or_else(gridtokenx_telemetry::time::now),
+        created_at: order
+            .created_at
+            .unwrap_or_else(gridtokenx_telemetry::time::now),
     }))
 }
 
@@ -724,7 +747,11 @@ pub async fn list_orders(
 
     let orders = state
         .order_repo
-        .get_orders_by_user(user.user_id, i64::try_from(limit).unwrap_or(i64::MAX), i64::try_from(offset).unwrap_or(i64::MAX))
+        .get_orders_by_user(
+            user.user_id,
+            i64::try_from(limit).unwrap_or(i64::MAX),
+            i64::try_from(offset).unwrap_or(i64::MAX),
+        )
         .await
         .map_err(|e| {
             (

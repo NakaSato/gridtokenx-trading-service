@@ -88,6 +88,7 @@ pub(crate) fn order_totals(
 /// simply left for the next cycle — orders are re-read from the DB each cycle
 /// (`get_active_*`), so nothing is double-counted, orphaned, or filled-without-
 /// payment. `totals` supplies each order's owner for the `OrderUpdate` events.
+#[allow(clippy::too_many_lines)] // pushed over by rustfmt line-splitting
 pub(crate) async fn persist_matches(
     settlement_repo: &dyn SettlementRepository,
     matches: &[MatchResult],
@@ -153,8 +154,14 @@ pub(crate) async fn persist_matches(
             effective_energy: Some(m.match_amount),
             buyer_zone_id: m.buyer_zone_id,
             seller_zone_id: m.seller_zone_id,
-            buyer_session_token: buy_meta.session_token.as_ref().map(std::string::ToString::to_string),
-            seller_session_token: sell_meta.session_token.as_ref().map(std::string::ToString::to_string),
+            buyer_session_token: buy_meta
+                .session_token
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            seller_session_token: sell_meta
+                .session_token
+                .as_ref()
+                .map(std::string::ToString::to_string),
             erc_certificate_id: None,
             erc_transfer_tx: None,
             retry_count: 0,
@@ -209,7 +216,14 @@ pub(crate) async fn persist_matches(
         };
 
         match settlement_repo
-            .persist_matched_trade(&settlement, &order_match, &matched_event, m.buyer_zone_id, &buyer, &seller)
+            .persist_matched_trade(
+                &settlement,
+                &order_match,
+                &matched_event,
+                m.buyer_zone_id,
+                &buyer,
+                &seller,
+            )
             .await
         {
             Ok(true) => {}

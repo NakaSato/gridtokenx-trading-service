@@ -122,7 +122,8 @@ fn criterion_benchmark(c: &mut Criterion) {
     // Partial overlap exercises price-time priority walking through book depth
     // rather than a single flat price level.
     {
-        let (buys, buy_meta) = make_side(1000, |i| Decimal::new(100 + (i % 50) as i64, 2), one_zone);
+        let (buys, buy_meta) =
+            make_side(1000, |i| Decimal::new(100 + (i % 50) as i64, 2), one_zone);
         let (sells, sell_meta) =
             make_side(1000, |i| Decimal::new(51 + (i % 50) as i64, 2), one_zone);
         bench_scenario(

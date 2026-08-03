@@ -158,7 +158,9 @@ impl RecurringEvaluator {
         });
 
         // Atomic order + outbox event, same as the REST create path.
-        self.order_repo.insert_order_with_event(&order, &event).await
+        self.order_repo
+            .insert_order_with_event(&order, &event)
+            .await
     }
 }
 
@@ -173,7 +175,11 @@ mod tests {
     use trading_core::models::{NewRecurringOrder, OrderBookEntry, TradingOrder};
     use trading_core::types::{IntervalType, OrderStatus, RecurringStatus};
 
-    fn due_rule(side: OrderSide, max_price: Option<Decimal>, min_price: Option<Decimal>) -> RecurringOrder {
+    fn due_rule(
+        side: OrderSide,
+        max_price: Option<Decimal>,
+        min_price: Option<Decimal>,
+    ) -> RecurringOrder {
         RecurringOrder {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
@@ -203,26 +209,49 @@ mod tests {
 
     #[async_trait]
     impl RecurringOrderRepository for MockRecurringRepo {
-        async fn get_due_recurring_orders(&self, _now: DateTime<Utc>) -> TraitResult<Vec<RecurringOrder>> {
+        async fn get_due_recurring_orders(
+            &self,
+            _now: DateTime<Utc>,
+        ) -> TraitResult<Vec<RecurringOrder>> {
             Ok(std::mem::take(&mut self.due.lock().unwrap()))
         }
-        async fn update_after_execution(&self, id: Uuid, _next: DateTime<Utc>, total: i32) -> TraitResult<()> {
+        async fn update_after_execution(
+            &self,
+            id: Uuid,
+            _next: DateTime<Utc>,
+            total: i32,
+        ) -> TraitResult<()> {
             self.advanced.lock().unwrap().push((id, total));
             Ok(())
         }
-        async fn create_recurring_order(&self, _input: NewRecurringOrder) -> TraitResult<RecurringOrder> {
+        async fn create_recurring_order(
+            &self,
+            _input: NewRecurringOrder,
+        ) -> TraitResult<RecurringOrder> {
             unimplemented!()
         }
-        async fn list_recurring_orders_for_user(&self, _user_id: Uuid) -> TraitResult<Vec<RecurringOrder>> {
+        async fn list_recurring_orders_for_user(
+            &self,
+            _user_id: Uuid,
+        ) -> TraitResult<Vec<RecurringOrder>> {
             unimplemented!()
         }
-        async fn get_recurring_order(&self, _id: Uuid, _user_id: Uuid) -> TraitResult<Option<RecurringOrder>> {
+        async fn get_recurring_order(
+            &self,
+            _id: Uuid,
+            _user_id: Uuid,
+        ) -> TraitResult<Option<RecurringOrder>> {
             unimplemented!()
         }
         async fn delete_recurring_order(&self, _id: Uuid, _user_id: Uuid) -> TraitResult<bool> {
             unimplemented!()
         }
-        async fn set_recurring_status(&self, _id: Uuid, _user_id: Uuid, _status: RecurringStatus) -> TraitResult<bool> {
+        async fn set_recurring_status(
+            &self,
+            _id: Uuid,
+            _user_id: Uuid,
+            _status: RecurringStatus,
+        ) -> TraitResult<bool> {
             unimplemented!()
         }
     }
@@ -237,7 +266,11 @@ mod tests {
         async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
             Ok(Uuid::new_v4())
         }
-        async fn insert_order_with_event(&self, order: &TradingOrder, _event: &Event) -> TraitResult<()> {
+        async fn insert_order_with_event(
+            &self,
+            order: &TradingOrder,
+            _event: &Event,
+        ) -> TraitResult<()> {
             self.placed.lock().unwrap().push(order.clone());
             Ok(())
         }
@@ -247,10 +280,18 @@ mod tests {
         async fn get_order(&self, _id: Uuid) -> TraitResult<Option<TradingOrder>> {
             unimplemented!()
         }
-        async fn get_orders_by_user(&self, _user_id: Uuid, _limit: i64, _offset: i64) -> TraitResult<Vec<TradingOrder>> {
+        async fn get_orders_by_user(
+            &self,
+            _user_id: Uuid,
+            _limit: i64,
+            _offset: i64,
+        ) -> TraitResult<Vec<TradingOrder>> {
             unimplemented!()
         }
-        async fn get_active_orders_by_zone(&self, _zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> {
+        async fn get_active_orders_by_zone(
+            &self,
+            _zone_id: i32,
+        ) -> TraitResult<Vec<OrderBookEntry>> {
             unimplemented!()
         }
         async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
@@ -262,10 +303,21 @@ mod tests {
         async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> {
             unimplemented!()
         }
-        async fn update_filled_amount(&self, _id: Uuid, _filled: Decimal, _status: OrderStatus) -> TraitResult<()> {
+        async fn update_filled_amount(
+            &self,
+            _id: Uuid,
+            _filled: Decimal,
+            _status: OrderStatus,
+        ) -> TraitResult<()> {
             unimplemented!()
         }
-        async fn update_filled_amount_with_event(&self, _id: Uuid, _filled: Decimal, _status: OrderStatus, _event: &Event) -> TraitResult<()> {
+        async fn update_filled_amount_with_event(
+            &self,
+            _id: Uuid,
+            _filled: Decimal,
+            _status: OrderStatus,
+            _event: &Event,
+        ) -> TraitResult<()> {
             unimplemented!()
         }
         async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
@@ -321,9 +373,16 @@ mod tests {
         let placed_orders = orders.placed.lock().unwrap();
         assert_eq!(placed_orders.len(), 1);
         assert_eq!(placed_orders[0].side, OrderSide::Buy);
-        assert_eq!(placed_orders[0].price_per_kwh, dec!(4.25), "buy priced at max bound");
+        assert_eq!(
+            placed_orders[0].price_per_kwh,
+            dec!(4.25),
+            "buy priced at max bound"
+        );
         // Schedule advanced: total_executions 2 -> 3.
-        assert_eq!(recurring.advanced.lock().unwrap().as_slice(), &[(rule_id, 3)]);
+        assert_eq!(
+            recurring.advanced.lock().unwrap().as_slice(),
+            &[(rule_id, 3)]
+        );
     }
 
     /// A due Buy rule with no `max_price_per_kwh` cannot be priced — it is skipped
@@ -345,7 +404,10 @@ mod tests {
 
         assert_eq!(placed, 0);
         assert!(orders.placed.lock().unwrap().is_empty(), "no order placed");
-        assert!(recurring.advanced.lock().unwrap().is_empty(), "schedule not advanced");
+        assert!(
+            recurring.advanced.lock().unwrap().is_empty(),
+            "schedule not advanced"
+        );
     }
 
     /// A placed recurring order must wake the matcher, so it is matched on
@@ -362,8 +424,7 @@ mod tests {
         let orders = Arc::new(MockOrderRepo::default());
         let trigger = Arc::new(SpyTrigger::default());
 
-        let evaluator =
-            RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
+        let evaluator = RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
         let placed = evaluator.run_cycle().await.unwrap();
 
         assert_eq!(placed, 2, "both rules placed");
@@ -389,8 +450,7 @@ mod tests {
         let orders = Arc::new(MockOrderRepo::default());
         let trigger = Arc::new(SpyTrigger::default());
 
-        let evaluator =
-            RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
+        let evaluator = RecurringEvaluator::new(recurring.clone(), orders.clone(), trigger.clone());
         assert_eq!(evaluator.run_cycle().await.unwrap(), 0);
 
         assert_eq!(trigger.wakes(), 0, "no placement must mean no wake");

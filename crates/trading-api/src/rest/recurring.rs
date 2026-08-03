@@ -4,7 +4,11 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{RecurringOrder, RecurringOrderWire, OrderSide, IntervalType, Decimal, FromStr, CreateRecurringRequest, State, Json, ServiceRole, UserContext, AppState, next_execution_at, NewRecurringOrder, Path, Uuid, RecurringStatus};
+use super::{
+    next_execution_at, AppState, CreateRecurringRequest, Decimal, FromStr, IntervalType, Json,
+    NewRecurringOrder, OrderSide, Path, RecurringOrder, RecurringOrderWire, RecurringStatus,
+    ServiceRole, State, UserContext, Uuid,
+};
 
 /// Map a stored recurring order to the frontend wire shape (decimals → strings,
 /// enums → their serde-rename'd lowercase forms).
@@ -61,9 +65,12 @@ pub(super) fn parse_opt_decimal(
 ) -> Result<Option<Decimal>, (axum::http::StatusCode, String)> {
     match value {
         None => Ok(None),
-        Some(v) => Decimal::from_str(v.trim())
-            .map(Some)
-            .map_err(|_| (axum::http::StatusCode::BAD_REQUEST, format!("Invalid {field}: {v}"))),
+        Some(v) => Decimal::from_str(v.trim()).map(Some).map_err(|_| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid {field}: {v}"),
+            )
+        }),
     }
 }
 
@@ -99,8 +106,10 @@ pub async fn create_recurring_order(
             format!("Invalid energy_amount: {}", req.energy_amount),
         )
     })?;
-    let max_price_per_kwh = parse_opt_decimal("max_price_per_kwh", req.max_price_per_kwh.as_deref())?;
-    let min_price_per_kwh = parse_opt_decimal("min_price_per_kwh", req.min_price_per_kwh.as_deref())?;
+    let max_price_per_kwh =
+        parse_opt_decimal("max_price_per_kwh", req.max_price_per_kwh.as_deref())?;
+    let min_price_per_kwh =
+        parse_opt_decimal("min_price_per_kwh", req.min_price_per_kwh.as_deref())?;
 
     // Cadence: default every 1 interval; DB CHECK enforces > 0.
     let interval_value = req.interval_value.unwrap_or(1);
@@ -110,15 +119,27 @@ pub async fn create_recurring_order(
             "interval_value must be >= 1".to_string(),
         ));
     }
-    let next_exec = next_execution_at(gridtokenx_telemetry::time::now(), interval_type, interval_value);
+    let next_exec = next_execution_at(
+        gridtokenx_telemetry::time::now(),
+        interval_type,
+        interval_value,
+    );
 
     let name = req.name.and_then(|s| {
         let t = s.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
     let description = req.description.and_then(|s| {
         let t = s.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
 
     let order = state

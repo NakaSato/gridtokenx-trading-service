@@ -4,7 +4,11 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{Deserialize, ToSchema, Serialize, Decimal, Settlement, Uuid, TradeRecordResponse, TradesListResponse, TradesQuery, State, Query, ServiceRole, UserContext, AppState, Json, Response, IntoResponse, header};
+use super::{
+    header, AppState, Decimal, Deserialize, IntoResponse, Json, Query, Response, Serialize,
+    ServiceRole, Settlement, State, ToSchema, TradeRecordResponse, TradesListResponse, TradesQuery,
+    UserContext, Uuid,
+};
 
 pub(super) fn dec_opt_str(d: Option<Decimal>) -> String {
     d.unwrap_or(Decimal::ZERO).to_string()
@@ -51,7 +55,10 @@ pub(super) fn build_trades_response(
     total: i64,
     user: Uuid,
 ) -> TradesListResponse {
-    let trades = settlements.iter().map(|s| build_trade_record(s, user)).collect();
+    let trades = settlements
+        .iter()
+        .map(|s| build_trade_record(s, user))
+        .collect();
     TradesListResponse {
         trades,
         total_count: total,
@@ -136,7 +143,11 @@ pub async fn get_trades(
             )
         })?;
 
-    Ok(Json(build_trades_response(&settlements, total, user.user_id)))
+    Ok(Json(build_trades_response(
+        &settlements,
+        total,
+        user.user_id,
+    )))
 }
 
 /// Export trade history as CSV (default) or JSON (`?format=json`).

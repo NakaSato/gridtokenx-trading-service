@@ -154,10 +154,9 @@ impl KafkaEventBus {
                 Self::zone_key(payload.zone_id, &payload.match_id),
             ),
             #[allow(clippy::match_same_arms)] // same routing, semantically distinct events
-            Event::OrderUpdate { id, zone_id, .. } => (
-                &self.topics.orders_updated,
-                Self::zone_key(*zone_id, id),
-            ),
+            Event::OrderUpdate { id, zone_id, .. } => {
+                (&self.topics.orders_updated, Self::zone_key(*zone_id, id))
+            }
             Event::SettlementRequested(settlement) => (
                 &self.topics.settlements,
                 Self::zone_key(settlement.buyer_zone_id, &settlement.id),
@@ -166,19 +165,17 @@ impl KafkaEventBus {
                 &self.topics.settlements,
                 payload.settlement_id.to_string(), // Fallback to ID
             ),
-            Event::PeakPriceUpdate { id, zone_id, .. } => (
-                &self.topics.orders_updated,
-                Self::zone_key(*zone_id, id),
-            ),
+            Event::PeakPriceUpdate { id, zone_id, .. } => {
+                (&self.topics.orders_updated, Self::zone_key(*zone_id, id))
+            }
             Event::TriggerExecution { id, .. } => (&self.topics.triggers, id.to_string()),
             Event::PriceAlertTriggered(payload) => {
                 (&self.topics.triggers, payload.alert_id.to_string())
             }
             Event::ErcIssued(payload) => (&self.topics.settlements, payload.user_id.to_string()),
-            Event::UserRegistered(payload) => (
-                &self.topics.orders_created,
-                payload.user_id.to_string(),
-            ),
+            Event::UserRegistered(payload) => {
+                (&self.topics.orders_created, payload.user_id.to_string())
+            }
             Event::UserOnboarded(payload) => {
                 (&self.topics.participants, payload.user_id.to_string())
             }

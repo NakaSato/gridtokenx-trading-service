@@ -46,10 +46,13 @@ async fn main() {
 
     // 4. NATS — TCP reachability. NATS_URL is read straight from env by
     //    blockchain-core (not in Config); skip if unset.
-    results.push(("NATS", match std::env::var("NATS_URL") {
-        Ok(url) if !url.trim().is_empty() => probe_nats(&url).await,
-        _ => Probe::Skip("NATS_URL unset — Chain Bridge writes fall back to gRPC".into()),
-    }));
+    results.push((
+        "NATS",
+        match std::env::var("NATS_URL") {
+            Ok(url) if !url.trim().is_empty() => probe_nats(&url).await,
+            _ => Probe::Skip("NATS_URL unset — Chain Bridge writes fall back to gRPC".into()),
+        },
+    ));
 
     // 5. IAM Identity (ConnectRPC) — TCP reachability only, by design.
     //    Trading does NOT call IAM at runtime: request auth is header-based,
@@ -69,11 +72,14 @@ async fn main() {
     ));
 
     // 6. Kafka — TCP reachability to first bootstrap server, only if enabled.
-    results.push(("Kafka", if config.kafka_enabled {
-        probe_tcp(&config.kafka_bootstrap_servers, 9092).await
-    } else {
-        Probe::Skip("KAFKA_EVENTS_ENABLED=false".into())
-    }));
+    results.push((
+        "Kafka",
+        if config.kafka_enabled {
+            probe_tcp(&config.kafka_bootstrap_servers, 9092).await
+        } else {
+            Probe::Skip("KAFKA_EVENTS_ENABLED=false".into())
+        },
+    ));
 
     // Report.
     println!("\nConnection verification — trading-service dependencies\n");
@@ -122,7 +128,10 @@ async fn probe_redis(url: &str) -> Probe {
     match tokio::time::timeout(TCP_TIMEOUT, trading_infra::cache::CacheService::new(url)).await {
         Ok(Ok(_)) => Probe::Ok(format!("PING ok ({})", redact(url))),
         Ok(Err(e)) => Probe::Fail(format!("PING failed: {e}")),
-        Err(_) => Probe::Fail(format!("PING timed out after {TCP_TIMEOUT:?} ({})", redact(url))),
+        Err(_) => Probe::Fail(format!(
+            "PING timed out after {TCP_TIMEOUT:?} ({})",
+            redact(url)
+        )),
     }
 }
 
@@ -147,7 +156,10 @@ async fn probe_chain_bridge(config: &Config) -> Probe {
     };
 
     match tokio::time::timeout(TCP_TIMEOUT, svc.get_slot()).await {
-        Ok(Ok(slot)) => Probe::Ok(format!("GetSlot ok (slot={slot}, {})", config.chain_bridge_url)),
+        Ok(Ok(slot)) => Probe::Ok(format!(
+            "GetSlot ok (slot={slot}, {})",
+            config.chain_bridge_url
+        )),
         Ok(Err(e)) => Probe::Fail(format!("GetSlot failed: {e}")),
         Err(_) => Probe::Fail(format!("GetSlot timed out after {TCP_TIMEOUT:?}")),
     }
@@ -194,7 +206,9 @@ async fn probe_tcp(raw: &str, default_port: u16) -> Probe {
     match tokio::time::timeout(TCP_TIMEOUT, tokio::net::TcpStream::connect(&addr)).await {
         Ok(Ok(_)) => Probe::Ok(format!("TCP reachable ({addr})")),
         Ok(Err(e)) => Probe::Fail(format!("TCP connect {addr} failed: {e}")),
-        Err(_) => Probe::Fail(format!("TCP connect {addr} timed out after {TCP_TIMEOUT:?}")),
+        Err(_) => Probe::Fail(format!(
+            "TCP connect {addr} timed out after {TCP_TIMEOUT:?}"
+        )),
     }
 }
 

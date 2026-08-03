@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::info;
-use utoipa::{IntoParams, ToSchema};
 use trading_core::models::{
     MarketPrice, NewPriceAlert, NewRecurringOrder, OrderBookEntry, PriceAlert, RecurringOrder,
     Settlement, SettlementStats, TradingOrder,
@@ -21,6 +20,7 @@ use trading_core::types::{
     AlertCondition, AlertStatus, IntervalType, OrderSide, OrderStatus, OrderType, RecurringStatus,
     TimeInForce,
 };
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -223,27 +223,26 @@ pub struct GridMetrics {
 use crate::auth::UserContext;
 use gridtokenx_blockchain_auth::ServiceRole;
 
-
 // ---------------------------------------------------------------------------
 // Handlers live in per-domain submodules (split out of this file). Re-exported
 // so every existing `crate::rest::<name>` path — router wiring and openapi.rs —
 // keeps resolving unchanged.
 // ---------------------------------------------------------------------------
-mod orders;
-mod market;
-mod futures;
-mod portfolio;
-mod trades;
 mod alerts;
+mod futures;
+mod market;
+mod orders;
+mod portfolio;
 mod recurring;
+mod trades;
 
-pub use orders::*;
-pub use market::*;
-pub use futures::*;
-pub use portfolio::*;
-pub use trades::*;
 pub use alerts::*;
+pub use futures::*;
+pub use market::*;
+pub use orders::*;
+pub use portfolio::*;
 pub use recurring::*;
+pub use trades::*;
 
 #[cfg(test)]
 mod tests {
@@ -364,7 +363,11 @@ mod tests {
 
     #[test]
     fn matching_status_buys_only() {
-        let r = build_matching_status(&[order(OrderSide::Buy, 500)], &[], gridtokenx_telemetry::time::now());
+        let r = build_matching_status(
+            &[order(OrderSide::Buy, 500)],
+            &[],
+            gridtokenx_telemetry::time::now(),
+        );
         assert_eq!(r.pending_buy_orders, 1);
         assert_eq!(r.pending_sell_orders, 0);
         assert!(!r.can_match);
@@ -374,7 +377,11 @@ mod tests {
 
     #[test]
     fn matching_status_sells_only() {
-        let r = build_matching_status(&[], &[order(OrderSide::Sell, 400)], gridtokenx_telemetry::time::now());
+        let r = build_matching_status(
+            &[],
+            &[order(OrderSide::Sell, 400)],
+            gridtokenx_telemetry::time::now(),
+        );
         assert_eq!(r.pending_sell_orders, 1);
         assert!(!r.can_match);
         assert_eq!(r.match_reason, "no buy liquidity");

@@ -168,8 +168,9 @@ impl BlockchainSettlementProvider {
 
         // Collectors (currency mint → classic SPL Token program).
         let currency_tp = crate::blockchain::currency_token_program();
-        let fee_collector =
-            BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
+        let fee_collector = BlockchainService::parse_pubkey(
+            &std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
         let wheeling_collector = BlockchainService::parse_pubkey(
             &std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(),
         )?;
@@ -177,15 +178,21 @@ impl BlockchainSettlementProvider {
             &std::env::var("LOSS_COLLECTOR_WALLET").unwrap_or_default(),
         )?;
 
-        let fee_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&fee_collector, &currency_mint, &currency_tp)?;
-        let wheeling_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&wheeling_collector, &currency_mint, &currency_tp)?;
-        let loss_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&loss_collector, &currency_mint, &currency_tp)?;
+        let fee_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &fee_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let wheeling_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &wheeling_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let loss_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &loss_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
 
         // Amounts in atomic units - using direct conversion (more efficient than to_string().parse())
         let amount_atomic = ToPrimitive::to_u64(
@@ -215,21 +222,31 @@ impl BlockchainSettlementProvider {
         // platform → one bridge signature satisfies both signer slots.
         let platform = platform_authority.pubkey();
         let energy_tp = spl_token_2022::id();
-        let buyer_currency_escrow = self
-            .blockchain
-            .calculate_ata_address_with_program(&platform, &currency_mint, &currency_tp)?;
-        let seller_energy_escrow = self
-            .blockchain
-            .calculate_ata_address_with_program(&platform, &energy_mint, &energy_tp)?;
+        let buyer_currency_escrow = self.blockchain.calculate_ata_address_with_program(
+            &platform,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let seller_energy_escrow = self.blockchain.calculate_ata_address_with_program(
+            &platform,
+            &energy_mint,
+            &energy_tp,
+        )?;
         let _ = (buyer_currency_ata, seller_energy_ata); // party ATAs unused for this model
 
         let create_seller_currency =
             spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                &platform, seller_pubkey, &currency_mint, &currency_tp,
+                &platform,
+                seller_pubkey,
+                &currency_mint,
+                &currency_tp,
             );
         let create_buyer_energy =
             spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                &platform, buyer_pubkey, &energy_mint, &energy_tp,
+                &platform,
+                buyer_pubkey,
+                &energy_mint,
+                &energy_tp,
             );
 
         let settle_ix = self
@@ -515,8 +532,9 @@ impl BlockchainSettlementProvider {
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
         // Collectors
-        let fee_collector =
-            BlockchainService::parse_pubkey(&std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default())?;
+        let fee_collector = BlockchainService::parse_pubkey(
+            &std::env::var("FEE_COLLECTOR_WALLET").unwrap_or_default(),
+        )?;
         let wheeling_collector = BlockchainService::parse_pubkey(
             &std::env::var("WHEELING_COLLECTOR_WALLET").unwrap_or_default(),
         )?;
@@ -528,15 +546,21 @@ impl BlockchainSettlementProvider {
         // are derived per-trade below via `derive_trade_atas`.
         let currency_tp = crate::blockchain::currency_token_program();
 
-        let fee_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&fee_collector, &currency_mint, &currency_tp)?;
-        let wheeling_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&wheeling_collector, &currency_mint, &currency_tp)?;
-        let loss_collector_ata = self
-            .blockchain
-            .calculate_ata_address_with_program(&loss_collector, &currency_mint, &currency_tp)?;
+        let fee_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &fee_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let wheeling_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &wheeling_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let loss_collector_ata = self.blockchain.calculate_ata_address_with_program(
+            &loss_collector,
+            &currency_mint,
+            &currency_tp,
+        )?;
 
         // `execute_atomic_settlement` sources funds from escrows owned by
         // `escrow_authority` (= the platform key the bridge signs as, also ==
@@ -545,12 +569,16 @@ impl BlockchainSettlementProvider {
         // signature satisfies both signer slots.
         let platform = platform_authority.pubkey();
         let energy_tp = spl_token_2022::id();
-        let buyer_currency_escrow = self
-            .blockchain
-            .calculate_ata_address_with_program(&platform, &currency_mint, &currency_tp)?;
-        let seller_energy_escrow = self
-            .blockchain
-            .calculate_ata_address_with_program(&platform, &energy_mint, &energy_tp)?;
+        let buyer_currency_escrow = self.blockchain.calculate_ata_address_with_program(
+            &platform,
+            &currency_mint,
+            &currency_tp,
+        )?;
+        let seller_energy_escrow = self.blockchain.calculate_ata_address_with_program(
+            &platform,
+            &energy_mint,
+            &energy_tp,
+        )?;
 
         let mut groups = Vec::new();
 
@@ -563,7 +591,12 @@ impl BlockchainSettlementProvider {
                 seller_energy_ata: _,
                 seller_currency_ata,
                 buyer_energy_ata,
-            } = self.derive_trade_atas(&energy_mint, &currency_mint, &buyer_pubkey, &seller_pubkey)?;
+            } = self.derive_trade_atas(
+                &energy_mint,
+                &currency_mint,
+                &buyer_pubkey,
+                &seller_pubkey,
+            )?;
             instructions.push(
                 spl_associated_token_account::instruction::create_associated_token_account_idempotent(
                     &platform, &seller_pubkey, &currency_mint, &currency_tp,
@@ -646,8 +679,10 @@ impl BlockchainSettlementProvider {
 
         let mut tx_results = Vec::new();
         for group in groups.chunks(chunk) {
-            let mut instructions: Vec<Instruction> =
-                group.iter().flat_map(|(ix, _)| ix.iter().cloned()).collect();
+            let mut instructions: Vec<Instruction> = group
+                .iter()
+                .flat_map(|(ix, _)| ix.iter().cloned())
+                .collect();
 
             // Add priority fee if provided
             if priority_fee > 0 {
@@ -697,7 +732,6 @@ impl BlockchainSettlementProvider {
 
         Ok(tx_results)
     }
-
 }
 
 #[cfg(test)]
@@ -771,7 +805,10 @@ mod tests {
             classic_ata(&seller, &currency_mint)
         );
         // Energy ATAs use the Token-2022 program.
-        assert_eq!(atas.seller_energy_ata, token_2022_ata(&seller, &energy_mint));
+        assert_eq!(
+            atas.seller_energy_ata,
+            token_2022_ata(&seller, &energy_mint)
+        );
         assert_eq!(atas.buyer_energy_ata, token_2022_ata(&buyer, &energy_mint));
 
         // The bug: currency ATAs must NOT match the Token-2022 derivation.

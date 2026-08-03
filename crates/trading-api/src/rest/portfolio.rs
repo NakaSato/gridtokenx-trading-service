@@ -4,7 +4,10 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{Serialize, ToSchema, State, Path, ServiceRole, UserContext, AppState, Json, Decimal, Uuid, ToPrimitive, HashMap};
+use super::{
+    AppState, Decimal, HashMap, Json, Path, Serialize, ServiceRole, State, ToPrimitive, ToSchema,
+    UserContext, Uuid,
+};
 
 /// GRID token balance for a wallet address (via Chain Bridge).
 #[utoipa::path(
@@ -73,7 +76,10 @@ pub async fn get_wallet_balance(
             0
         }
     };
-    let currency_decimal = Decimal::new(i64::try_from(currency_raw).unwrap_or(i64::MAX), CURRENCY_DECIMALS);
+    let currency_decimal = Decimal::new(
+        i64::try_from(currency_raw).unwrap_or(i64::MAX),
+        CURRENCY_DECIMALS,
+    );
 
     Ok(Json(serde_json::json!({
         "wallet_address": address,

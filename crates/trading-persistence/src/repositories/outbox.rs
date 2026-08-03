@@ -49,20 +49,18 @@ impl OutboxRepository for PostgresOutboxRepository {
             trading_core::error::ApiError::Internal(format!("Failed to serialize event: {e}"))
         })?;
 
-        sqlx::query(
-            "INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)"
-        )
-        .bind(event_type)
-        .bind(payload)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)")
+            .bind(event_type)
+            .bind(payload)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
 
     async fn get_pending_events(&self, limit: i32) -> TraitResult<Vec<OutboxEvent>> {
         let rows = sqlx::query_as::<_, OutboxEventDb>(
-            "SELECT * FROM outbox_events WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT $1"
+            "SELECT * FROM outbox_events WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -73,7 +71,7 @@ impl OutboxRepository for PostgresOutboxRepository {
 
     async fn mark_processed(&self, id: Uuid) -> TraitResult<()> {
         sqlx::query(
-            "UPDATE outbox_events SET status = 'PROCESSED', last_attempt_at = NOW() WHERE id = $1"
+            "UPDATE outbox_events SET status = 'PROCESSED', last_attempt_at = NOW() WHERE id = $1",
         )
         .bind(id)
         .execute(&self.pool)
@@ -95,12 +93,11 @@ impl OutboxRepository for PostgresOutboxRepository {
     }
 
     async fn cleanup_processed(&self, before: DateTime<Utc>) -> TraitResult<u64> {
-        let result = sqlx::query(
-            "DELETE FROM outbox_events WHERE status = 'PROCESSED' AND created_at < $1"
-        )
-        .bind(before)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM outbox_events WHERE status = 'PROCESSED' AND created_at < $1")
+                .bind(before)
+                .execute(&self.pool)
+                .await?;
 
         Ok(result.rows_affected())
     }

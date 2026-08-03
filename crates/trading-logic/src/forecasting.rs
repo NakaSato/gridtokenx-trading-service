@@ -37,12 +37,12 @@ impl ForecastingService {
             };
 
             // Add cluster specific scaling
-            let multiplier = if cluster_id.contains("INDUSTRIAL") || cluster_id.contains("HOTEL") { 
-                1.5 
-            } else { 
-                1.0 
+            let multiplier = if cluster_id.contains("INDUSTRIAL") || cluster_id.contains("HOTEL") {
+                1.5
+            } else {
+                1.0
             };
-            
+
             predictions.push(base_load * multiplier);
         }
 

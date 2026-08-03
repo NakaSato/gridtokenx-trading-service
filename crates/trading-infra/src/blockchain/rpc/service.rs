@@ -84,7 +84,10 @@ impl BlockchainService {
 
     /// Set the identity gateway for custodial signing
     #[must_use]
-    pub fn with_identity_gateway(mut self, gateway: Arc<dyn trading_core::traits::IdentityGateway>) -> Self {
+    pub fn with_identity_gateway(
+        mut self,
+        gateway: Arc<dyn trading_core::traits::IdentityGateway>,
+    ) -> Self {
         self.identity_gateway = Some(gateway);
         self
     }
@@ -224,12 +227,13 @@ impl BlockchainService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
 
-        let pda: Option<String> =
-            sqlx::query_scalar::<_, Option<String>>("SELECT order_pda FROM trading_orders WHERE id = $1")
-                .bind(order_id)
-                .fetch_optional(db)
-                .await?
-                .flatten();
+        let pda: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT order_pda FROM trading_orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_optional(db)
+        .await?
+        .flatten();
 
         match pda {
             Some(p) => Ok(Some(Self::parse_pubkey(&p)?)),
@@ -512,18 +516,21 @@ impl BlockchainService {
         let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
         let order_pda = self.derive_order_pda(user_wallet, order_id)?;
 
-        let record_ix = self.core.instruction_builder.build_record_order_custodial_instruction(
-            &market_pda,
-            order_pda,
-            order_id,
-            user_wallet,
-            is_buy,
-            energy_amount_atomic,
-            price_atomic,
-            funder,
-            zone_id,
-            expires_at_unix,
-        )?;
+        let record_ix = self
+            .core
+            .instruction_builder
+            .build_record_order_custodial_instruction(
+                &market_pda,
+                order_pda,
+                order_id,
+                user_wallet,
+                is_buy,
+                energy_amount_atomic,
+                price_atomic,
+                funder,
+                zone_id,
+                expires_at_unix,
+            )?;
 
         let signature = self
             .execute_batched_instructions(&[&authority], vec![record_ix])
@@ -538,7 +545,10 @@ impl BlockchainService {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
-        match self.wait_for_confirmation(&signature, confirm_timeout).await {
+        match self
+            .wait_for_confirmation(&signature, confirm_timeout)
+            .await
+        {
             Ok(true) => Ok((signature, order_pda)),
             Ok(false) => Err(anyhow::anyhow!(
                 "order placement {signature} not confirmed within {confirm_timeout}s"
@@ -589,7 +599,10 @@ impl BlockchainService {
         let sig = self
             .core
             .on_chain_manager
-            .build_and_send_transaction_with_signers(vec![instruction], &[authority as &(dyn Signer + Send + Sync)])
+            .build_and_send_transaction_with_signers(
+                vec![instruction],
+                &[authority as &(dyn Signer + Send + Sync)],
+            )
             .await?;
         Ok((sig, order_pda.to_string(), index))
     }
@@ -618,7 +631,10 @@ impl BlockchainService {
 
         self.core
             .on_chain_manager
-            .build_and_send_transaction_with_signers(vec![instruction], &[authority as &(dyn Signer + Send + Sync)])
+            .build_and_send_transaction_with_signers(
+                vec![instruction],
+                &[authority as &(dyn Signer + Send + Sync)],
+            )
             .await
     }
 
@@ -650,7 +666,14 @@ impl BlockchainService {
     ) -> Result<Signature> {
         self.core
             .token_manager
-            .transfer_tokens_with_signer(authority, escrow_ata, receiver_ata, mint, amount, decimals)
+            .transfer_tokens_with_signer(
+                authority,
+                escrow_ata,
+                receiver_ata,
+                mint,
+                amount,
+                decimals,
+            )
             .await
     }
 
@@ -1049,13 +1072,23 @@ impl BlockchainService {
     }
 
     /// Get a custodial signer for a user
-    pub async fn get_custodial_signer(&self, user_id: uuid::Uuid) -> Result<crate::identity::CustodialSigner> {
-        let gateway = self.identity_gateway.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Identity gateway not configured for custodial signing"))?;
-        
-        let wallet = self.get_user_primary_wallet(&user_id).await?
+    pub async fn get_custodial_signer(
+        &self,
+        user_id: uuid::Uuid,
+    ) -> Result<crate::identity::CustodialSigner> {
+        let gateway = self.identity_gateway.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Identity gateway not configured for custodial signing")
+        })?;
+
+        let wallet = self
+            .get_user_primary_wallet(&user_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("User has no primary wallet for signing"))?;
-            
-        Ok(crate::identity::CustodialSigner::new(user_id, wallet, gateway.clone()))
+
+        Ok(crate::identity::CustodialSigner::new(
+            user_id,
+            wallet,
+            gateway.clone(),
+        ))
     }
 }

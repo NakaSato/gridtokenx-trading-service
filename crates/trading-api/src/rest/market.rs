@@ -4,7 +4,12 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::{Serialize, ToSchema, Deserialize, IntoParams, MarketStatsResponse, State, ServiceRole, AppState, Json, MarketConfigResponse, dec_f64, P2PMarketPricesResponse, HashMap, MatchingStatusResponse, TradingOrder, PriceRange, SettlementStats, OrderBookEntry, Decimal, OrderSide, MarketPrice, Uuid};
+use super::{
+    dec_f64, AppState, Decimal, Deserialize, HashMap, IntoParams, Json, MarketConfigResponse,
+    MarketPrice, MarketStatsResponse, MatchingStatusResponse, OrderBookEntry, OrderSide,
+    P2PMarketPricesResponse, PriceRange, Serialize, ServiceRole, SettlementStats, State, ToSchema,
+    TradingOrder, Uuid,
+};
 
 /// Real 24h market statistics, derived from completed settlements — no mock or
 /// static values. Price/volume come from the market-price aggregate (VWAP);
@@ -29,18 +34,26 @@ pub async fn get_market_stats(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let price = state.settlement_repo.get_market_price(24).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
-    let active_users = state.settlement_repo.count_active_traders(24).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
+    let price = state
+        .settlement_repo
+        .get_market_price(24)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+    let active_users = state
+        .settlement_repo
+        .count_active_traders(24)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
 
     Ok(Json(MarketStatsResponse {
         timestamp: gridtokenx_telemetry::time::now(),
@@ -104,8 +117,14 @@ pub async fn get_p2p_market_prices(
 
     let m = &state.config.market;
     let mut wheeling_charges = HashMap::new();
-    wheeling_charges.insert("intra_zone".to_string(), dec_f64(m.intra_zone_wheeling_charge));
-    wheeling_charges.insert("cross_zone".to_string(), dec_f64(m.cross_zone_wheeling_charge));
+    wheeling_charges.insert(
+        "intra_zone".to_string(),
+        dec_f64(m.intra_zone_wheeling_charge),
+    );
+    wheeling_charges.insert(
+        "cross_zone".to_string(),
+        dec_f64(m.cross_zone_wheeling_charge),
+    );
     let mut loss_factors = HashMap::new();
     loss_factors.insert("intra_zone".to_string(), dec_f64(m.intra_zone_loss_factor));
     loss_factors.insert("cross_zone".to_string(), dec_f64(m.cross_zone_loss_factor));
@@ -139,18 +158,26 @@ pub async fn get_matching_status(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let buys = state.order_repo.get_active_buy_orders().await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
-    let sells = state.order_repo.get_active_sell_orders().await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
+    let buys = state
+        .order_repo
+        .get_active_buy_orders()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+    let sells = state
+        .order_repo
+        .get_active_sell_orders()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
 
     Ok(Json(build_matching_status(
         &buys,
@@ -296,12 +323,16 @@ pub async fn get_settlement_stats(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let settlement_stats = state.settlement_repo.get_settlement_stats().await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
+    let settlement_stats = state
+        .settlement_repo
+        .get_settlement_stats()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
     Ok(Json(build_settlement_stats_response(&settlement_stats)))
 }
 
@@ -440,12 +471,16 @@ pub async fn get_p2p_orderbook(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let entries = state.order_repo.get_all_active_orders().await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {e}"),
-        )
-    })?;
+    let entries = state
+        .order_repo
+        .get_all_active_orders()
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
     Ok(Json(build_p2p_orderbook(&entries)))
 }
 

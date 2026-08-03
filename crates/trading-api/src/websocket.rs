@@ -460,7 +460,11 @@ mod tests {
 
         assert_eq!(seq_of(&rx_a.recv().await.expect("frame delivered")), 1);
         assert_eq!(seq_of(&rx_a.recv().await.expect("frame delivered")), 2);
-        assert_eq!(seq_of(&rx_b.recv().await.expect("frame delivered")), 1, "zone 2 unaffected");
+        assert_eq!(
+            seq_of(&rx_b.recv().await.expect("frame delivered")),
+            1,
+            "zone 2 unaffected"
+        );
         assert_eq!(hub.current_seq(1), 2);
         assert_eq!(hub.current_seq(2), 1);
     }
@@ -554,7 +558,11 @@ mod tests {
         let c = rx.recv().await.expect("frame delivered");
 
         assert_eq!((zone_of_frame(&a), seq_of(&a)), (0, 1));
-        assert_eq!((zone_of_frame(&b), seq_of(&b)), (1, 1), "zone 1 has its own seq");
+        assert_eq!(
+            (zone_of_frame(&b), seq_of(&b)),
+            (1, 1),
+            "zone 1 has its own seq"
+        );
         assert_eq!((zone_of_frame(&c), seq_of(&c)), (0, 2));
     }
 

@@ -11,8 +11,8 @@
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 use sqlx::PgPool;
+use std::sync::Arc;
 use trading_core::fast_price::FastPrice;
 use trading_core::models::TradingOrder;
 use trading_core::traits::{OrderRepository, SettlementRepository};
@@ -108,11 +108,23 @@ async fn test_interval_order_clears_end_to_end() {
     // Crossing Interval orders in the same zone: bid 1.0, ask 0.6 → p* = 0.8.
     let (buy_id, sell_id) = (Uuid::new_v4(), Uuid::new_v4());
     order_repo
-        .insert_order(&interval_order(buy_id, buyer, epoch, OrderSide::Buy, dec!(1.0)))
+        .insert_order(&interval_order(
+            buy_id,
+            buyer,
+            epoch,
+            OrderSide::Buy,
+            dec!(1.0),
+        ))
         .await
         .expect("insert buy");
     order_repo
-        .insert_order(&interval_order(sell_id, seller, epoch, OrderSide::Sell, dec!(0.6)))
+        .insert_order(&interval_order(
+            sell_id,
+            seller,
+            epoch,
+            OrderSide::Sell,
+            dec!(0.6),
+        ))
         .await
         .expect("insert sell");
 
@@ -133,7 +145,11 @@ async fn test_interval_order_clears_end_to_end() {
         .expect("our epoch was cleared");
     assert_eq!(mine.matches, 1, "the crossing pair cleared");
     assert_eq!(mine.total_volume, dec!(10.0));
-    assert_eq!(mine.zone_prices, vec![(Some(1), dec!(0.8))], "uniform midpoint price");
+    assert_eq!(
+        mine.zone_prices,
+        vec![(Some(1), dec!(0.8))],
+        "uniform midpoint price"
+    );
 
     // Epoch closed with the single-zone price stamped.
     let (status, price): (String, Option<Decimal>) =
@@ -169,7 +185,15 @@ async fn test_interval_order_clears_end_to_end() {
     // cascade away with their owner. Delete them explicitly or they linger as
     // orphaned rows in the shared dev order book.
     for id in [buyer, seller] {
-        sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .ok();
     }
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
 }

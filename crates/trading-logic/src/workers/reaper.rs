@@ -1,6 +1,6 @@
+use metrics::{counter, gauge};
 use std::sync::Arc;
 use std::time::Duration;
-use metrics::{counter, gauge};
 use tokio::time::interval;
 use tracing::{error, info};
 use trading_core::traits::OrderRepository;
@@ -29,7 +29,10 @@ impl ReaperWorker {
     }
 
     pub async fn run(self) {
-        info!("🚀 Starting ReaperWorker loop (interval: {:?})", self.interval);
+        info!(
+            "🚀 Starting ReaperWorker loop (interval: {:?})",
+            self.interval
+        );
         let mut ticker = interval(self.interval);
         // Tracks consecutive failures so a persistent DB fault — which silently
         // stops all expiry, since the get_active queries no longer filter

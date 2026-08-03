@@ -75,7 +75,15 @@ mod tests {
     }
 
     fn msg(side: u8, price: u64) -> Vec<u8> {
-        message_for(&[1u8; 16], &key().verifying_key().to_bytes(), 5_000_000_000, price, side, 1, 1_800_000_000)
+        message_for(
+            &[1u8; 16],
+            &key().verifying_key().to_bytes(),
+            5_000_000_000,
+            price,
+            side,
+            1,
+            1_800_000_000,
+        )
     }
 
     fn signed(message: &[u8]) -> (String, String) {
@@ -119,8 +127,12 @@ mod tests {
     fn rejects_another_wallets_signature() {
         let m = msg(SIDE_SELL, 2_500_000);
         let (_, sig) = signed(&m);
-        let other = bs58::encode(SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes())
-            .into_string();
+        let other = bs58::encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+        .into_string();
         assert_eq!(
             verify_order_signature(&other, &sig, &m),
             Err(OrderSignatureError::VerificationFailed)

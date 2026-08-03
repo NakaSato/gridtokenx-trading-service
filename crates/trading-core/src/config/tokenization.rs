@@ -146,7 +146,9 @@ impl TokenizationConfig {
             if let Ok(enabled) = val.parse::<bool>() {
                 config.auto_mint_enabled = enabled;
                 info!("Using custom auto mint enabled: {}", enabled);
-            } else { warn!("Failed to parse auto mint enabled: {}, using default", val) }
+            } else {
+                warn!("Failed to parse auto mint enabled: {}, using default", val);
+            }
         }
 
         if let Ok(val) = env::var("TOKENIZATION_POLLING_INTERVAL_SECS") {
@@ -184,7 +186,9 @@ impl TokenizationConfig {
             if let Ok(attempts) = val.parse::<u32>() {
                 config.max_retry_attempts = attempts;
                 info!("Using custom max retry attempts: {}", attempts);
-            } else { warn!("Failed to parse max retry attempts: {}, using default", val) }
+            } else {
+                warn!("Failed to parse max retry attempts: {}, using default", val);
+            }
         }
 
         if let Ok(val) = env::var("TOKENIZATION_INITIAL_RETRY_DELAY_SECS") {
@@ -322,7 +326,11 @@ impl TokenizationConfig {
             kwh_amount * self.kwh_to_token_ratio * 10_f64.powi(i32::from(self.decimals));
 
         // Bounds-checked above; flooring to whole base units is the contract.
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         if tokens_decimal > u64::MAX as f64 {
             return Err(ValidationError::AmountExceedsMaximum);
         }

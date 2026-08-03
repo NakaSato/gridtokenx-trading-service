@@ -98,7 +98,9 @@ impl MatcherService {
         let (mut fast_sells, sell_metadata) = crate::clearing_support::to_fast_orders(&sell_orders);
 
         // 3. Execute pure matching logic
-        let now_ns = gridtokenx_telemetry::time::now().timestamp_nanos_opt().unwrap_or(0);
+        let now_ns = gridtokenx_telemetry::time::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0);
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut fast_buys,
             &mut fast_sells,
@@ -202,12 +204,12 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::sync::Mutex;
     use std::time::Duration;
-    use uuid::Uuid;
     use trading_core::events::Event;
     use trading_core::models::{
         OrderBookEntry, OrderMatch, Settlement, SettlementStats, TradingOrder,
     };
     use trading_core::types::{MarketSegment, OrderSide, OrderStatus, OrderType, TimeInForce};
+    use uuid::Uuid;
 
     /// Permissive topology: every flow accommodated, zero wheeling/loss — so the
     /// test exercises the match→persist orchestration, not grid routing.
@@ -217,9 +219,15 @@ mod tests {
     #[derive(Debug)]
     struct NoCharges;
     impl trading_core::charges::ChargeRates for NoCharges {
-        fn fee_bps(&self) -> u16 { 0 }
-        fn wheeling_rate_per_kwh(&self) -> u64 { 0 }
-        fn loss_bps(&self) -> u16 { 0 }
+        fn fee_bps(&self) -> u16 {
+            0
+        }
+        fn wheeling_rate_per_kwh(&self) -> u64 {
+            0
+        }
+        fn loss_bps(&self) -> u16 {
+            0
+        }
     }
 
     struct PermissiveTopology;
@@ -287,22 +295,62 @@ mod tests {
         async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
             Ok(self.sells.clone())
         }
-        async fn update_filled_amount_with_event(&self, id: Uuid, filled: Decimal, status: OrderStatus, _e: &Event) -> TraitResult<()> {
+        async fn update_filled_amount_with_event(
+            &self,
+            id: Uuid,
+            filled: Decimal,
+            status: OrderStatus,
+            _e: &Event,
+        ) -> TraitResult<()> {
             self.fills.lock().unwrap().push((id, filled, status));
             Ok(())
         }
-        async fn insert_order(&self, _o: &TradingOrder) -> TraitResult<()> { unimplemented!() }
-        async fn insert_order_with_event(&self, _o: &TradingOrder, _e: &Event) -> TraitResult<()> { unimplemented!() }
-        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { unimplemented!() }
-        async fn get_order(&self, _id: Uuid) -> TraitResult<Option<TradingOrder>> { unimplemented!() }
-        async fn get_orders_by_user(&self, _u: Uuid, _l: i64, _o: i64) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
-        async fn get_active_orders_by_zone(&self, _z: i32) -> TraitResult<Vec<OrderBookEntry>> { unimplemented!() }
-        async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> { unimplemented!() }
-        async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
-        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> { unimplemented!() }
-        async fn update_filled_amount(&self, _id: Uuid, _f: Decimal, _s: OrderStatus) -> TraitResult<()> { unimplemented!() }
-        async fn cancel_order(&self, _id: Uuid, _u: Uuid) -> TraitResult<bool> { unimplemented!() }
-        async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> { unimplemented!() }
+        async fn insert_order(&self, _o: &TradingOrder) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn insert_order_with_event(&self, _o: &TradingOrder, _e: &Event) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+            unimplemented!()
+        }
+        async fn get_order(&self, _id: Uuid) -> TraitResult<Option<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn get_orders_by_user(
+            &self,
+            _u: Uuid,
+            _l: i64,
+            _o: i64,
+        ) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
+        async fn get_active_orders_by_zone(&self, _z: i32) -> TraitResult<Vec<OrderBookEntry>> {
+            unimplemented!()
+        }
+        async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
+            unimplemented!()
+        }
+        async fn update_order_status(&self, _id: Uuid, _s: OrderStatus) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_filled_amount(
+            &self,
+            _id: Uuid,
+            _f: Decimal,
+            _s: OrderStatus,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, _id: Uuid, _u: Uuid) -> TraitResult<bool> {
+            unimplemented!()
+        }
+        async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+            unimplemented!()
+        }
     }
 
     #[derive(Default)]
@@ -343,28 +391,106 @@ mod tests {
             }
             self.settlements.lock().unwrap().push(s.clone());
             self.matches.lock().unwrap().push(om.clone());
-            self.fills.lock().unwrap().push((buyer.order_id, buyer.delta));
-            self.fills.lock().unwrap().push((seller.order_id, seller.delta));
+            self.fills
+                .lock()
+                .unwrap()
+                .push((buyer.order_id, buyer.delta));
+            self.fills
+                .lock()
+                .unwrap()
+                .push((seller.order_id, seller.delta));
             Ok(true)
         }
-        async fn insert_match_with_event(&self, m: &OrderMatch, _sid: Option<Uuid>, _z: Option<i32>, _e: &Event) -> TraitResult<()> {
+        async fn insert_match_with_event(
+            &self,
+            m: &OrderMatch,
+            _sid: Option<Uuid>,
+            _z: Option<i32>,
+            _e: &Event,
+        ) -> TraitResult<()> {
             self.matches.lock().unwrap().push(m.clone());
             Ok(())
         }
-        async fn insert_settlement_with_event(&self, _s: &Settlement, _e: &Event) -> TraitResult<()> { unimplemented!() }
-        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { unimplemented!() }
-        async fn insert_match(&self, _m: &OrderMatch, _sid: Option<Uuid>, _z: Option<i32>) -> TraitResult<()> { unimplemented!() }
-        async fn get_settlement(&self, _id: Uuid) -> TraitResult<Option<Settlement>> { unimplemented!() }
-        async fn get_pending_settlements(&self, _l: i64) -> TraitResult<Vec<Settlement>> { unimplemented!() }
-        async fn claim_settlements_for_processing(&self, _ids: &[Uuid]) -> TraitResult<Vec<Settlement>> { unimplemented!() }
-        async fn reset_settlements_for_retry(&self, _ids: &[Uuid], _m: i32, _e: Option<&str>) -> TraitResult<u64> { unimplemented!() }
-        async fn reclaim_stale_processing(&self, _s: i64, _m: i32) -> TraitResult<u64> { unimplemented!() }
-        async fn list_settlements_for_user(&self, _u: Uuid, _l: i64, _o: i64) -> TraitResult<(Vec<Settlement>, i64)> { unimplemented!() }
-        async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> { unimplemented!() }
-        async fn get_market_price(&self, _window_hours: i64) -> TraitResult<trading_core::models::MarketPrice> { unimplemented!() }
-        async fn count_active_traders(&self, _window_hours: i64) -> TraitResult<i64> { unimplemented!() }
-        async fn update_settlement_status(&self, _id: Uuid, _s: &str, _t: Option<&str>, _e: Option<&str>) -> TraitResult<()> { unimplemented!() }
-        async fn update_settlement_status_with_event(&self, _id: Uuid, _s: &str, _t: Option<&str>, _e: Option<&str>, _ev: &Event) -> TraitResult<()> { unimplemented!() }
+        async fn insert_settlement_with_event(
+            &self,
+            _s: &Settlement,
+            _e: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+            unimplemented!()
+        }
+        async fn insert_match(
+            &self,
+            _m: &OrderMatch,
+            _sid: Option<Uuid>,
+            _z: Option<i32>,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn get_settlement(&self, _id: Uuid) -> TraitResult<Option<Settlement>> {
+            unimplemented!()
+        }
+        async fn get_pending_settlements(&self, _l: i64) -> TraitResult<Vec<Settlement>> {
+            unimplemented!()
+        }
+        async fn claim_settlements_for_processing(
+            &self,
+            _ids: &[Uuid],
+        ) -> TraitResult<Vec<Settlement>> {
+            unimplemented!()
+        }
+        async fn reset_settlements_for_retry(
+            &self,
+            _ids: &[Uuid],
+            _m: i32,
+            _e: Option<&str>,
+        ) -> TraitResult<u64> {
+            unimplemented!()
+        }
+        async fn reclaim_stale_processing(&self, _s: i64, _m: i32) -> TraitResult<u64> {
+            unimplemented!()
+        }
+        async fn list_settlements_for_user(
+            &self,
+            _u: Uuid,
+            _l: i64,
+            _o: i64,
+        ) -> TraitResult<(Vec<Settlement>, i64)> {
+            unimplemented!()
+        }
+        async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> {
+            unimplemented!()
+        }
+        async fn get_market_price(
+            &self,
+            _window_hours: i64,
+        ) -> TraitResult<trading_core::models::MarketPrice> {
+            unimplemented!()
+        }
+        async fn count_active_traders(&self, _window_hours: i64) -> TraitResult<i64> {
+            unimplemented!()
+        }
+        async fn update_settlement_status(
+            &self,
+            _id: Uuid,
+            _s: &str,
+            _t: Option<&str>,
+            _e: Option<&str>,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
+        async fn update_settlement_status_with_event(
+            &self,
+            _id: Uuid,
+            _s: &str,
+            _t: Option<&str>,
+            _e: Option<&str>,
+            _ev: &Event,
+        ) -> TraitResult<()> {
+            unimplemented!()
+        }
     }
 
     /// The settlement row must record what the CHAIN charges, not the matching
@@ -389,9 +515,15 @@ mod tests {
         #[derive(Debug)]
         struct LiveRates;
         impl trading_core::charges::ChargeRates for LiveRates {
-            fn fee_bps(&self) -> u16 { 25 }
-            fn wheeling_rate_per_kwh(&self) -> u64 { 100_000 }
-            fn loss_bps(&self) -> u16 { 5 }
+            fn fee_bps(&self) -> u16 {
+                25
+            }
+            fn wheeling_rate_per_kwh(&self) -> u64 {
+                100_000
+            }
+            fn loss_bps(&self) -> u16 {
+                5
+            }
         }
 
         // Crossing pair, 2 kWh settling at the seller's ask of 3.00 => gross 6.00.
@@ -418,10 +550,22 @@ mod tests {
         let s = &captured[0];
 
         assert_eq!(s.total_amount, dec!(6.00), "gross = 2 kWh x ask 3.00");
-        assert_eq!(s.fee_amount, dec!(0.0150), "0.25% of gross — NOT the hardcoded 0");
-        assert_eq!(s.wheeling_charge, Some(dec!(0.200000)), "2 kWh x THB0.10, per-kWh not per-value");
+        assert_eq!(
+            s.fee_amount,
+            dec!(0.0150),
+            "0.25% of gross — NOT the hardcoded 0"
+        );
+        assert_eq!(
+            s.wheeling_charge,
+            Some(dec!(0.200000)),
+            "2 kWh x THB0.10, per-kWh not per-value"
+        );
         assert_eq!(s.loss_cost, Some(dec!(0.0030)), "0.05% of gross");
-        assert_eq!(s.net_amount, dec!(5.782), "what the seller actually receives");
+        assert_eq!(
+            s.net_amount,
+            dec!(5.782),
+            "what the seller actually receives"
+        );
 
         // The invariant that makes the ledger reconcile with on-chain movement:
         // every satang of the gross is accounted for by exactly one party.
@@ -448,13 +592,26 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
         assert_eq!(matched, 1, "one match");
-        assert_eq!(settlements.settlements.lock().unwrap().len(), 1, "settlement persisted");
-        assert_eq!(settlements.matches.lock().unwrap().len(), 1, "match-ledger row persisted");
+        assert_eq!(
+            settlements.settlements.lock().unwrap().len(),
+            1,
+            "settlement persisted"
+        );
+        assert_eq!(
+            settlements.matches.lock().unwrap().len(),
+            1,
+            "match-ledger row persisted"
+        );
 
         let s = &settlements.settlements.lock().unwrap()[0];
         assert_eq!(s.energy_amount, dec!(10.0));
@@ -465,8 +622,12 @@ mod tests {
         // test; here we assert the incremental deltas the mock sees).
         let fills = settlements.fills.lock().unwrap();
         assert_eq!(fills.len(), 2);
-        assert!(fills.iter().any(|(id, amt)| *id == buy_id && *amt == dec!(10.0)));
-        assert!(fills.iter().any(|(id, amt)| *id == sell_id && *amt == dec!(10.0)));
+        assert!(fills
+            .iter()
+            .any(|(id, amt)| *id == buy_id && *amt == dec!(10.0)));
+        assert!(fills
+            .iter()
+            .any(|(id, amt)| *id == sell_id && *amt == dec!(10.0)));
     }
 
     /// Regression: if the settlement row fails to persist, the match must NOT be
@@ -489,8 +650,12 @@ mod tests {
             fail_settlement: true,
             ..Default::default()
         });
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -522,7 +687,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher = MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -543,8 +713,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -572,8 +746,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -603,8 +781,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -635,8 +817,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 
@@ -660,8 +846,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let matcher =
-            MatcherService::new(orders.clone(), settlements.clone(), Arc::new(PermissiveTopology), Arc::new(NoCharges));
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(PermissiveTopology),
+            Arc::new(NoCharges),
+        );
 
         let matched = matcher.run_matching_cycle().await.unwrap();
 

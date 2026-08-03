@@ -171,9 +171,33 @@ async fn persist_matched_trade_commits_and_accumulates() {
     let pool = connect().await;
     let epoch = insert_epoch(&pool).await;
     let buyer_uid = Uuid::new_v4();
-    let buy = insert_order(&pool, epoch, buyer_uid, OrderSide::Buy, dec!(20.0), OrderStatus::Active).await;
-    let sell1 = insert_order(&pool, epoch, Uuid::new_v4(), OrderSide::Sell, dec!(10.0), OrderStatus::Active).await;
-    let sell2 = insert_order(&pool, epoch, Uuid::new_v4(), OrderSide::Sell, dec!(10.0), OrderStatus::Active).await;
+    let buy = insert_order(
+        &pool,
+        epoch,
+        buyer_uid,
+        OrderSide::Buy,
+        dec!(20.0),
+        OrderStatus::Active,
+    )
+    .await;
+    let sell1 = insert_order(
+        &pool,
+        epoch,
+        Uuid::new_v4(),
+        OrderSide::Sell,
+        dec!(10.0),
+        OrderStatus::Active,
+    )
+    .await;
+    let sell2 = insert_order(
+        &pool,
+        epoch,
+        Uuid::new_v4(),
+        OrderSide::Sell,
+        dec!(10.0),
+        OrderStatus::Active,
+    )
+    .await;
 
     let repo = PostgresSettlementRepository::new(pool.clone());
 
@@ -186,8 +210,18 @@ async fn persist_matched_trade_commits_and_accumulates() {
             &m1,
             &matched_event(&m1),
             Some(1),
-            &TradeFill { order_id: buy, user_id: Some(buyer_uid), delta: dec!(10.0), zone_id: Some(1) },
-            &TradeFill { order_id: sell1, user_id: Some(Uuid::new_v4()), delta: dec!(10.0), zone_id: Some(1) },
+            &TradeFill {
+                order_id: buy,
+                user_id: Some(buyer_uid),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
+            &TradeFill {
+                order_id: sell1,
+                user_id: Some(Uuid::new_v4()),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
         )
         .await
         .expect("persist trade 1");
@@ -208,29 +242,75 @@ async fn persist_matched_trade_commits_and_accumulates() {
             &m2,
             &matched_event(&m2),
             Some(1),
-            &TradeFill { order_id: buy, user_id: Some(buyer_uid), delta: dec!(10.0), zone_id: Some(1) },
-            &TradeFill { order_id: sell2, user_id: Some(Uuid::new_v4()), delta: dec!(10.0), zone_id: Some(1) },
+            &TradeFill {
+                order_id: buy,
+                user_id: Some(buyer_uid),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
+            &TradeFill {
+                order_id: sell2,
+                user_id: Some(Uuid::new_v4()),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
         )
         .await
         .expect("persist trade 2");
     assert!(committed, "trade 2 commits");
 
     let (filled, status) = order_status(&pool, buy).await;
-    assert_eq!(filled, dec!(20.0), "buy filled 20 after trade 2 (incremental accumulation)");
+    assert_eq!(
+        filled,
+        dec!(20.0),
+        "buy filled 20 after trade 2 (incremental accumulation)"
+    );
     assert_eq!(status, "filled", "buy fully filled (20/20)");
 
     // Both settlements + both ledger rows persisted.
-    assert_eq!(count_rows(&pool, "SELECT COUNT(*) AS n FROM settlements WHERE epoch_id = $1", epoch).await, 2);
-    assert_eq!(count_rows(&pool, "SELECT COUNT(*) AS n FROM order_matches WHERE epoch_id = $1", epoch).await, 2);
+    assert_eq!(
+        count_rows(
+            &pool,
+            "SELECT COUNT(*) AS n FROM settlements WHERE epoch_id = $1",
+            epoch
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        count_rows(
+            &pool,
+            "SELECT COUNT(*) AS n FROM order_matches WHERE epoch_id = $1",
+            epoch
+        )
+        .await,
+        2
+    );
     // OrderMatched event for each trade + OrderUpdate for the buy on each trade.
     assert!(count_rows(&pool, "SELECT COUNT(*) AS n FROM outbox_events WHERE event_type = 'OrderMatched' AND payload::text LIKE '%' || $1 || '%'", m1.id).await >= 1);
     assert!(count_rows(&pool, "SELECT COUNT(*) AS n FROM outbox_events WHERE event_type = 'OrderUpdate' AND payload::text LIKE '%' || $1 || '%'", buy).await >= 2);
 
     // Cleanup.
-    sqlx::query("DELETE FROM order_matches WHERE epoch_id = $1").bind(epoch).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM settlements WHERE epoch_id = $1").bind(epoch).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM trading_orders WHERE epoch_id = $1").bind(epoch).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM order_matches WHERE epoch_id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM settlements WHERE epoch_id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM trading_orders WHERE epoch_id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 /// Atomicity: if either order is already terminal (the reaper expired it), the
@@ -240,9 +320,25 @@ async fn persist_matched_trade_commits_and_accumulates() {
 async fn persist_matched_trade_rolls_back_when_a_side_is_terminal() {
     let pool = connect().await;
     let epoch = insert_epoch(&pool).await;
-    let buy = insert_order(&pool, epoch, Uuid::new_v4(), OrderSide::Buy, dec!(10.0), OrderStatus::Active).await;
+    let buy = insert_order(
+        &pool,
+        epoch,
+        Uuid::new_v4(),
+        OrderSide::Buy,
+        dec!(10.0),
+        OrderStatus::Active,
+    )
+    .await;
     // Seller already expired (reaper won the race).
-    let sell = insert_order(&pool, epoch, Uuid::new_v4(), OrderSide::Sell, dec!(10.0), OrderStatus::Expired).await;
+    let sell = insert_order(
+        &pool,
+        epoch,
+        Uuid::new_v4(),
+        OrderSide::Sell,
+        dec!(10.0),
+        OrderStatus::Expired,
+    )
+    .await;
 
     let repo = PostgresSettlementRepository::new(pool.clone());
     let s = settlement(epoch, buy, sell, dec!(10.0));
@@ -254,23 +350,68 @@ async fn persist_matched_trade_rolls_back_when_a_side_is_terminal() {
             &m,
             &matched_event(&m),
             Some(1),
-            &TradeFill { order_id: buy, user_id: Some(Uuid::new_v4()), delta: dec!(10.0), zone_id: Some(1) },
-            &TradeFill { order_id: sell, user_id: Some(Uuid::new_v4()), delta: dec!(10.0), zone_id: Some(1) },
+            &TradeFill {
+                order_id: buy,
+                user_id: Some(Uuid::new_v4()),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
+            &TradeFill {
+                order_id: sell,
+                user_id: Some(Uuid::new_v4()),
+                delta: dec!(10.0),
+                zone_id: Some(1),
+            },
         )
         .await
         .expect("persist call itself succeeds");
     assert!(!committed, "trade with a terminal side does NOT commit");
 
     // NOTHING was written — the settlement (inserted before the fills) rolled back too.
-    assert_eq!(count_rows(&pool, "SELECT COUNT(*) AS n FROM settlements WHERE id = $1", s.id).await, 0, "settlement rolled back — not orphaned");
-    assert_eq!(count_rows(&pool, "SELECT COUNT(*) AS n FROM order_matches WHERE id = $1", m.id).await, 0, "ledger row rolled back");
+    assert_eq!(
+        count_rows(
+            &pool,
+            "SELECT COUNT(*) AS n FROM settlements WHERE id = $1",
+            s.id
+        )
+        .await,
+        0,
+        "settlement rolled back — not orphaned"
+    );
+    assert_eq!(
+        count_rows(
+            &pool,
+            "SELECT COUNT(*) AS n FROM order_matches WHERE id = $1",
+            m.id
+        )
+        .await,
+        0,
+        "ledger row rolled back"
+    );
     // The buy order was NOT resurrected/filled — it stays live for the next cycle.
     let (filled, status) = order_status(&pool, buy).await;
     assert_eq!(filled, dec!(0.0), "buy not filled");
     assert_eq!(status, "active", "buy still live");
     // No OrderMatched event leaked.
-    assert_eq!(count_rows(&pool, "SELECT COUNT(*) AS n FROM outbox_events WHERE payload::text LIKE '%' || $1 || '%'", m.id).await, 0, "no events for the rolled-back trade");
+    assert_eq!(
+        count_rows(
+            &pool,
+            "SELECT COUNT(*) AS n FROM outbox_events WHERE payload::text LIKE '%' || $1 || '%'",
+            m.id
+        )
+        .await,
+        0,
+        "no events for the rolled-back trade"
+    );
 
-    sqlx::query("DELETE FROM trading_orders WHERE epoch_id = $1").bind(epoch).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE epoch_id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .ok();
 }

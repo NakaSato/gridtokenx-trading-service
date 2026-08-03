@@ -181,7 +181,11 @@ impl ClearingService {
             trading_infra::metrics::record_clearing_cycle(
                 u64::try_from(summary.zones_cleared).unwrap_or(0),
                 u64::try_from(summary.matches).unwrap_or(0),
-                summary.total_volume.to_string().parse::<f64>().unwrap_or(0.0),
+                summary
+                    .total_volume
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0),
             );
             summaries.push(summary);
         }
@@ -198,13 +202,13 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::sync::Mutex;
     use trading_core::events::Event;
+    use trading_core::fast_price::FastPrice;
     use trading_core::models::{
         OrderBookEntry, OrderMatch, Settlement, SettlementStats, TradingOrder,
     };
     use trading_core::traits::{OrderRepository, SettlementRepository};
     use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
     use trading_engine::engine::TopologySnapshot;
-    use trading_core::fast_price::FastPrice;
 
     /// Zero charge rates: these tests assert on gross amounts, so keeping the
     /// seller whole preserves their existing expectations. The charge arithmetic
@@ -212,9 +216,15 @@ mod tests {
     #[derive(Debug)]
     struct NoCharges;
     impl trading_core::charges::ChargeRates for NoCharges {
-        fn fee_bps(&self) -> u16 { 0 }
-        fn wheeling_rate_per_kwh(&self) -> u64 { 0 }
-        fn loss_bps(&self) -> u16 { 0 }
+        fn fee_bps(&self) -> u16 {
+            0
+        }
+        fn wheeling_rate_per_kwh(&self) -> u64 {
+            0
+        }
+        fn loss_bps(&self) -> u16 {
+            0
+        }
     }
 
     struct NoFeeTopology;
@@ -290,10 +300,12 @@ mod tests {
             total_volume: Decimal,
             matched_orders: i64,
         ) -> TraitResult<()> {
-            self.cleared
-                .lock()
-                .unwrap()
-                .push((epoch_id, clearing_price, total_volume, matched_orders));
+            self.cleared.lock().unwrap().push((
+                epoch_id,
+                clearing_price,
+                total_volume,
+                matched_orders,
+            ));
             Ok(())
         }
         async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
@@ -385,8 +397,14 @@ mod tests {
         ) -> TraitResult<bool> {
             self.settlements.lock().unwrap().push(s.clone());
             self.matches.lock().unwrap().push(om.clone());
-            self.fills.lock().unwrap().push((buyer.order_id, buyer.delta));
-            self.fills.lock().unwrap().push((seller.order_id, seller.delta));
+            self.fills
+                .lock()
+                .unwrap()
+                .push((buyer.order_id, buyer.delta));
+            self.fills
+                .lock()
+                .unwrap()
+                .push((seller.order_id, seller.delta));
             Ok(true)
         }
         async fn insert_match_with_event(
@@ -485,7 +503,14 @@ mod tests {
     async fn clears_interval_epoch_at_uniform_price() {
         let epoch = Uuid::new_v4();
         // bid 1.0 / ask 0.6, zone 1 → p* = midpoint 0.8, 10 units.
-        let buy = order(OrderSide::Buy, dec!(1.0), dec!(10.0), 1, epoch, MarketSegment::Interval);
+        let buy = order(
+            OrderSide::Buy,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            epoch,
+            MarketSegment::Interval,
+        );
         let sell = order(
             OrderSide::Sell,
             dec!(0.6),
@@ -518,13 +543,24 @@ mod tests {
         assert_eq!(settlements.matches.lock().unwrap().len(), 1);
         let s = &settlements.settlements.lock().unwrap()[0];
         assert_eq!(s.price, dec!(0.8), "settlement booked at the uniform price");
-        assert_eq!(settlements.fills.lock().unwrap().len(), 2, "both orders filled");
+        assert_eq!(
+            settlements.fills.lock().unwrap().len(),
+            2,
+            "both orders filled"
+        );
     }
 
     #[tokio::test]
     async fn ignores_realtime_segment_orders() {
         let epoch = Uuid::new_v4();
-        let buy = order(OrderSide::Buy, dec!(1.0), dec!(10.0), 1, epoch, MarketSegment::Realtime);
+        let buy = order(
+            OrderSide::Buy,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            epoch,
+            MarketSegment::Realtime,
+        );
         let sell = order(
             OrderSide::Sell,
             dec!(0.6),
@@ -540,11 +576,19 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
+        let svc = ClearingService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(NoFeeTopology),
+            Arc::new(NoCharges),
+        );
 
         let summary = svc.run_epoch_clearing(epoch).await.unwrap();
 
-        assert_eq!(summary.zones_cleared, 0, "Realtime orders belong to the CDA matcher");
+        assert_eq!(
+            summary.zones_cleared, 0,
+            "Realtime orders belong to the CDA matcher"
+        );
         assert!(settlements.settlements.lock().unwrap().is_empty());
         assert!(orders.fills.lock().unwrap().is_empty());
     }
@@ -553,7 +597,14 @@ mod tests {
     async fn ignores_other_epoch_orders() {
         let epoch = Uuid::new_v4();
         let other = Uuid::new_v4();
-        let buy = order(OrderSide::Buy, dec!(1.0), dec!(10.0), 1, epoch, MarketSegment::Interval);
+        let buy = order(
+            OrderSide::Buy,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            epoch,
+            MarketSegment::Interval,
+        );
         // Sell belongs to a DIFFERENT epoch → no counterparty for `epoch`.
         let sell = order(
             OrderSide::Sell,
@@ -570,7 +621,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
+        let svc = ClearingService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(NoFeeTopology),
+            Arc::new(NoCharges),
+        );
 
         let summary = svc.run_epoch_clearing(epoch).await.unwrap();
 
@@ -583,7 +639,14 @@ mod tests {
     #[tokio::test]
     async fn clears_and_closes_due_epochs() {
         let epoch = Uuid::new_v4();
-        let buy = order(OrderSide::Buy, dec!(1.0), dec!(10.0), 1, epoch, MarketSegment::Interval);
+        let buy = order(
+            OrderSide::Buy,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            epoch,
+            MarketSegment::Interval,
+        );
         let sell = order(
             OrderSide::Sell,
             dec!(0.6),
@@ -600,7 +663,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
+        let svc = ClearingService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(NoFeeTopology),
+            Arc::new(NoCharges),
+        );
 
         let summaries = svc.clear_due_epochs().await.unwrap();
 
@@ -623,7 +691,12 @@ mod tests {
             ..Default::default()
         });
         let settlements = Arc::new(MockSettlementRepo::default());
-        let svc = ClearingService::new(orders.clone(), settlements.clone(), Arc::new(NoFeeTopology), Arc::new(NoCharges));
+        let svc = ClearingService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(NoFeeTopology),
+            Arc::new(NoCharges),
+        );
 
         let summaries = svc.clear_due_epochs().await.unwrap();
 

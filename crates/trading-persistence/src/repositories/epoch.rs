@@ -97,7 +97,10 @@ pub async fn mark_epoch_cleared(
 /// Most-recently-cleared (or settled) epochs, newest first, capped at `limit` —
 /// the clearing-results read endpoint. `settled` is included because a settled
 /// epoch still carries the clearing summary.
-pub async fn list_recent_cleared_epochs(pool: &PgPool, limit: i64) -> TraitResult<Vec<MarketEpoch>> {
+pub async fn list_recent_cleared_epochs(
+    pool: &PgPool,
+    limit: i64,
+) -> TraitResult<Vec<MarketEpoch>> {
     let rows = sqlx::query(
         "SELECT id, epoch_number, start_time, end_time, status, clearing_price, \
                 total_volume, total_orders, matched_orders \

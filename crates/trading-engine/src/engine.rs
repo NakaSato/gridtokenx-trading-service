@@ -166,7 +166,8 @@ impl MatchingEngine {
         let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR).max(0);
         // i128 intermediate then clamp into i64 — never wraps on large prices.
         let loss_cost_extra_raw = i64::try_from(
-            i128::from(sell.price.raw()) * i128::from(extra_loss_raw) / i128::from(FastPrice::FACTOR),
+            i128::from(sell.price.raw()) * i128::from(extra_loss_raw)
+                / i128::from(FastPrice::FACTOR),
         )
         .unwrap_or(i64::MAX);
 
@@ -411,8 +412,7 @@ impl MatchingEngine {
         // 1. Segment active sell orders by Zone and Price-Time priority.
         // BTreeMap (not HashMap) so zone iteration order is deterministic.
         // Map: ZoneId -> BTreeMap<(Price, CreatedAt, Id), Index>
-        let mut zone_books: ZoneBooks =
-            BTreeMap::new();
+        let mut zone_books: ZoneBooks = BTreeMap::new();
         for (idx, sell) in sell_orders.iter().enumerate() {
             if sell.remaining_amount() >= MIN_TRADE_AMOUNT && !sell.is_expired(now_ns) {
                 zone_books
@@ -496,8 +496,11 @@ impl MatchingEngine {
                         if let Some(take) = fill_take(need, sim_sell.remaining_amount()) {
                             let key = (sim_sell.zone_id, buy.zone_id);
                             let already = sim_flow.get(&key).copied().unwrap_or(Decimal::ZERO);
-                            if !topology.can_accommodate_flow(sim_sell.zone_id, buy.zone_id, already + take)
-                            {
+                            if !topology.can_accommodate_flow(
+                                sim_sell.zone_id,
+                                buy.zone_id,
+                                already + take,
+                            ) {
                                 continue;
                             }
                             *sim_flow.entry(key).or_insert(Decimal::ZERO) += take;
@@ -545,9 +548,15 @@ impl MatchingEngine {
                     // remaining-headroom readout), so a fill that would only partially fit is
                     // skipped whole, not trimmed to the remaining capacity.
                     let flow_key = (sell.zone_id, buy.zone_id);
-                    let already = committed_flow.get(&flow_key).copied().unwrap_or(Decimal::ZERO);
-                    if !topology.can_accommodate_flow(sell.zone_id, buy.zone_id, already + match_amount)
-                    {
+                    let already = committed_flow
+                        .get(&flow_key)
+                        .copied()
+                        .unwrap_or(Decimal::ZERO);
+                    if !topology.can_accommodate_flow(
+                        sell.zone_id,
+                        buy.zone_id,
+                        already + match_amount,
+                    ) {
                         continue;
                     }
 
@@ -883,8 +892,24 @@ mod tests {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         // Cross-zone (no intra discount) isolates the loss term. sell=1.0, bid=1.5.
-        let mut buys = vec![order(buyer, dec!(1.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.5),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.0),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -895,7 +920,11 @@ mod tests {
             200,
         );
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].loss_cost, dec!(0), "loss floored at 0, not negative");
+        assert_eq!(
+            matches[0].loss_cost,
+            dec!(0),
+            "loss floored at 0, not negative"
+        );
         assert_eq!(
             matches[0].match_price,
             dec!(1.0),
@@ -925,8 +954,24 @@ mod tests {
         let seller = Uuid::new_v4();
         // ask == bid so the trade crosses; cross-zone so no discount. Without the floor,
         // wheeling -0.1 would drop landed to 0.9 (< ask) and book a -0.1 charge.
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.0),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -937,8 +982,16 @@ mod tests {
             200,
         );
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].match_price, dec!(1.0), "wheeling floored at 0 → landed == ask");
-        assert_eq!(matches[0].wheeling_charge, dec!(0), "no negative wheeling charge booked");
+        assert_eq!(
+            matches[0].match_price,
+            dec!(1.0),
+            "wheeling floored at 0 → landed == ask"
+        );
+        assert_eq!(
+            matches[0].wheeling_charge,
+            dec!(0),
+            "no negative wheeling charge booked"
+        );
     }
 
     #[test]
@@ -963,8 +1016,24 @@ mod tests {
     fn expired_sell_is_skipped() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         sells[0].expires_at_ns = Some(150); // expires before now_ns = 200
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
@@ -985,8 +1054,24 @@ mod tests {
         // recorded clearing price is the discounted 0.95.
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.10), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.10),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1015,8 +1100,24 @@ mod tests {
     fn intra_zone_discount_does_not_rescue_above_bid_sell() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(0.96),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1039,8 +1140,24 @@ mod tests {
     fn cross_zone_above_bid_sell_still_excluded() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.0), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(0.96),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.0),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1110,8 +1227,24 @@ mod tests {
     fn dynamic_multiplier_below_one_does_not_rescue_above_bid_sell() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(0.96), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(1.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(0.96),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(1.5),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1137,8 +1270,24 @@ mod tests {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         // Cross-zone (no intra discount) so landed cost == sell price at multiplier 1.0.
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1166,8 +1315,24 @@ mod tests {
     fn negative_dynamic_multiplier_is_clamped() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1178,7 +1343,11 @@ mod tests {
             200,
         );
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].match_price, dec!(0.5), "negative multiplier clamped to 1.0");
+        assert_eq!(
+            matches[0].match_price,
+            dec!(0.5),
+            "negative multiplier clamped to 1.0"
+        );
     }
 
     /// Enforces a hard per-link flow cap so the per-cycle capacity ledger can be
@@ -1209,7 +1378,15 @@ mod tests {
         let buyer_a = Uuid::new_v4();
         let buyer_b = Uuid::new_v4();
         // One big cross-zone sell (zone 1) — liquidity is NOT the binding constraint.
-        let mut sells = vec![order(seller, dec!(0.5), dec!(200.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(200.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         // Two zone-2 buyers, each wanting 100 kWh. Same bid; A earlier → higher priority.
         let mut buys = vec![
             order(buyer_a, dec!(1.0), dec!(100.0), 2, 100, TimeInForce::Gtc, 0),
@@ -1224,7 +1401,11 @@ mod tests {
             unit(),
             300,
         );
-        assert_eq!(matches.len(), 1, "link carries only one 100 kWh fill, not two");
+        assert_eq!(
+            matches.len(),
+            1,
+            "link carries only one 100 kWh fill, not two"
+        );
         assert_eq!(
             matches[0].buyer_id, buyer_a,
             "higher-priority buyer wins the scarce link capacity"
@@ -1245,8 +1426,24 @@ mod tests {
     fn fok_buy_blocked_by_capacity_is_killed_whole() {
         let seller = Uuid::new_v4();
         let buyer = Uuid::new_v4();
-        let mut sells = vec![order(seller, dec!(0.5), dec!(200.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(150.0), 2, 100, TimeInForce::Fok, 0)];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(200.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(150.0),
+            2,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1256,7 +1453,10 @@ mod tests {
             unit(),
             200,
         );
-        assert!(matches.is_empty(), "FOK buy exceeding link capacity must fill nothing");
+        assert!(
+            matches.is_empty(),
+            "FOK buy exceeding link capacity must fill nothing"
+        );
         assert_eq!(buys[0].filled_amount, dec!(0.0));
         assert_eq!(
             stats.ioc_cancellations,
@@ -1270,8 +1470,24 @@ mod tests {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         // FOK wants 100, only 50 available → nothing fills.
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Fok, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, _) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1289,8 +1505,24 @@ mod tests {
     fn fok_fills_when_sufficient_liquidity() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Fok, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1307,7 +1539,15 @@ mod tests {
     #[test]
     fn partial_fill_carries_across_cycles() {
         let buyer = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let bmeta = meta(1);
 
         // Cycle 1: only 40 of liquidity.
@@ -1365,8 +1605,24 @@ mod tests {
     fn ioc_partial_fill_remainder_is_reported() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Ioc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Ioc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(40.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1390,7 +1646,15 @@ mod tests {
     #[test]
     fn ioc_with_no_liquidity_is_reported() {
         let buyer = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0), 1, 100, TimeInForce::Ioc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0),
+            1,
+            100,
+            TimeInForce::Ioc,
+            0,
+        )];
         let mut sells: Vec<FastOrder> = vec![];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
@@ -1414,8 +1678,24 @@ mod tests {
     fn ioc_fully_filled_is_not_reported() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Ioc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Ioc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1438,8 +1718,24 @@ mod tests {
     fn gtc_remainder_is_not_swept() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(40.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (_m, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1464,8 +1760,24 @@ mod tests {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         // Buyer wants 100 kWh FOK; only 40 kWh resting → all-or-nothing fails.
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Fok, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(40.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1475,7 +1787,10 @@ mod tests {
             unit(),
             200,
         );
-        assert!(matches.is_empty(), "FOK fills nothing when it can't fill fully");
+        assert!(
+            matches.is_empty(),
+            "FOK fills nothing when it can't fill fully"
+        );
         assert_eq!(buys[0].filled_amount, dec!(0.0));
         assert_eq!(
             stats.ioc_cancellations,
@@ -1493,7 +1808,15 @@ mod tests {
     fn fok_strands_dust_is_killed_whole() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0005), 1, 100, TimeInForce::Fok, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0005),
+            1,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
         let mut sells = vec![
             order(seller, dec!(0.5), dec!(10.0), 1, 100, TimeInForce::Gtc, 0),
             order(seller, dec!(0.5), dec!(1.0), 1, 101, TimeInForce::Gtc, 0),
@@ -1507,7 +1830,10 @@ mod tests {
             unit(),
             200,
         );
-        assert!(matches.is_empty(), "FOK that can't fully fill must not partially fill");
+        assert!(
+            matches.is_empty(),
+            "FOK that can't fully fill must not partially fill"
+        );
         assert_eq!(buys[0].filled_amount, dec!(0.0));
         assert_eq!(
             stats.ioc_cancellations,
@@ -1521,8 +1847,24 @@ mod tests {
     fn fok_fully_filled_is_not_reported() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(50.0), 1, 100, TimeInForce::Fok, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(50.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Fok,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(50.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1547,8 +1889,24 @@ mod tests {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         // Cross-zone (no intra discount) so landed cost = sell price, clean cross.
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(10.0005), 1, 100, TimeInForce::Ioc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(10.0), 2, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(10.0005),
+            1,
+            100,
+            TimeInForce::Ioc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(10.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1559,7 +1917,10 @@ mod tests {
             200,
         );
         assert_eq!(matches.len(), 1, "fills the 10.0 that crossed");
-        assert!(buys[0].remaining_amount() < MIN_TRADE_AMOUNT, "leftover is dust");
+        assert!(
+            buys[0].remaining_amount() < MIN_TRADE_AMOUNT,
+            "leftover is dust"
+        );
         assert_eq!(
             stats.ioc_cancellations,
             vec![buys[0].id],
@@ -1572,8 +1933,24 @@ mod tests {
     fn ioc_sell_remainder_is_reported() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
-        let mut buys = vec![order(buyer, dec!(1.0), dec!(40.0), 1, 100, TimeInForce::Gtc, 0)];
-        let mut sells = vec![order(seller, dec!(0.5), dec!(100.0), 1, 100, TimeInForce::Ioc, 0)];
+        let mut buys = vec![order(
+            buyer,
+            dec!(1.0),
+            dec!(40.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
+        let mut sells = vec![order(
+            seller,
+            dec!(0.5),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Ioc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1597,12 +1974,40 @@ mod tests {
         // neither gets the intra-zone discount → equal landed cost. Tiebreak
         // resolves to the smaller order id, stably across repeated runs.
         let buyer = Uuid::new_v4();
-        let s1 = order(Uuid::new_v4(), dec!(0.5), dec!(30.0), 1, 100, TimeInForce::Gtc, 0);
-        let s2 = order(Uuid::new_v4(), dec!(0.5), dec!(30.0), 2, 100, TimeInForce::Gtc, 1);
-        let expected_winner = if s1.id < s2.id { s1.user_id } else { s2.user_id };
+        let s1 = order(
+            Uuid::new_v4(),
+            dec!(0.5),
+            dec!(30.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        );
+        let s2 = order(
+            Uuid::new_v4(),
+            dec!(0.5),
+            dec!(30.0),
+            2,
+            100,
+            TimeInForce::Gtc,
+            1,
+        );
+        let expected_winner = if s1.id < s2.id {
+            s1.user_id
+        } else {
+            s2.user_id
+        };
 
         for run in 0..5 {
-            let mut buys = vec![order(buyer, dec!(1.0), dec!(30.0), 3, 100, TimeInForce::Gtc, 0)];
+            let mut buys = vec![order(
+                buyer,
+                dec!(1.0),
+                dec!(30.0),
+                3,
+                100,
+                TimeInForce::Gtc,
+                0,
+            )];
             let mut sells = vec![s1.clone(), s2.clone()];
             let (matches, _) = MatchingEngine::match_cycle(
                 &mut buys,
@@ -1629,10 +2034,30 @@ mod tests {
     fn single_zone_fast_path_matches_all_crossing() {
         let n = 300usize;
         let mut buys: Vec<FastOrder> = (0..n)
-            .map(|i| order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 1, i as i64, TimeInForce::Gtc, i))
+            .map(|i| {
+                order(
+                    Uuid::new_v4(),
+                    dec!(1.0),
+                    dec!(100.0),
+                    1,
+                    i as i64,
+                    TimeInForce::Gtc,
+                    i,
+                )
+            })
             .collect();
         let mut sells: Vec<FastOrder> = (0..n)
-            .map(|i| order(Uuid::new_v4(), dec!(0.9), dec!(100.0), 1, i as i64, TimeInForce::Gtc, i))
+            .map(|i| {
+                order(
+                    Uuid::new_v4(),
+                    dec!(0.9),
+                    dec!(100.0),
+                    1,
+                    i as i64,
+                    TimeInForce::Gtc,
+                    i,
+                )
+            })
             .collect();
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
@@ -1657,10 +2082,34 @@ mod tests {
         let cheap = Uuid::new_v4();
         let mut sells = vec![
             order(cheap, dec!(0.50), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
-            order(Uuid::new_v4(), dec!(0.70), dec!(100.0), 1, 101, TimeInForce::Gtc, 1),
-            order(Uuid::new_v4(), dec!(0.90), dec!(100.0), 1, 102, TimeInForce::Gtc, 2),
+            order(
+                Uuid::new_v4(),
+                dec!(0.70),
+                dec!(100.0),
+                1,
+                101,
+                TimeInForce::Gtc,
+                1,
+            ),
+            order(
+                Uuid::new_v4(),
+                dec!(0.90),
+                dec!(100.0),
+                1,
+                102,
+                TimeInForce::Gtc,
+                2,
+            ),
         ];
-        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            Uuid::new_v4(),
+            dec!(1.0),
+            dec!(100.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1670,7 +2119,11 @@ mod tests {
             unit(),
             100,
         );
-        assert_eq!(matches.len(), 1, "buyer fills entirely from the cheapest sell");
+        assert_eq!(
+            matches.len(),
+            1,
+            "buyer fills entirely from the cheapest sell"
+        );
         assert_eq!(matches[0].seller_id, cheap);
         assert_eq!(stats.total_volume, dec!(100.0));
     }
@@ -1680,14 +2133,27 @@ mod tests {
     /// never touches the 0.80 ask.
     #[test]
     fn single_zone_early_stop_gathers_across_sells() {
-        let (u1, u2, u3, u4) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (u1, u2, u3, u4) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
         let mut sells = vec![
             order(u1, dec!(0.50), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
             order(u2, dec!(0.60), dec!(100.0), 1, 101, TimeInForce::Gtc, 1),
             order(u3, dec!(0.70), dec!(100.0), 1, 102, TimeInForce::Gtc, 2),
             order(u4, dec!(0.80), dec!(100.0), 1, 103, TimeInForce::Gtc, 3),
         ];
-        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(250.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            Uuid::new_v4(),
+            dec!(1.0),
+            dec!(250.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1701,8 +2167,15 @@ mod tests {
         assert_eq!(stats.total_volume, dec!(250.0));
         let sellers: Vec<Uuid> = matches.iter().map(|m| m.seller_id).collect();
         assert!(sellers.contains(&u1) && sellers.contains(&u2) && sellers.contains(&u3));
-        assert!(!sellers.contains(&u4), "the dearest 0.80 ask must stay untouched");
-        assert_eq!(matches[2].match_amount, dec!(50.0), "third fill is the 50 remainder");
+        assert!(
+            !sellers.contains(&u4),
+            "the dearest 0.80 ask must stay untouched"
+        );
+        assert_eq!(
+            matches[2].match_amount,
+            dec!(50.0),
+            "third fill is the 50 remainder"
+        );
     }
 
     /// Grid capacity that caps one link at 150 while the buy wants 300. The
@@ -1726,9 +2199,27 @@ mod tests {
             }
         }
         let mut sells: Vec<FastOrder> = (0..4)
-            .map(|i| order(Uuid::new_v4(), dec!(0.5), dec!(100.0), 1, 100 + i as i64, TimeInForce::Gtc, i))
+            .map(|i| {
+                order(
+                    Uuid::new_v4(),
+                    dec!(0.5),
+                    dec!(100.0),
+                    1,
+                    100 + i as i64,
+                    TimeInForce::Gtc,
+                    i,
+                )
+            })
             .collect();
-        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(300.0), 1, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            Uuid::new_v4(),
+            dec!(1.0),
+            dec!(300.0),
+            1,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1740,9 +2231,17 @@ mod tests {
         );
         // First fill of 100 commits the link to 100; the next fill would push it to
         // 200 > 150 and is skipped, as are the rest — so only 100 settles.
-        assert_eq!(stats.total_volume, dec!(100.0), "capacity gate caps the fill at one 100 lot");
+        assert_eq!(
+            stats.total_volume,
+            dec!(100.0),
+            "capacity gate caps the fill at one 100 lot"
+        );
         assert_eq!(matches.len(), 1, "no double-count across the retry rebuild");
-        assert_eq!(buys[0].remaining_amount(), dec!(200.0), "buy left partially filled");
+        assert_eq!(
+            buys[0].remaining_amount(),
+            dec!(200.0),
+            "buy left partially filled"
+        );
     }
 
     /// Multi-zone k-way merge: every crossing pair across 8 zones must still match
@@ -1753,10 +2252,30 @@ mod tests {
     fn multi_zone_merge_matches_all_crossing() {
         let z = 8usize;
         let mut buys: Vec<FastOrder> = (0..z)
-            .map(|i| order(Uuid::new_v4(), dec!(1.0), dec!(100.0), (i % z) as i32, i as i64, TimeInForce::Gtc, i))
+            .map(|i| {
+                order(
+                    Uuid::new_v4(),
+                    dec!(1.0),
+                    dec!(100.0),
+                    (i % z) as i32,
+                    i as i64,
+                    TimeInForce::Gtc,
+                    i,
+                )
+            })
             .collect();
         let mut sells: Vec<FastOrder> = (0..z)
-            .map(|i| order(Uuid::new_v4(), dec!(0.9), dec!(100.0), (i % z) as i32, i as i64, TimeInForce::Gtc, i))
+            .map(|i| {
+                order(
+                    Uuid::new_v4(),
+                    dec!(0.9),
+                    dec!(100.0),
+                    (i % z) as i32,
+                    i as i64,
+                    TimeInForce::Gtc,
+                    i,
+                )
+            })
             .collect();
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
@@ -1780,11 +2299,35 @@ mod tests {
     fn multi_zone_merge_fills_globally_cheapest_first() {
         let cheap = Uuid::new_v4();
         let mut sells = vec![
-            order(Uuid::new_v4(), dec!(0.90), dec!(100.0), 1, 100, TimeInForce::Gtc, 0),
+            order(
+                Uuid::new_v4(),
+                dec!(0.90),
+                dec!(100.0),
+                1,
+                100,
+                TimeInForce::Gtc,
+                0,
+            ),
             order(cheap, dec!(0.50), dec!(100.0), 2, 100, TimeInForce::Gtc, 1),
-            order(Uuid::new_v4(), dec!(0.70), dec!(100.0), 3, 100, TimeInForce::Gtc, 2),
+            order(
+                Uuid::new_v4(),
+                dec!(0.70),
+                dec!(100.0),
+                3,
+                100,
+                TimeInForce::Gtc,
+                2,
+            ),
         ];
-        let mut buys = vec![order(Uuid::new_v4(), dec!(1.0), dec!(100.0), 99, 100, TimeInForce::Gtc, 0)];
+        let mut buys = vec![order(
+            Uuid::new_v4(),
+            dec!(1.0),
+            dec!(100.0),
+            99,
+            100,
+            TimeInForce::Gtc,
+            0,
+        )];
         let (matches, stats) = MatchingEngine::match_cycle(
             &mut buys,
             &mut sells,
@@ -1795,7 +2338,10 @@ mod tests {
             100,
         );
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].seller_id, cheap, "cheapest across zones wins the merge");
+        assert_eq!(
+            matches[0].seller_id, cheap,
+            "cheapest across zones wins the merge"
+        );
         assert_eq!(stats.total_volume, dec!(100.0));
     }
 }

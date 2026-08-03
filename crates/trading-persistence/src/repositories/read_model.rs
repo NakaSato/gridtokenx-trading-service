@@ -53,7 +53,10 @@ pub struct PgWalletReadModelRepository {
 impl PgWalletReadModelRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool, source_pool: None }
+        Self {
+            pool,
+            source_pool: None,
+        }
     }
 
     #[must_use]
@@ -265,10 +268,12 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
               FROM user_wallets
              WHERE user_id = $1";
 
-        let rows = if let Some(source) = &self.source_pool { sqlx::query(SELECT_ONE_USER)
-        .bind(user_id)
-        .fetch_all(source)
-        .await? } else {
+        let rows = if let Some(source) = &self.source_pool {
+            sqlx::query(SELECT_ONE_USER)
+                .bind(user_id)
+                .fetch_all(source)
+                .await?
+        } else {
             // No source pool: only the pre-cutover shared DB can answer.
             // Post-split the table is absent locally — skip rather than error
             // (mirrors the `backfill_wallets` no-source branch).
@@ -316,7 +321,10 @@ pub struct PgMeterReadModelRepository {
 impl PgMeterReadModelRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool, source_pool: None }
+        Self {
+            pool,
+            source_pool: None,
+        }
     }
 
     #[must_use]

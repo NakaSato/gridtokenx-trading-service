@@ -156,21 +156,22 @@ enum FeedAction {
 fn classify(event: FeedEvent) -> FeedAction {
     let FeedEvent { event_type, data } = event;
     match event_type.as_str() {
-        "UserWalletLinked" | "UserOnboarded" => match serde_json::from_value::<WalletLinkedData>(data)
-        {
-            Ok(d) => FeedAction::UpsertWallet(WalletReadModelRecord {
-                user_id: d.user_id,
-                wallet_address: d.wallet_address,
-                is_primary: d.is_primary,
-                blockchain_registered: d.blockchain_registered,
-                user_account_pda: d.user_account_pda,
-                shard_id: d.shard_id,
-            }),
-            Err(e) => FeedAction::BadPayload {
-                event_type,
-                error: e.to_string(),
-            },
-        },
+        "UserWalletLinked" | "UserOnboarded" => {
+            match serde_json::from_value::<WalletLinkedData>(data) {
+                Ok(d) => FeedAction::UpsertWallet(WalletReadModelRecord {
+                    user_id: d.user_id,
+                    wallet_address: d.wallet_address,
+                    is_primary: d.is_primary,
+                    blockchain_registered: d.blockchain_registered,
+                    user_account_pda: d.user_account_pda,
+                    shard_id: d.shard_id,
+                }),
+                Err(e) => FeedAction::BadPayload {
+                    event_type,
+                    error: e.to_string(),
+                },
+            }
+        }
         "UserWalletPrimaryChanged" => {
             match serde_json::from_value::<WalletPrimaryChangedData>(data) {
                 Ok(d) => FeedAction::SetWalletPrimary {
@@ -347,7 +348,11 @@ impl ReadModelFeedWorker {
                 user_id,
                 wallet_address,
             } => {
-                if let Err(e) = self.wallet_repo.delete_wallet(user_id, &wallet_address).await {
+                if let Err(e) = self
+                    .wallet_repo
+                    .delete_wallet(user_id, &wallet_address)
+                    .await
+                {
                     error!("ReadModelFeedWorker: wallet delete failed: {e}");
                 }
             }
@@ -549,7 +554,10 @@ mod tests {
         }));
         assert!(matches!(
             action,
-            FeedAction::SetWalletPrimary { is_primary: false, .. }
+            FeedAction::SetWalletPrimary {
+                is_primary: false,
+                ..
+            }
         ));
     }
 

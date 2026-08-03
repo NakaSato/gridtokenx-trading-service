@@ -1,6 +1,11 @@
 use sqlx::PgPool;
 use std::sync::Arc;
-use trading_core::traits::{OrderRepository, MeterRepository, SettlementRepository, OutboxRepository, FuturesRepository, CarbonRepository, AnalyticsRepository, PriceAlertRepository, RecurringOrderRepository, VppRepository, BlockchainGateway, IdentityGateway, CacheStore, AuditLog, EventPublisher, WalletReadModelRepository, MeterReadModelRepository};
+use trading_core::traits::{
+    AnalyticsRepository, AuditLog, BlockchainGateway, CacheStore, CarbonRepository, EventPublisher,
+    FuturesRepository, IdentityGateway, MeterReadModelRepository, MeterRepository, OrderRepository,
+    OutboxRepository, PriceAlertRepository, RecurringOrderRepository, SettlementRepository,
+    VppRepository, WalletReadModelRepository,
+};
 use trading_infra::audit::AuditLogger;
 use trading_infra::blockchain::BlockchainService;
 use trading_infra::cache::CacheService;
@@ -8,8 +13,7 @@ use trading_logic::{ClearingService, GridAwareTopology, MatcherService, Settleme
 use trading_persistence::repositories::{
     PostgresAnalyticsRepository, PostgresCarbonRepository, PostgresFuturesRepository,
     PostgresMeterRepository, PostgresOrderRepository, PostgresPriceAlertRepository,
-    PostgresRecurringOrderRepository,
-    PostgresSettlementRepository,
+    PostgresRecurringOrderRepository, PostgresSettlementRepository,
 };
 
 /// Container for all infrastructure components
@@ -66,13 +70,17 @@ impl ServiceBuilder {
         let order_repo = Arc::new(PostgresOrderRepository::new(db_pool.clone()));
         let meter_repo = Arc::new(PostgresMeterRepository::new(db_pool.clone()));
         let settlement_repo = Arc::new(PostgresSettlementRepository::new(db_pool.clone()));
-        let outbox_repo = Arc::new(trading_persistence::repositories::PostgresOutboxRepository::new(db_pool.clone()));
+        let outbox_repo = Arc::new(
+            trading_persistence::repositories::PostgresOutboxRepository::new(db_pool.clone()),
+        );
         let futures_repo = Arc::new(PostgresFuturesRepository::new(db_pool.clone()));
         let carbon_repo = Arc::new(PostgresCarbonRepository::new(db_pool.clone()));
         let analytics_repo = Arc::new(PostgresAnalyticsRepository::new(db_pool.clone()));
         let price_alert_repo = Arc::new(PostgresPriceAlertRepository::new(db_pool.clone()));
         let recurring_repo = Arc::new(PostgresRecurringOrderRepository::new(db_pool.clone()));
-        let vpp_repo = Arc::new(trading_persistence::repositories::PostgresVppRepository::new(db_pool.clone()));
+        let vpp_repo = Arc::new(
+            trading_persistence::repositories::PostgresVppRepository::new(db_pool.clone()),
+        );
 
         // IAM identity gateway. NOTE: trading does not call IAM at request time
         // — auth is header-based, injected by the APISIX gateway (see
@@ -82,12 +90,11 @@ impl ServiceBuilder {
         // removed; signing moved to Chain Bridge `chain.tx.submit`). Kept wired
         // so the seam is ready when the on-chain create_order gains a
         // non-signing owner account; remove if that path is abandoned.
-        let identity: Arc<dyn IdentityGateway> = Arc::new(
-            trading_infra::identity::IamIdentityGateway::new(
+        let identity: Arc<dyn IdentityGateway> =
+            Arc::new(trading_infra::identity::IamIdentityGateway::new(
                 &config.iam_service_url,
                 config.internal_api_key.clone(),
-            )
-        );
+            ));
 
         // Read-model repos (DB-per-service Phase 1). Built HERE — before the
         // BlockchainService — so the wallet read-model can be injected into it,
@@ -129,7 +136,8 @@ impl ServiceBuilder {
                     {
                         Ok(pool) => return Some(pool),
                         Err(e) if attempt < MAX_ATTEMPTS => {
-                            let backoff = std::time::Duration::from_millis(500 * u64::from(attempt));
+                            let backoff =
+                                std::time::Duration::from_millis(500 * u64::from(attempt));
                             tracing::warn!(
                                 "read-model backfill: {name} source DB not ready \
                                  (attempt {attempt}/{MAX_ATTEMPTS}, retrying in {backoff:?}): {e}"
@@ -153,7 +161,9 @@ impl ServiceBuilder {
                 connect_source("metering", config.readmodel_meter_db_url.clone()).await;
 
             let mut wallet_repo =
-                trading_persistence::repositories::PgWalletReadModelRepository::new(db_pool.clone());
+                trading_persistence::repositories::PgWalletReadModelRepository::new(
+                    db_pool.clone(),
+                );
             if let Some(pool) = iam_source {
                 wallet_repo = wallet_repo.with_source_pool(pool);
             }
@@ -259,7 +269,7 @@ impl ServiceBuilder {
         });
 
         let events: Arc<dyn EventPublisher> = Arc::new(
-            trading_infra::events::OutboxPublisher::new(outbox_repo.clone())
+            trading_infra::events::OutboxPublisher::new(outbox_repo.clone()),
         );
 
         // Read-model feed worker (DB-per-service Phase 1). The repos + boot

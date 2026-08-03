@@ -122,14 +122,22 @@ impl UniformAuction {
             buy_orders[b]
                 .price
                 .cmp(&buy_orders[a].price)
-                .then_with(|| buy_orders[a].created_at_ns.cmp(&buy_orders[b].created_at_ns))
+                .then_with(|| {
+                    buy_orders[a]
+                        .created_at_ns
+                        .cmp(&buy_orders[b].created_at_ns)
+                })
                 .then_with(|| buy_orders[a].id.cmp(&buy_orders[b].id))
         });
         sells.sort_unstable_by(|&a, &b| {
             sell_orders[a]
                 .price
                 .cmp(&sell_orders[b].price)
-                .then_with(|| sell_orders[a].created_at_ns.cmp(&sell_orders[b].created_at_ns))
+                .then_with(|| {
+                    sell_orders[a]
+                        .created_at_ns
+                        .cmp(&sell_orders[b].created_at_ns)
+                })
                 .then_with(|| sell_orders[a].id.cmp(&sell_orders[b].id))
         });
 
@@ -221,7 +229,8 @@ impl UniformAuction {
         let loss_fp = topology.calculate_loss_factor(zone, zone);
         let extra_loss_raw = loss_fp.raw().saturating_sub(FastPrice::FACTOR).max(0);
         let loss_cost_unit_raw = i64::try_from(
-            i128::from(p_star_fp.raw()) * i128::from(extra_loss_raw) / i128::from(FastPrice::FACTOR),
+            i128::from(p_star_fp.raw()) * i128::from(extra_loss_raw)
+                / i128::from(FastPrice::FACTOR),
         )
         .unwrap_or(i64::MAX);
         let loss_cost_unit = FastPrice::from_raw(loss_cost_unit_raw).to_decimal();
@@ -391,7 +400,11 @@ mod tests {
             .iter()
             .map(|m| (m.sell_order_id, m.match_amount))
             .collect();
-        assert_eq!(filled.get(&early_id), Some(&dec!(10.0)), "earlier sell full");
+        assert_eq!(
+            filled.get(&early_id),
+            Some(&dec!(10.0)),
+            "earlier sell full"
+        );
         assert_eq!(filled.get(&late_id), Some(&dec!(5.0)), "later sell partial");
     }
 
@@ -408,7 +421,10 @@ mod tests {
             &NoFeeTopology,
             200,
         );
-        assert!(res.zones.is_empty(), "different zones must not clear together");
+        assert!(
+            res.zones.is_empty(),
+            "different zones must not clear together"
+        );
     }
 
     #[test]

@@ -4,17 +4,17 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use tower::ServiceExt; // for oneshot
-use sqlx::PgPool;
-use uuid::Uuid;
 use chrono::Utc;
 use serde_json::json;
+use sqlx::PgPool;
+use tower::ServiceExt; // for oneshot
+use uuid::Uuid;
 
-use trading_service::builder::ServiceBuilder;
-use trading_api::state::AppState;
-use trading_api::startup::build_router;
-use gridtokenx_blockchain_core::auth::{INTERNAL_ROLE_HEADER, GATEWAY_SECRET_HEADER};
+use gridtokenx_blockchain_core::auth::{GATEWAY_SECRET_HEADER, INTERNAL_ROLE_HEADER};
 use trading_api::auth::USER_ID_HEADER;
+use trading_api::startup::build_router;
+use trading_api::state::AppState;
+use trading_service::builder::ServiceBuilder;
 
 mod common;
 
@@ -23,17 +23,37 @@ async fn test_api_routing_e2e() {
     // 1. Establish database connection
     let db_url = common::test_db_url();
 
-    let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
+    let pool = PgPool::connect(&db_url)
+        .await
+        .expect("Failed to connect to postgres");
 
     // 2. Setup environment variables for config
     std::env::set_var("TRADING_DATABASE_URL", &db_url);
     std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
-    std::env::set_var("ENERGY_TOKEN_MINT", "EneryTokenMint111111111111111111111111111");
-    std::env::set_var("CURRENCY_TOKEN_MINT", "8BGFtQLRaY9Nh5BGUwjJvdeXEsscCgJAi5zTgALk1Vg5");
-    std::env::set_var("FEE_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
-    std::env::set_var("WHEELING_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
-    std::env::set_var("LOSS_COLLECTOR_WALLET", "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ");
-    std::env::set_var("SOLANA_TRADING_PROGRAM_ID", "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd");
+    std::env::set_var(
+        "ENERGY_TOKEN_MINT",
+        "EneryTokenMint111111111111111111111111111",
+    );
+    std::env::set_var(
+        "CURRENCY_TOKEN_MINT",
+        "8BGFtQLRaY9Nh5BGUwjJvdeXEsscCgJAi5zTgALk1Vg5",
+    );
+    std::env::set_var(
+        "FEE_COLLECTOR_WALLET",
+        "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ",
+    );
+    std::env::set_var(
+        "WHEELING_COLLECTOR_WALLET",
+        "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ",
+    );
+    std::env::set_var(
+        "LOSS_COLLECTOR_WALLET",
+        "EzudwoHvNPAc4dpPi5ndU8MEZVHVzq3Pj3Thm9ooKmiJ",
+    );
+    std::env::set_var(
+        "SOLANA_TRADING_PROGRAM_ID",
+        "DA9TdkcToi5r7oS7X5CddoMBiGNF3sAGqwPQph1CfLwd",
+    );
     std::env::set_var("REDIS_URL", "redis://localhost:7010");
     std::env::set_var("SOLANA_RPC_URL", "http://localhost:8899");
     std::env::set_var("SOLANA_WS_URL", "ws://localhost:8900");
@@ -42,10 +62,14 @@ async fn test_api_routing_e2e() {
     // (mirrors main.rs; without it render() returns an empty string).
     trading_infra::metrics::install_recorder();
 
-    let config = std::sync::Arc::new(trading_core::config::Config::from_env().expect("Failed to load config"));
+    let config = std::sync::Arc::new(
+        trading_core::config::Config::from_env().expect("Failed to load config"),
+    );
 
     // 3. Build system components (with real DB and Redis connection, no mock repositories)
-    let (infra, services) = ServiceBuilder::build(pool.clone(), config.clone()).await.expect("Failed to build system");
+    let (infra, services) = ServiceBuilder::build(pool.clone(), config.clone())
+        .await
+        .expect("Failed to build system");
 
     let state = AppState {
         config,
@@ -71,7 +95,8 @@ async fn test_api_routing_e2e() {
     let app = build_router(state);
 
     // 5. Test Case 1: GET /health (Public)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -83,13 +108,16 @@ async fn test_api_routing_e2e() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body_json["status"], "ok");
     assert_eq!(body_json["service"], "trading");
 
     // 6. Test Case 2: GET /metrics (Public)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -101,14 +129,17 @@ async fn test_api_routing_e2e() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     // The recorder only renders metrics after their first emission, so at this
     // point the body just has to be valid text; content is asserted at step 12b
     // once an order submission has emitted trading_orders_submitted_total.
     std::str::from_utf8(&body).unwrap();
 
     // 6b. Test Case 2b: GET /api-docs/openapi.json + /docs (Public, OpenAPI)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -119,12 +150,15 @@ async fn test_api_routing_e2e() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(spec["paths"]["/api/v1/orders"].is_object());
     assert!(spec["paths"]["/health"].is_object());
 
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -150,7 +184,8 @@ async fn test_api_routing_e2e() {
         "zone_id": 1
     });
 
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -166,7 +201,8 @@ async fn test_api_routing_e2e() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     // 8. Test Case 4: POST /api/v1/orders (Fails: Missing Gateway Secret for api-gateway role)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -213,7 +249,8 @@ async fn test_api_routing_e2e() {
     .expect("Failed to insert test epoch");
 
     // 10. Test Case 5: POST /api/v1/orders (Success: Authenticated & Valid Request)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -229,13 +266,18 @@ async fn test_api_routing_e2e() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let order_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let order_id_str = order_resp["id"].as_str().expect("Order response should contain UUID id");
+    let order_id_str = order_resp["id"]
+        .as_str()
+        .expect("Order response should contain UUID id");
     let order_uuid = Uuid::parse_str(order_id_str).unwrap();
 
     // 11. Test Case 6: GET /api/v1/orders (Success: Retrieve User Orders)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -250,13 +292,18 @@ async fn test_api_routing_e2e() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let list_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let orders_list = list_resp["data"].as_array().expect("Response data should be an array");
+    let orders_list = list_resp["data"]
+        .as_array()
+        .expect("Response data should be an array");
     assert!(orders_list.iter().any(|o| o["id"] == order_id_str));
 
     // 12. Test Case 7: DELETE /api/v1/orders/{id} (Success: Cancel Order)
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("DELETE")
@@ -271,14 +318,17 @@ async fn test_api_routing_e2e() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let cancel_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(cancel_resp["status"], "cancelled");
     assert_eq!(cancel_resp["order_id"], order_id_str);
 
     // 12b. Test Case 7b: GET /metrics now carries the submission counter emitted
     // by the successful POST /api/v1/orders above.
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -289,7 +339,9 @@ async fn test_api_routing_e2e() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let metrics_str = std::str::from_utf8(&body).unwrap();
     assert!(
         metrics_str.contains("trading_orders_submitted_total"),
@@ -297,5 +349,9 @@ async fn test_api_routing_e2e() {
     );
 
     // 13. Teardown Database
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
 }

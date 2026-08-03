@@ -228,11 +228,7 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(())
     }
 
-    async fn insert_settlement_with_event(
-        &self,
-        s: &Settlement,
-        event: &Event,
-    ) -> TraitResult<()> {
+    async fn insert_settlement_with_event(&self, s: &Settlement, event: &Event) -> TraitResult<()> {
         // Settlement row + outbox row committed in one transaction: the event
         // can never be lost relative to the state change.
         let mut tx = self.pool.begin().await?;
@@ -363,10 +359,7 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(settlements.into_iter().map(Into::into).collect())
     }
 
-    async fn claim_settlements_for_processing(
-        &self,
-        ids: &[Uuid],
-    ) -> TraitResult<Vec<Settlement>> {
+    async fn claim_settlements_for_processing(&self, ids: &[Uuid]) -> TraitResult<Vec<Settlement>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }

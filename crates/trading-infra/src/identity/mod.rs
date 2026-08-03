@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use connectrpc::client::{HttpClient, ClientConfig};
+use connectrpc::client::{ClientConfig, HttpClient};
 use http::Uri;
 use iam_protocol::identity::IdentityServiceClient;
 use std::sync::Arc;

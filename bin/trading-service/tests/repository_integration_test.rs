@@ -1,13 +1,15 @@
 #![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
 
-use sqlx::PgPool;
-use uuid::Uuid;
 use chrono::Utc;
 use rust_decimal_macros::dec;
+use sqlx::PgPool;
+use trading_core::models::{Settlement, SettlementStatus, TradingOrder};
 use trading_core::traits::{MeterRepository, OrderRepository, SettlementRepository};
-use trading_core::models::{TradingOrder, Settlement, SettlementStatus};
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
-use trading_persistence::repositories::{PostgresMeterRepository, PostgresOrderRepository, PostgresSettlementRepository};
+use trading_persistence::repositories::{
+    PostgresMeterRepository, PostgresOrderRepository, PostgresSettlementRepository,
+};
+use uuid::Uuid;
 
 mod common;
 
@@ -16,7 +18,9 @@ async fn test_postgres_order_repository_e2e() {
     // 1. Establish central database connection
     let db_url = common::test_db_url();
 
-    let pool = PgPool::connect(&db_url).await.expect("Failed to connect to postgres");
+    let pool = PgPool::connect(&db_url)
+        .await
+        .expect("Failed to connect to postgres");
 
     // No `users` rows are seeded or cleaned up here: migration 20260728000000
     // (the DB-per-service split) dropped the cross-domain FK to IAM `users`, and
@@ -78,9 +82,16 @@ async fn test_postgres_order_repository_e2e() {
     };
 
     // 5. Test insert and fetch
-    order_repo.insert_order(&order).await.expect("Failed to insert order");
+    order_repo
+        .insert_order(&order)
+        .await
+        .expect("Failed to insert order");
 
-    let fetched = order_repo.get_order(order_id).await.expect("Failed to get order").expect("Order not found");
+    let fetched = order_repo
+        .get_order(order_id)
+        .await
+        .expect("Failed to get order")
+        .expect("Order not found");
     assert_eq!(fetched.id, order_id);
     assert_eq!(fetched.user_id, user_id);
     assert_eq!(fetched.energy_amount, dec!(15.5));
@@ -88,7 +99,10 @@ async fn test_postgres_order_repository_e2e() {
     assert_eq!(fetched.order_index, Some(42));
 
     // 6. Test status and fill updates
-    order_repo.update_filled_amount(order_id, dec!(5.5), OrderStatus::PartiallyFilled).await.expect("Failed to update filled amount");
+    order_repo
+        .update_filled_amount(order_id, dec!(5.5), OrderStatus::PartiallyFilled)
+        .await
+        .expect("Failed to update filled amount");
     let fetched_after_update = order_repo.get_order(order_id).await.unwrap().unwrap();
     assert_eq!(fetched_after_update.filled_amount, dec!(5.5));
     assert_eq!(fetched_after_update.status, OrderStatus::PartiallyFilled);
@@ -125,7 +139,10 @@ async fn test_postgres_order_repository_e2e() {
         time_in_force: TimeInForce::Gtc,
         market_segment: trading_core::types::MarketSegment::Realtime,
     };
-    order_repo.insert_order(&sell_order).await.expect("Failed to insert sell order");
+    order_repo
+        .insert_order(&sell_order)
+        .await
+        .expect("Failed to insert sell order");
 
     let settlement = Settlement {
         id: settlement_id,
@@ -158,8 +175,15 @@ async fn test_postgres_order_repository_e2e() {
         error_message: None,
     };
 
-    settlement_repo.insert_settlement(&settlement).await.expect("Failed to insert settlement");
-    let fetched_settlement = settlement_repo.get_settlement(settlement_id).await.unwrap().unwrap();
+    settlement_repo
+        .insert_settlement(&settlement)
+        .await
+        .expect("Failed to insert settlement");
+    let fetched_settlement = settlement_repo
+        .get_settlement(settlement_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched_settlement.id, settlement_id);
     assert_eq!(fetched_settlement.energy_amount, dec!(5.5));
 
@@ -170,9 +194,21 @@ async fn test_postgres_order_repository_e2e() {
     // survive teardown, and `market_epochs` deletion only NULLs their epoch
     // (ON DELETE SET NULL) — leaving orphaned active orders in the shared dev
     // order book that the live matcher then tries, and fails, to settle.
-    sqlx::query("DELETE FROM settlements WHERE id = $1").bind(settlement_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM settlements WHERE id = $1")
+        .bind(settlement_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 /// db-split guard: meter identity lookups must read the Trading-owned
@@ -205,7 +241,10 @@ async fn test_meter_repository_reads_read_model() {
     let repo = PostgresMeterRepository::new(pool.clone());
 
     // meter_id -> serial (the response-shaping path)
-    let serials = repo.get_serials_for_ids(&[meter_id]).await.expect("get_serials_for_ids");
+    let serials = repo
+        .get_serials_for_ids(&[meter_id])
+        .await
+        .expect("get_serials_for_ids");
     assert_eq!(
         serials.get(&meter_id).map(String::as_str),
         Some(serial.as_str()),
@@ -213,18 +252,32 @@ async fn test_meter_repository_reads_read_model() {
     );
 
     // serial -> meter_id (the order-submission path)
-    let resolved = repo.resolve_id_by_serial(&serial).await.expect("resolve_id_by_serial");
-    assert_eq!(resolved, Some(meter_id), "serial must resolve back to the meter_id");
+    let resolved = repo
+        .resolve_id_by_serial(&serial)
+        .await
+        .expect("resolve_id_by_serial");
+    assert_eq!(
+        resolved,
+        Some(meter_id),
+        "serial must resolve back to the meter_id"
+    );
 
     // Empty input short-circuits without touching the DB.
     let empty = repo.get_serials_for_ids(&[]).await.expect("empty ids");
     assert!(empty.is_empty());
 
     // Unknown serial yields None, not an error.
-    let missing = repo.resolve_id_by_serial("SN-DOES-NOT-EXIST").await.expect("missing serial");
+    let missing = repo
+        .resolve_id_by_serial("SN-DOES-NOT-EXIST")
+        .await
+        .expect("missing serial");
     assert_eq!(missing, None);
 
-    sqlx::query("DELETE FROM meter_read_model WHERE meter_id = $1").bind(meter_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM meter_read_model WHERE meter_id = $1")
+        .bind(meter_id)
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 /// Phase 0: the market_segment column round-trips. An Interval order inserted
@@ -278,7 +331,9 @@ async fn test_market_segment_round_trips() {
         time_in_force: TimeInForce::Gtc,
         market_segment: trading_core::types::MarketSegment::Interval,
     };
-    repo.insert_order(&order).await.expect("insert interval order");
+    repo.insert_order(&order)
+        .await
+        .expect("insert interval order");
     let fetched = repo.get_order(order_id).await.unwrap().unwrap();
     assert_eq!(
         fetched.market_segment,
@@ -289,14 +344,27 @@ async fn test_market_segment_round_trips() {
     // A defaulted (realtime) order also round-trips.
     order.id = Uuid::new_v4();
     order.market_segment = trading_core::types::MarketSegment::Realtime;
-    repo.insert_order(&order).await.expect("insert realtime order");
+    repo.insert_order(&order)
+        .await
+        .expect("insert realtime order");
     let rt = repo.get_order(order.id).await.unwrap().unwrap();
-    assert_eq!(rt.market_segment, trading_core::types::MarketSegment::Realtime);
+    assert_eq!(
+        rt.market_segment,
+        trading_core::types::MarketSegment::Realtime
+    );
 
     // Explicit order cleanup — no cross-domain FK cascade to rely on any more
     // (see the teardown note in the repository round-trip test above).
-    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 /// `expires_at` must survive the insert, and a lapsed order must not appear in the
@@ -376,9 +444,16 @@ async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
         status: OrderStatus::Active.to_string(),
         zone_id: Some(zone),
     };
-    repo.insert_order_with_event(&order, &event).await.expect("insert with event");
+    repo.insert_order_with_event(&order, &event)
+        .await
+        .expect("insert with event");
     assert!(
-        repo.get_order(order.id).await.unwrap().unwrap().expires_at.is_some(),
+        repo.get_order(order.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at
+            .is_some(),
         "insert_order_with_event must persist expires_at too"
     );
 
@@ -387,16 +462,24 @@ async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
     let expired_id = Uuid::new_v4();
     order.id = expired_id;
     order.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
-    repo.insert_order(&order).await.expect("insert expired order");
+    repo.insert_order(&order)
+        .await
+        .expect("insert expired order");
     assert_eq!(
         repo.get_order(expired_id).await.unwrap().unwrap().status,
         OrderStatus::Active,
         "precondition: the reaper has not touched it, so only the expiry filter can hide it"
     );
 
-    let zone_book = repo.get_active_orders_by_zone(zone).await.expect("zone book");
+    let zone_book = repo
+        .get_active_orders_by_zone(zone)
+        .await
+        .expect("zone book");
     let ids: Vec<Uuid> = zone_book.iter().map(|e| e.order_id).collect();
-    assert!(ids.contains(&live_id), "the unexpired order must still be quoted");
+    assert!(
+        ids.contains(&live_id),
+        "the unexpired order must still be quoted"
+    );
     assert!(
         !ids.contains(&expired_id),
         "an expired order must not appear as depth in the zone book"
@@ -409,8 +492,16 @@ async fn test_expires_at_persists_and_expired_orders_leave_the_live_book() {
          best bid/ask that price alerts fire on)"
     );
 
-    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 /// `settlements_with_lapsed_orders` against a real database.
@@ -454,35 +545,41 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
     // assertion, a panic), leftover Active rows would be reaped by
     // order_expiry_integration_test and fail ITS exact-set assertion. That is not
     // hypothetical: it happened while this test was being written.
-    let make_order = |side: OrderSide, expires_at: Option<chrono::DateTime<Utc>>, i: i64| TradingOrder {
-        id: Uuid::new_v4(),
-        user_id,
-        order_type: OrderType::Limit,
-        side,
-        energy_amount: dec!(1.0),
-        price_per_kwh: dec!(2.0),
-        filled_amount: dec!(1.0),
-        status: OrderStatus::Filled,
-        expires_at,
-        created_at: Some(Utc::now()),
-        filled_at: None,
-        epoch_id: Some(epoch_id),
-        zone_id: Some(1),
-        meter_id: None,
-        refund_tx_signature: None,
-        order_pda: None,
-        order_index: Some(i),
-        session_token: None,
-        blockchain_status: None,
-        blockchain_tx_hash: None,
-        blockchain_error: None,
-        retry_count: 0,
-        time_in_force: TimeInForce::Gtc,
-        market_segment: trading_core::types::MarketSegment::Realtime,
-    };
+    let make_order =
+        |side: OrderSide, expires_at: Option<chrono::DateTime<Utc>>, i: i64| TradingOrder {
+            id: Uuid::new_v4(),
+            user_id,
+            order_type: OrderType::Limit,
+            side,
+            energy_amount: dec!(1.0),
+            price_per_kwh: dec!(2.0),
+            filled_amount: dec!(1.0),
+            status: OrderStatus::Filled,
+            expires_at,
+            created_at: Some(Utc::now()),
+            filled_at: None,
+            epoch_id: Some(epoch_id),
+            zone_id: Some(1),
+            meter_id: None,
+            refund_tx_signature: None,
+            order_pda: None,
+            order_index: Some(i),
+            session_token: None,
+            blockchain_status: None,
+            blockchain_tx_hash: None,
+            blockchain_error: None,
+            retry_count: 0,
+            time_in_force: TimeInForce::Gtc,
+            market_segment: trading_core::types::MarketSegment::Realtime,
+        };
 
     // Each case is one settlement over a (buy, sell) pair with the given expiries.
-    let cases: Vec<(&str, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, bool)> = vec![
+    let cases: Vec<(
+        &str,
+        Option<chrono::DateTime<Utc>>,
+        Option<chrono::DateTime<Utc>>,
+        bool,
+    )> = vec![
         ("both legs no expiry (the NULL sentinel)", None, None, false),
         ("both legs still live", Some(future), Some(future), false),
         ("buy leg lapsed", Some(past), Some(future), true),
@@ -499,8 +596,14 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
         let buy = make_order(OrderSide::Buy, buy_exp, idx);
         idx += 1;
         let sell = make_order(OrderSide::Sell, sell_exp, idx);
-        order_repo.insert_order(&buy).await.expect("insert buy order");
-        order_repo.insert_order(&sell).await.expect("insert sell order");
+        order_repo
+            .insert_order(&buy)
+            .await
+            .expect("insert buy order");
+        order_repo
+            .insert_order(&sell)
+            .await
+            .expect("insert sell order");
 
         let settlement = Settlement {
             id: Uuid::new_v4(),
@@ -555,7 +658,10 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
     for (id, label) in &labels {
         let flagged = got.contains(id);
         let should = want.contains(id);
-        assert_eq!(flagged, should, "case '{label}' — flagged={flagged}, expected={should}");
+        assert_eq!(
+            flagged, should,
+            "case '{label}' — flagged={flagged}, expected={should}"
+        );
     }
     assert_eq!(got, want, "exactly the lapsed settlements, nothing else");
 
@@ -566,7 +672,11 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
         .settlements_with_lapsed_orders(&subset)
         .await
         .expect("scoped query");
-    assert_eq!(scoped, vec![expected_lapsed[0]], "the query must respect its id filter");
+    assert_eq!(
+        scoped,
+        vec![expected_lapsed[0]],
+        "the query must respect its id filter"
+    );
 
     // Empty input must not become "every lapsed settlement in the table".
     assert!(settlement_repo
@@ -575,7 +685,19 @@ async fn settlements_with_lapsed_orders_matches_only_the_lapsed_legs() {
         .expect("empty query")
         .is_empty());
 
-    sqlx::query("DELETE FROM settlements WHERE epoch_id = $1").bind(epoch_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(&pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM settlements WHERE epoch_id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(&pool)
+        .await
+        .ok();
 }

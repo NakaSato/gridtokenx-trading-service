@@ -11,8 +11,8 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
-use uuid::Uuid;
 use trading_core::fast_price::FastPrice;
+use uuid::Uuid;
 
 use trading_api::auth::USER_ID_HEADER;
 use trading_api::startup::build_router;
@@ -128,10 +128,28 @@ impl OrderRepository for MockSystem {
         Ok(Uuid::nil())
     }
     async fn get_order(&self, id: Uuid) -> TraitResult<Option<TradingOrder>> {
-        Ok(self.orders.lock().unwrap().iter().find(|o| o.id == id).cloned())
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|o| o.id == id)
+            .cloned())
     }
-    async fn get_orders_by_user(&self, user_id: Uuid, _limit: i64, _offset: i64) -> TraitResult<Vec<TradingOrder>> {
-        Ok(self.orders.lock().unwrap().iter().filter(|o| o.user_id == user_id).cloned().collect())
+    async fn get_orders_by_user(
+        &self,
+        user_id: Uuid,
+        _limit: i64,
+        _offset: i64,
+    ) -> TraitResult<Vec<TradingOrder>> {
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .cloned()
+            .collect())
     }
     async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> {
         Ok(self
@@ -153,18 +171,55 @@ impl OrderRepository for MockSystem {
             .map(to_book_entry)
             .collect())
     }
-    async fn update_order_status(&self, _id: Uuid, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
-    async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> { Ok(()) }
-    async fn update_filled_amount(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus) -> TraitResult<()> { Ok(()) }
-    async fn update_filled_amount_with_event(&self, _id: Uuid, _filled_amount: Decimal, _status: OrderStatus, _event: &Event) -> TraitResult<()> { Ok(()) }
+    async fn update_order_status(&self, _id: Uuid, _status: OrderStatus) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn update_order_pda(&self, _id: Uuid, _p: &str, _i: i64) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn update_filled_amount(
+        &self,
+        _id: Uuid,
+        _filled_amount: Decimal,
+        _status: OrderStatus,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn update_filled_amount_with_event(
+        &self,
+        _id: Uuid,
+        _filled_amount: Decimal,
+        _status: OrderStatus,
+        _event: &Event,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
     async fn get_active_buy_orders(&self) -> TraitResult<Vec<TradingOrder>> {
-        Ok(self.orders.lock().unwrap().iter().filter(|o| is_active(o.status) && o.side == OrderSide::Buy).cloned().collect())
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| is_active(o.status) && o.side == OrderSide::Buy)
+            .cloned()
+            .collect())
     }
     async fn get_active_sell_orders(&self) -> TraitResult<Vec<TradingOrder>> {
-        Ok(self.orders.lock().unwrap().iter().filter(|o| is_active(o.status) && o.side == OrderSide::Sell).cloned().collect())
+        Ok(self
+            .orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| is_active(o.status) && o.side == OrderSide::Sell)
+            .cloned()
+            .collect())
     }
-    async fn cancel_order(&self, _id: Uuid, _user_id: Uuid) -> TraitResult<bool> { Ok(true) }
-    async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> { Ok(vec![]) }
+    async fn cancel_order(&self, _id: Uuid, _user_id: Uuid) -> TraitResult<bool> {
+        Ok(true)
+    }
+    async fn bootstrap_active_orders(&self) -> TraitResult<Vec<TradingOrder>> {
+        Ok(vec![])
+    }
 }
 
 #[async_trait]
@@ -173,22 +228,84 @@ impl SettlementRepository for MockSystem {
         self.settlements.lock().unwrap().push(settlement.clone());
         Ok(())
     }
-    async fn insert_settlement_with_event(&self, settlement: &Settlement, _event: &Event) -> TraitResult<()> {
+    async fn insert_settlement_with_event(
+        &self,
+        settlement: &Settlement,
+        _event: &Event,
+    ) -> TraitResult<()> {
         self.settlements.lock().unwrap().push(settlement.clone());
         Ok(())
     }
     async fn get_settlement(&self, id: Uuid) -> TraitResult<Option<Settlement>> {
-        Ok(self.settlements.lock().unwrap().iter().find(|s| s.id == id).cloned())
+        Ok(self
+            .settlements
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.id == id)
+            .cloned())
     }
-    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> { Ok(Uuid::nil()) }
-    async fn insert_match(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>) -> TraitResult<()> { Ok(()) }
-    async fn insert_match_with_event(&self, _m: &trading_core::models::OrderMatch, _settlement_id: Option<Uuid>, _zone_id: Option<i32>, _event: &Event) -> TraitResult<()> { Ok(()) }
-    async fn persist_matched_trade(&self, _settlement: &trading_core::models::Settlement, _order_match: &trading_core::models::OrderMatch, _matched_event: &Event, _match_zone_id: Option<i32>, _buyer: &TradeFill, _seller: &TradeFill) -> TraitResult<bool> { Ok(true) }
-    async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
-    async fn claim_settlements_for_processing(&self, _ids: &[Uuid]) -> TraitResult<Vec<Settlement>> { Ok(vec![]) }
-    async fn reset_settlements_for_retry(&self, _ids: &[Uuid], _max_retries: i32, _error: Option<&str>) -> TraitResult<u64> { Ok(0) }
-    async fn reclaim_stale_processing(&self, _stale_after_secs: i64, _max_retries: i32) -> TraitResult<u64> { Ok(0) }
-    async fn list_settlements_for_user(&self, user_id: Uuid, limit: i64, offset: i64) -> TraitResult<(Vec<Settlement>, i64)> {
+    async fn get_or_create_active_epoch(&self) -> TraitResult<Uuid> {
+        Ok(Uuid::nil())
+    }
+    async fn insert_match(
+        &self,
+        _m: &trading_core::models::OrderMatch,
+        _settlement_id: Option<Uuid>,
+        _zone_id: Option<i32>,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn insert_match_with_event(
+        &self,
+        _m: &trading_core::models::OrderMatch,
+        _settlement_id: Option<Uuid>,
+        _zone_id: Option<i32>,
+        _event: &Event,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn persist_matched_trade(
+        &self,
+        _settlement: &trading_core::models::Settlement,
+        _order_match: &trading_core::models::OrderMatch,
+        _matched_event: &Event,
+        _match_zone_id: Option<i32>,
+        _buyer: &TradeFill,
+        _seller: &TradeFill,
+    ) -> TraitResult<bool> {
+        Ok(true)
+    }
+    async fn get_pending_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> {
+        Ok(vec![])
+    }
+    async fn claim_settlements_for_processing(
+        &self,
+        _ids: &[Uuid],
+    ) -> TraitResult<Vec<Settlement>> {
+        Ok(vec![])
+    }
+    async fn reset_settlements_for_retry(
+        &self,
+        _ids: &[Uuid],
+        _max_retries: i32,
+        _error: Option<&str>,
+    ) -> TraitResult<u64> {
+        Ok(0)
+    }
+    async fn reclaim_stale_processing(
+        &self,
+        _stale_after_secs: i64,
+        _max_retries: i32,
+    ) -> TraitResult<u64> {
+        Ok(0)
+    }
+    async fn list_settlements_for_user(
+        &self,
+        user_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> TraitResult<(Vec<Settlement>, i64)> {
         let s = self.settlements.lock().unwrap();
         let mut matched: Vec<Settlement> = s
             .iter()
@@ -220,13 +337,23 @@ impl SettlementRepository for MockSystem {
             total_settled_value,
         })
     }
-    async fn get_market_price(&self, window_hours: i64) -> TraitResult<trading_core::models::MarketPrice> {
+    async fn get_market_price(
+        &self,
+        window_hours: i64,
+    ) -> TraitResult<trading_core::models::MarketPrice> {
         use rust_decimal::Decimal;
         let s = self.settlements.lock().unwrap();
-        let done: Vec<_> = s.iter().filter(|x| x.status == SettlementStatus::Completed).collect();
+        let done: Vec<_> = s
+            .iter()
+            .filter(|x| x.status == SettlementStatus::Completed)
+            .collect();
         let volume: Decimal = done.iter().map(|x| x.energy_amount).sum();
         let notional: Decimal = done.iter().map(|x| x.price * x.energy_amount).sum();
-        let vwap = if volume.is_zero() { Decimal::ZERO } else { notional / volume };
+        let vwap = if volume.is_zero() {
+            Decimal::ZERO
+        } else {
+            notional / volume
+        };
         let high = done.iter().map(|x| x.price).max().unwrap_or(Decimal::ZERO);
         let low = done.iter().map(|x| x.price).min().unwrap_or(Decimal::ZERO);
         let last_price = done.last().map(|x| x.price).unwrap_or(Decimal::ZERO);
@@ -251,26 +378,93 @@ impl SettlementRepository for MockSystem {
         }
         Ok(ids.len() as i64)
     }
-    async fn update_settlement_status(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>) -> TraitResult<()> { Ok(()) }
-    async fn update_settlement_status_with_event(&self, _id: Uuid, _status: &str, _tx_hash: Option<&str>, _error: Option<&str>, _event: &Event) -> TraitResult<()> { Ok(()) }
+    async fn update_settlement_status(
+        &self,
+        _id: Uuid,
+        _status: &str,
+        _tx_hash: Option<&str>,
+        _error: Option<&str>,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn update_settlement_status_with_event(
+        &self,
+        _id: Uuid,
+        _status: &str,
+        _tx_hash: Option<&str>,
+        _error: Option<&str>,
+        _event: &Event,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl FuturesRepository for MockSystem {
-    async fn get_products(&self) -> TraitResult<Vec<FuturesProduct>> { Ok(self.futures_products.lock().unwrap().clone()) }
-    async fn get_product(&self, id: Uuid) -> TraitResult<Option<FuturesProduct>> { Ok(self.futures_products.lock().unwrap().iter().find(|p| p.id == id).cloned()) }
-    async fn insert_order(&self, order: &FuturesOrder) -> TraitResult<()> { self.futures_orders.lock().unwrap().push(order.clone()); Ok(()) }
-    async fn get_orders_by_user(&self, user_id: Uuid) -> TraitResult<Vec<FuturesOrder>> { Ok(self.futures_orders.lock().unwrap().iter().filter(|o| o.user_id == user_id).cloned().collect()) }
-    async fn get_positions_by_user(&self, user_id: Uuid) -> TraitResult<Vec<FuturesPosition>> { Ok(self.futures_positions.lock().unwrap().iter().filter(|p| p.user_id == user_id).cloned().collect()) }
-    async fn close_position(&self, id: Uuid) -> TraitResult<()> { self.futures_positions.lock().unwrap().retain(|p| p.id != id); Ok(()) }
+    async fn get_products(&self) -> TraitResult<Vec<FuturesProduct>> {
+        Ok(self.futures_products.lock().unwrap().clone())
+    }
+    async fn get_product(&self, id: Uuid) -> TraitResult<Option<FuturesProduct>> {
+        Ok(self
+            .futures_products
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned())
+    }
+    async fn insert_order(&self, order: &FuturesOrder) -> TraitResult<()> {
+        self.futures_orders.lock().unwrap().push(order.clone());
+        Ok(())
+    }
+    async fn get_orders_by_user(&self, user_id: Uuid) -> TraitResult<Vec<FuturesOrder>> {
+        Ok(self
+            .futures_orders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+    async fn get_positions_by_user(&self, user_id: Uuid) -> TraitResult<Vec<FuturesPosition>> {
+        Ok(self
+            .futures_positions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+    async fn close_position(&self, id: Uuid) -> TraitResult<()> {
+        self.futures_positions
+            .lock()
+            .unwrap()
+            .retain(|p| p.id != id);
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl CarbonRepository for MockSystem {
-    async fn get_balance(&self, user_id: Uuid) -> TraitResult<Decimal> { Ok(*self.carbon_balances.lock().unwrap().get(&user_id).unwrap_or(&Decimal::ZERO)) }
-    async fn get_history(&self, _user_id: Uuid) -> TraitResult<Vec<CarbonCredit>> { Ok(vec![]) }
-    async fn get_transactions(&self, _user_id: Uuid) -> TraitResult<Vec<CarbonTransaction>> { Ok(vec![]) }
-    async fn insert_transaction(&self, _tx: &CarbonTransaction) -> TraitResult<()> { Ok(()) }
+    async fn get_balance(&self, user_id: Uuid) -> TraitResult<Decimal> {
+        Ok(*self
+            .carbon_balances
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .unwrap_or(&Decimal::ZERO))
+    }
+    async fn get_history(&self, _user_id: Uuid) -> TraitResult<Vec<CarbonCredit>> {
+        Ok(vec![])
+    }
+    async fn get_transactions(&self, _user_id: Uuid) -> TraitResult<Vec<CarbonTransaction>> {
+        Ok(vec![])
+    }
+    async fn insert_transaction(&self, _tx: &CarbonTransaction) -> TraitResult<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -284,22 +478,51 @@ impl AnalyticsRepository for MockSystem {
             reliability_score: 0.98,
         })
     }
-    async fn get_user_transactions(&self, _user_id: Uuid) -> TraitResult<Vec<TransactionData>> { Ok(vec![]) }
+    async fn get_user_transactions(&self, _user_id: Uuid) -> TraitResult<Vec<TransactionData>> {
+        Ok(vec![])
+    }
 }
 
 #[async_trait]
 impl EventPublisher for MockSystem {
-    async fn publish(&self, event: Event) -> TraitResult<()> { self.published_events.lock().unwrap().push(event); Ok(()) }
-    async fn publish_to_topic(&self, _topic: &str, event: Event) -> TraitResult<()> { self.publish(event).await }
-    async fn create_consumer_group(&self, _group_name: &str) -> TraitResult<()> { Ok(()) }
-    async fn consume_events(&self, _g: &str, _c: &str, _h: Arc<dyn Fn(Event) -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>> + Send + Sync>) -> TraitResult<()> { Ok(()) }
+    async fn publish(&self, event: Event) -> TraitResult<()> {
+        self.published_events.lock().unwrap().push(event);
+        Ok(())
+    }
+    async fn publish_to_topic(&self, _topic: &str, event: Event) -> TraitResult<()> {
+        self.publish(event).await
+    }
+    async fn create_consumer_group(&self, _group_name: &str) -> TraitResult<()> {
+        Ok(())
+    }
+    async fn consume_events(
+        &self,
+        _g: &str,
+        _c: &str,
+        _h: Arc<
+            dyn Fn(
+                    Event,
+                )
+                    -> std::pin::Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl BlockchainGateway for MockSystem {
-    async fn is_user_registered(&self, _u: Uuid) -> TraitResult<bool> { Ok(true) }
-    async fn get_user_wallet(&self, _u: Uuid) -> TraitResult<Option<String>> { Ok(Some("wallet_address".to_string())) }
-    async fn get_token_balance(&self, _w: &str) -> TraitResult<u64> { Ok(1000000000) }
+    async fn is_user_registered(&self, _u: Uuid) -> TraitResult<bool> {
+        Ok(true)
+    }
+    async fn get_user_wallet(&self, _u: Uuid) -> TraitResult<Option<String>> {
+        Ok(Some("wallet_address".to_string()))
+    }
+    async fn get_token_balance(&self, _w: &str) -> TraitResult<u64> {
+        Ok(1000000000)
+    }
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<ZoneConfig> {
         Ok(ZoneConfig {
             zone_id,
@@ -309,22 +532,45 @@ impl BlockchainGateway for MockSystem {
             last_updated: chrono::Utc::now(),
         })
     }
-    async fn execute_batched_settlements(&self, _s: Vec<Settlement>) -> TraitResult<Vec<SettlementTransaction>> { Ok(vec![]) }
-    async fn issue_erc(&self, _u: Uuid, _m: &str, _a: Decimal) -> TraitResult<String> { Ok("erc_sig".to_string()) }
-    async fn sync_total_supply(&self) -> TraitResult<String> { Ok("sync_sig".to_string()) }
-    async fn execute_create_order(&self, _u: Uuid, _m: &str, _a: u64, _p: u64, _s: &str, _e: Option<&str>, _z: u32, _x: i64) -> TraitResult<(String, String, u64)> {
+    async fn execute_batched_settlements(
+        &self,
+        _s: Vec<Settlement>,
+    ) -> TraitResult<Vec<SettlementTransaction>> {
+        Ok(vec![])
+    }
+    async fn issue_erc(&self, _u: Uuid, _m: &str, _a: Decimal) -> TraitResult<String> {
+        Ok("erc_sig".to_string())
+    }
+    async fn sync_total_supply(&self) -> TraitResult<String> {
+        Ok("sync_sig".to_string())
+    }
+    async fn execute_create_order(
+        &self,
+        _u: Uuid,
+        _m: &str,
+        _a: u64,
+        _p: u64,
+        _s: &str,
+        _e: Option<&str>,
+        _z: u32,
+        _x: i64,
+    ) -> TraitResult<(String, String, u64)> {
         Ok(("sig".to_string(), "pda".to_string(), 1))
     }
 }
 
 #[async_trait]
 impl IdentityGateway for MockSystem {
-    async fn sign_message(&self, _u: Uuid, _w: Option<String>, m: Vec<u8>) -> TraitResult<Vec<u8>> { Ok(m) }
+    async fn sign_message(&self, _u: Uuid, _w: Option<String>, m: Vec<u8>) -> TraitResult<Vec<u8>> {
+        Ok(m)
+    }
 }
 
 #[async_trait]
 impl AuditLog for MockSystem {
-    async fn log_action(&self, _u: Uuid, _a: &str, _d: &str) -> TraitResult<()> { Ok(()) }
+    async fn log_action(&self, _u: Uuid, _a: &str, _d: &str) -> TraitResult<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -347,10 +593,25 @@ impl VppRepository for MockSystem {
             created_at: Some(chrono::Utc::now()),
         }))
     }
-    async fn get_all_clusters(&self) -> TraitResult<Vec<VppCluster>> { Ok(vec![]) }
-    async fn get_member_association(&self, _m: &str) -> TraitResult<Option<VppMember>> { Ok(None) }
-    async fn get_cluster_members(&self, _c: &str) -> TraitResult<Vec<VppMember>> { Ok(vec![]) }
-    async fn update_cluster_metrics(&self, _c: &str, _s: f64, _soc: f64, _fu: f64, _fd: f64) -> TraitResult<()> { Ok(()) }
+    async fn get_all_clusters(&self) -> TraitResult<Vec<VppCluster>> {
+        Ok(vec![])
+    }
+    async fn get_member_association(&self, _m: &str) -> TraitResult<Option<VppMember>> {
+        Ok(None)
+    }
+    async fn get_cluster_members(&self, _c: &str) -> TraitResult<Vec<VppMember>> {
+        Ok(vec![])
+    }
+    async fn update_cluster_metrics(
+        &self,
+        _c: &str,
+        _s: f64,
+        _soc: f64,
+        _fu: f64,
+        _fd: f64,
+    ) -> TraitResult<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -441,7 +702,10 @@ impl RecurringOrderRepository for MockSystem {
     ) -> TraitResult<()> {
         Ok(())
     }
-    async fn create_recurring_order(&self, input: NewRecurringOrder) -> TraitResult<RecurringOrder> {
+    async fn create_recurring_order(
+        &self,
+        input: NewRecurringOrder,
+    ) -> TraitResult<RecurringOrder> {
         let order = RecurringOrder {
             id: Uuid::new_v4(),
             user_id: input.user_id,
@@ -516,9 +780,15 @@ impl RecurringOrderRepository for MockSystem {
 
 struct TopologyStub;
 impl trading_engine::engine::TopologySnapshot for TopologyStub {
-    fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool { true }
-    fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice { FastPrice::from_raw(1000) }
-    fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice { FastPrice::from_raw(1000000) }
+    fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+        true
+    }
+    fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+        FastPrice::from_raw(1000)
+    }
+    fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+        FastPrice::from_raw(1000000)
+    }
 }
 
 // ── Mock helpers / factories ──────────────────────────────────────────────────
@@ -612,7 +882,9 @@ fn mk_settlement(status: SettlementStatus, total: i64) -> Settlement {
 async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let res = request(app, "GET", uri, Uuid::new_v4(), Body::empty()).await;
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -767,20 +1039,39 @@ async fn test_all_endpoints() {
     let user_id = Uuid::new_v4();
 
     // 1. Submit Order
-    let res = request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(json!({
-        "side": "buy",
-        "order_type": "limit",
-        "energy_amount_kwh": "100.5",
-        "price_per_kwh": "4.5",
-        "zone_id": 1
-    }).to_string())).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(
+            json!({
+                "side": "buy",
+                "order_type": "limit",
+                "energy_amount_kwh": "100.5",
+                "price_per_kwh": "4.5",
+                "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let created_id = created["id"].as_str().expect("submit response has id");
 
     // 2. Get Order by ID (use the order created in step 1, not a random id)
-    let res = request(app.clone(), "GET", &format!("/api/v1/orders/{}", created_id), user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/orders/{}", created_id),
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 3. List Orders
@@ -788,20 +1079,44 @@ async fn test_all_endpoints() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // 4. Cancel Order
-    let res = request(app.clone(), "DELETE", &format!("/api/v1/orders/{}", Uuid::new_v4()), user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/orders/{}", Uuid::new_v4()),
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 5. Create Quote
-    let res = request(app.clone(), "POST", "/api/v1/quotes", user_id, Body::from(json!({
-        "buyer_zone_id": 1,
-        "seller_zone_id": 2,
-        "energy_amount_kwh": "100",
-        "agreed_price": "4.5"
-    }).to_string())).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/quotes",
+        user_id,
+        Body::from(
+            json!({
+                "buyer_zone_id": 1,
+                "seller_zone_id": 2,
+                "energy_amount_kwh": "100",
+                "agreed_price": "4.5"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 6. Order Book
-    let res = request(app.clone(), "GET", "/api/v1/zones/1/book", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/zones/1/book",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 7. Market Stats
@@ -809,65 +1124,165 @@ async fn test_all_endpoints() {
     assert_eq!(res.status(), StatusCode::OK);
 
     // 8. Futures Products
-    let res = request(app.clone(), "GET", "/api/v1/futures/products", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/futures/products",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 9. Futures Order
-    let res = request(app.clone(), "POST", "/api/v1/futures/orders", user_id, Body::from(json!({
-        "product_id": Uuid::new_v4().to_string(),
-        "side": "buy",
-        "order_type": "market",
-        "quantity": 1.5,
-        "price": 50000.0,
-        "leverage": 10
-    }).to_string())).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/futures/orders",
+        user_id,
+        Body::from(
+            json!({
+                "product_id": Uuid::new_v4().to_string(),
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 1.5,
+                "price": 50000.0,
+                "leverage": 10
+            })
+            .to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 10. Futures Positions
-    let res = request(app.clone(), "GET", "/api/v1/futures/positions", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/futures/positions",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 11. Futures Orders (List)
-    let res = request(app.clone(), "GET", "/api/v1/futures/orders", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/futures/orders",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 12. Close Futures Position
-    let res = request(app.clone(), "DELETE", &format!("/api/v1/futures/positions/{}", Uuid::new_v4()), user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/futures/positions/{}", Uuid::new_v4()),
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 13. Wallet Balance
-    let res = request(app.clone(), "GET", "/api/v1/wallets/addr123/balance", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/wallets/addr123/balance",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 14. Analytics Stats
-    let res = request(app.clone(), "GET", "/api/v1/analytics/stats", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/analytics/stats",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 15. Transaction History
-    let res = request(app.clone(), "GET", "/api/v1/transactions", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/transactions",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 16. Carbon Balance
-    let res = request(app.clone(), "GET", "/api/v1/carbon/balance", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/carbon/balance",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 17. Carbon History
-    let res = request(app.clone(), "GET", "/api/v1/carbon/history", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/carbon/history",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 18. Carbon Transactions
-    let res = request(app.clone(), "GET", "/api/v1/carbon/transactions", user_id, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "GET",
+        "/api/v1/carbon/transactions",
+        user_id,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 19. Carbon Transfers
-    let res = request(app.clone(), "POST", "/api/v1/carbon/transfers", user_id, Body::from(json!({
-        "to_user_id": Uuid::new_v4(),
-        "amount": "10.0"
-    }).to_string())).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/carbon/transfers",
+        user_id,
+        Body::from(
+            json!({
+                "to_user_id": Uuid::new_v4(),
+                "amount": "10.0"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     // 20. Health
-    let res = app.clone().oneshot(Request::builder().method("GET").uri("/health").body(Body::empty()).unwrap()).await.unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
 
@@ -1019,7 +1434,9 @@ async fn get_json_as(
 ) -> (StatusCode, serde_json::Value) {
     let res = request(app, "GET", uri, user_id, Body::empty()).await;
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -1057,9 +1474,24 @@ async fn test_trades_user_scoped_and_role() {
     let other = Uuid::new_v4();
     {
         let mut s = mock.settlements.lock().unwrap();
-        s.push(mk_settlement_between(me, other, SettlementStatus::Completed, 10)); // me=buyer
-        s.push(mk_settlement_between(other, me, SettlementStatus::Completed, 20)); // me=seller
-        s.push(mk_settlement_between(other, other, SettlementStatus::Completed, 30)); // not mine
+        s.push(mk_settlement_between(
+            me,
+            other,
+            SettlementStatus::Completed,
+            10,
+        )); // me=buyer
+        s.push(mk_settlement_between(
+            other,
+            me,
+            SettlementStatus::Completed,
+            20,
+        )); // me=seller
+        s.push(mk_settlement_between(
+            other,
+            other,
+            SettlementStatus::Completed,
+            30,
+        )); // not mine
     }
     let app = build_router(state);
     let (status, body) = get_json_as(app, "/api/v1/trades", me).await;
@@ -1083,7 +1515,12 @@ async fn test_trades_pagination() {
     {
         let mut s = mock.settlements.lock().unwrap();
         for i in 0..5 {
-            s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, i));
+            s.push(mk_settlement_between(
+                me,
+                Uuid::new_v4(),
+                SettlementStatus::Completed,
+                i,
+            ));
         }
     }
     let app = build_router(state);
@@ -1100,17 +1537,41 @@ async fn test_trades_export_csv() {
     let me = Uuid::new_v4();
     {
         let mut s = mock.settlements.lock().unwrap();
-        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 10));
-        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 20));
+        s.push(mk_settlement_between(
+            me,
+            Uuid::new_v4(),
+            SettlementStatus::Completed,
+            10,
+        ));
+        s.push(mk_settlement_between(
+            me,
+            Uuid::new_v4(),
+            SettlementStatus::Completed,
+            20,
+        ));
     }
     let app = build_router(state);
     let res = request(app, "GET", "/api/v1/trades/export", me, Body::empty()).await;
     assert_eq!(res.status(), StatusCode::OK);
-    let ct = res.headers().get("content-type").unwrap().to_str().unwrap().to_string();
-    let cd = res.headers().get("content-disposition").unwrap().to_str().unwrap().to_string();
+    let ct = res
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let cd = res
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(ct.starts_with("text/csv"));
     assert!(cd.contains("trades.csv"));
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let csv = String::from_utf8(bytes.to_vec()).unwrap();
     let lines: Vec<&str> = csv.lines().collect();
     assert!(lines[0].starts_with("id,executed_at,role,"));
@@ -1123,7 +1584,12 @@ async fn test_trades_export_json_format() {
     let me = Uuid::new_v4();
     {
         let mut s = mock.settlements.lock().unwrap();
-        s.push(mk_settlement_between(me, Uuid::new_v4(), SettlementStatus::Completed, 10));
+        s.push(mk_settlement_between(
+            me,
+            Uuid::new_v4(),
+            SettlementStatus::Completed,
+            10,
+        ));
     }
     let app = build_router(state);
     let (status, body) = get_json_as(app, "/api/v1/trades/export?format=json", me).await;
@@ -1143,7 +1609,9 @@ async fn post_json_as(
 ) -> (StatusCode, serde_json::Value) {
     let res = request(app, "POST", uri, user_id, Body::from(body.to_string())).await;
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -1200,8 +1668,13 @@ async fn test_price_alert_list_user_scoped() {
     let app = build_router(state);
     let me = Uuid::new_v4();
     let other = Uuid::new_v4();
-    let (s, _) = post_json_as(app.clone(), "/api/v1/price-alerts", other,
-        json!({ "symbol": "X", "target_price": "1.0", "condition": "above" })).await;
+    let (s, _) = post_json_as(
+        app.clone(),
+        "/api/v1/price-alerts",
+        other,
+        json!({ "symbol": "X", "target_price": "1.0", "condition": "above" }),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let (status, body) = get_json_as(app, "/api/v1/price-alerts", me).await;
     assert_eq!(status, StatusCode::OK);
@@ -1213,11 +1686,23 @@ async fn test_price_alert_delete_roundtrip() {
     let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
     let app = build_router(state);
     let me = Uuid::new_v4();
-    let (_, created) = post_json_as(app.clone(), "/api/v1/price-alerts", me,
-        json!({ "symbol": "GRID", "target_price": "2.0", "condition": "below" })).await;
+    let (_, created) = post_json_as(
+        app.clone(),
+        "/api/v1/price-alerts",
+        me,
+        json!({ "symbol": "GRID", "target_price": "2.0", "condition": "below" }),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let res = request(app.clone(), "DELETE", &format!("/api/v1/price-alerts/{id}"), me, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/price-alerts/{id}"),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let (status, body) = get_json_as(app, "/api/v1/price-alerts", me).await;
@@ -1229,7 +1714,14 @@ async fn test_price_alert_delete_roundtrip() {
 async fn test_price_alert_delete_foreign_404() {
     let app = build_router(setup_test_state(test_oracle_key()));
     let me = Uuid::new_v4();
-    let res = request(app, "DELETE", &format!("/api/v1/price-alerts/{}", Uuid::new_v4()), me, Body::empty()).await;
+    let res = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/price-alerts/{}", Uuid::new_v4()),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1238,8 +1730,16 @@ async fn test_price_alert_bad_condition_400() {
     let app = build_router(setup_test_state(test_oracle_key()));
     let me = Uuid::new_v4();
     // 400 body is plain text, not JSON — use raw request and assert status only.
-    let res = request(app, "POST", "/api/v1/price-alerts", me,
-        Body::from(json!({ "symbol": "GRID", "target_price": "1.0", "condition": "sideways" }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/price-alerts",
+        me,
+        Body::from(
+            json!({ "symbol": "GRID", "target_price": "1.0", "condition": "sideways" }).to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -1305,8 +1805,13 @@ async fn test_recurring_list_user_scoped() {
     let app = build_router(state);
     let me = Uuid::new_v4();
     let other = Uuid::new_v4();
-    let (s, _) = post_json_as(app.clone(), "/api/v1/orders/recurring", other,
-        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    let (s, _) = post_json_as(
+        app.clone(),
+        "/api/v1/orders/recurring",
+        other,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" }),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let (status, body) = get_json_as(app, "/api/v1/orders/recurring", me).await;
     assert_eq!(status, StatusCode::OK);
@@ -1318,17 +1823,30 @@ async fn test_recurring_get_roundtrip_and_foreign_404() {
     let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
     let app = build_router(state);
     let me = Uuid::new_v4();
-    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
-        json!({ "side": "buy", "energy_amount": "3.0", "interval_type": "weekly" })).await;
+    let (_, created) = post_json_as(
+        app.clone(),
+        "/api/v1/orders/recurring",
+        me,
+        json!({ "side": "buy", "energy_amount": "3.0", "interval_type": "weekly" }),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let (status, body) = get_json_as(app.clone(), &format!("/api/v1/orders/recurring/{id}"), me).await;
+    let (status, body) =
+        get_json_as(app.clone(), &format!("/api/v1/orders/recurring/{id}"), me).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["id"].as_str().unwrap(), id);
 
     // foreign user cannot read it
     let other = Uuid::new_v4();
-    let res = request(app, "GET", &format!("/api/v1/orders/recurring/{id}"), other, Body::empty()).await;
+    let res = request(
+        app,
+        "GET",
+        &format!("/api/v1/orders/recurring/{id}"),
+        other,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1337,16 +1855,35 @@ async fn test_recurring_pause_resume_flips_status() {
     let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
     let app = build_router(state);
     let me = Uuid::new_v4();
-    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
-        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    let (_, created) = post_json_as(
+        app.clone(),
+        "/api/v1/orders/recurring",
+        me,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" }),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let res = request(app.clone(), "POST", &format!("/api/v1/orders/recurring/{id}/pause"), me, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/orders/recurring/{id}/pause"),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     let (_, body) = get_json_as(app.clone(), &format!("/api/v1/orders/recurring/{id}"), me).await;
     assert_eq!(body["status"], "paused");
 
-    let res = request(app.clone(), "POST", &format!("/api/v1/orders/recurring/{id}/resume"), me, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/orders/recurring/{id}/resume"),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     let (_, body) = get_json_as(app, &format!("/api/v1/orders/recurring/{id}"), me).await;
     assert_eq!(body["status"], "active");
@@ -1357,11 +1894,23 @@ async fn test_recurring_delete_roundtrip() {
     let (state, _mock) = setup_test_state_with_mock(test_oracle_key());
     let app = build_router(state);
     let me = Uuid::new_v4();
-    let (_, created) = post_json_as(app.clone(), "/api/v1/orders/recurring", me,
-        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" })).await;
+    let (_, created) = post_json_as(
+        app.clone(),
+        "/api/v1/orders/recurring",
+        me,
+        json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "daily" }),
+    )
+    .await;
     let id = created["id"].as_str().unwrap().to_string();
 
-    let res = request(app.clone(), "DELETE", &format!("/api/v1/orders/recurring/{id}"), me, Body::empty()).await;
+    let res = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/v1/orders/recurring/{id}"),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let (status, body) = get_json_as(app, "/api/v1/orders/recurring", me).await;
@@ -1373,7 +1922,14 @@ async fn test_recurring_delete_roundtrip() {
 async fn test_recurring_pause_foreign_404() {
     let app = build_router(setup_test_state(test_oracle_key()));
     let me = Uuid::new_v4();
-    let res = request(app, "POST", &format!("/api/v1/orders/recurring/{}/pause", Uuid::new_v4()), me, Body::empty()).await;
+    let res = request(
+        app,
+        "POST",
+        &format!("/api/v1/orders/recurring/{}/pause", Uuid::new_v4()),
+        me,
+        Body::empty(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1382,8 +1938,16 @@ async fn test_recurring_bad_interval_400() {
     let app = build_router(setup_test_state(test_oracle_key()));
     let me = Uuid::new_v4();
     // 400 body is plain text — raw request, status-only assert.
-    let res = request(app, "POST", "/api/v1/orders/recurring", me,
-        Body::from(json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "yearly" }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders/recurring",
+        me,
+        Body::from(
+            json!({ "side": "buy", "energy_amount": "1.0", "interval_type": "yearly" }).to_string(),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -1406,66 +1970,214 @@ fn all_routes(uid: Uuid) -> Vec<(&'static str, String, Body, bool)> {
     let new_id = Uuid::new_v4();
     vec![
         // Spot / core orders
-        ("POST", "/api/v1/orders".into(), Body::from(json!({
-            "side": "buy", "order_type": "limit",
-            "energy_amount_kwh": "1.0", "price_per_kwh": "4.5", "zone_id": 1
-        }).to_string()), false),
+        (
+            "POST",
+            "/api/v1/orders".into(),
+            Body::from(
+                json!({
+                    "side": "buy", "order_type": "limit",
+                    "energy_amount_kwh": "1.0", "price_per_kwh": "4.5", "zone_id": 1
+                })
+                .to_string(),
+            ),
+            false,
+        ),
         ("GET", "/api/v1/orders".into(), Body::empty(), false),
-        ("GET", format!("/api/v1/orders/{new_id}"), Body::empty(), true),
-        ("DELETE", format!("/api/v1/orders/{new_id}"), Body::empty(), true),
-        ("POST", "/api/v1/quotes".into(), Body::from(json!({
-            "buyer_zone_id": 1, "seller_zone_id": 2,
-            "energy_amount_kwh": "1.0", "agreed_price": "4.5"
-        }).to_string()), false),
+        (
+            "GET",
+            format!("/api/v1/orders/{new_id}"),
+            Body::empty(),
+            true,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/orders/{new_id}"),
+            Body::empty(),
+            true,
+        ),
+        (
+            "POST",
+            "/api/v1/quotes".into(),
+            Body::from(
+                json!({
+                    "buyer_zone_id": 1, "seller_zone_id": 2,
+                    "energy_amount_kwh": "1.0", "agreed_price": "4.5"
+                })
+                .to_string(),
+            ),
+            false,
+        ),
         ("GET", "/api/v1/zones/1/book".into(), Body::empty(), false),
         ("GET", "/api/v1/stats".into(), Body::empty(), false),
         // Markets (read-only)
         ("GET", "/api/v1/markets/config".into(), Body::empty(), false),
-        ("GET", "/api/v1/markets/p2p/market-prices".into(), Body::empty(), false),
-        ("GET", "/api/v1/markets/matching-status".into(), Body::empty(), false),
-        ("GET", "/api/v1/markets/settlement-stats".into(), Body::empty(), false),
-        ("GET", "/api/v1/markets/orderbook".into(), Body::empty(), false),
+        (
+            "GET",
+            "/api/v1/markets/p2p/market-prices".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/markets/matching-status".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/markets/settlement-stats".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/markets/orderbook".into(),
+            Body::empty(),
+            false,
+        ),
         // Trades
         ("GET", "/api/v1/trades".into(), Body::empty(), false),
         ("GET", "/api/v1/trades/export".into(), Body::empty(), false),
         // Price alerts
-        ("POST", "/api/v1/price-alerts".into(), Body::from(json!({
-            "symbol": "GRID/GRX", "condition": "above", "target_price": "5.0"
-        }).to_string()), false),
+        (
+            "POST",
+            "/api/v1/price-alerts".into(),
+            Body::from(
+                json!({
+                    "symbol": "GRID/GRX", "condition": "above", "target_price": "5.0"
+                })
+                .to_string(),
+            ),
+            false,
+        ),
         ("GET", "/api/v1/price-alerts".into(), Body::empty(), false),
-        ("DELETE", format!("/api/v1/price-alerts/{new_id}"), Body::empty(), true),
+        (
+            "DELETE",
+            format!("/api/v1/price-alerts/{new_id}"),
+            Body::empty(),
+            true,
+        ),
         // Recurring orders
-        ("POST", "/api/v1/orders/recurring".into(), Body::from(json!({
-            "side": "buy", "energy_amount": "1.0", "interval_type": "daily"
-        }).to_string()), false),
-        ("GET", "/api/v1/orders/recurring".into(), Body::empty(), false),
-        ("GET", format!("/api/v1/orders/recurring/{new_id}"), Body::empty(), true),
-        ("DELETE", format!("/api/v1/orders/recurring/{new_id}"), Body::empty(), true),
-        ("POST", format!("/api/v1/orders/recurring/{new_id}/pause"), Body::empty(), true),
-        ("POST", format!("/api/v1/orders/recurring/{new_id}/resume"), Body::empty(), true),
+        (
+            "POST",
+            "/api/v1/orders/recurring".into(),
+            Body::from(
+                json!({
+                    "side": "buy", "energy_amount": "1.0", "interval_type": "daily"
+                })
+                .to_string(),
+            ),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/orders/recurring".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            format!("/api/v1/orders/recurring/{new_id}"),
+            Body::empty(),
+            true,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/orders/recurring/{new_id}"),
+            Body::empty(),
+            true,
+        ),
+        (
+            "POST",
+            format!("/api/v1/orders/recurring/{new_id}/pause"),
+            Body::empty(),
+            true,
+        ),
+        (
+            "POST",
+            format!("/api/v1/orders/recurring/{new_id}/resume"),
+            Body::empty(),
+            true,
+        ),
         // Futures
-        ("GET", "/api/v1/futures/products".into(), Body::empty(), false),
-        ("GET", "/api/v1/futures/candles".into(), Body::empty(), false),
+        (
+            "GET",
+            "/api/v1/futures/products".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/futures/candles".into(),
+            Body::empty(),
+            false,
+        ),
         ("GET", "/api/v1/futures/book".into(), Body::empty(), false),
-        ("POST", "/api/v1/futures/orders".into(), Body::from(json!({
-            "product_id": new_id.to_string(), "side": "buy", "order_type": "market",
-            "quantity": 1.0, "price": 100.0, "leverage": 1
-        }).to_string()), false),
+        (
+            "POST",
+            "/api/v1/futures/orders".into(),
+            Body::from(
+                json!({
+                    "product_id": new_id.to_string(), "side": "buy", "order_type": "market",
+                    "quantity": 1.0, "price": 100.0, "leverage": 1
+                })
+                .to_string(),
+            ),
+            false,
+        ),
         ("GET", "/api/v1/futures/orders".into(), Body::empty(), false),
-        ("GET", "/api/v1/futures/positions".into(), Body::empty(), false),
-        ("DELETE", format!("/api/v1/futures/positions/{new_id}"), Body::empty(), true),
+        (
+            "GET",
+            "/api/v1/futures/positions".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/futures/positions/{new_id}"),
+            Body::empty(),
+            true,
+        ),
         // User data & analytics
-        ("GET", "/api/v1/wallets/addr123/balance".into(), Body::empty(), false),
-        ("GET", "/api/v1/analytics/stats".into(), Body::empty(), false),
-        ("GET", "/api/v1/analytics/history".into(), Body::empty(), false),
+        (
+            "GET",
+            "/api/v1/wallets/addr123/balance".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/analytics/stats".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "GET",
+            "/api/v1/analytics/history".into(),
+            Body::empty(),
+            false,
+        ),
         ("GET", "/api/v1/transactions".into(), Body::empty(), false),
         // Carbon / ESG
         ("GET", "/api/v1/carbon/balance".into(), Body::empty(), false),
         ("GET", "/api/v1/carbon/history".into(), Body::empty(), false),
-        ("GET", "/api/v1/carbon/transactions".into(), Body::empty(), false),
-        ("POST", "/api/v1/carbon/transfers".into(), Body::from(json!({
-            "to_user_id": uid, "amount": "1.0"
-        }).to_string()), false),
+        (
+            "GET",
+            "/api/v1/carbon/transactions".into(),
+            Body::empty(),
+            false,
+        ),
+        (
+            "POST",
+            "/api/v1/carbon/transfers".into(),
+            Body::from(
+                json!({
+                    "to_user_id": uid, "amount": "1.0"
+                })
+                .to_string(),
+            ),
+            false,
+        ),
         // Ops
         ("GET", "/health".into(), Body::empty(), false),
         ("GET", "/health/ready".into(), Body::empty(), false),
@@ -1483,14 +2195,16 @@ async fn test_every_route_reachable() {
         let status = res.status();
         // 405 always means the wiring drifted — wrong method bound for the path.
         assert_ne!(
-            status, StatusCode::METHOD_NOT_ALLOWED,
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
             "{method} {uri} returned 405 — wrong method wired for this path?"
         );
         // 404 means an absent route — UNLESS the path looks up a resource id
         // that legitimately doesn't exist in the mock (handler NotFound).
         if !lookup {
             assert_ne!(
-                status, StatusCode::NOT_FOUND,
+                status,
+                StatusCode::NOT_FOUND,
                 "{method} {uri} returned 404 — route not wired in build_router?"
             );
         }
@@ -1556,20 +2270,35 @@ async fn test_grpc_submit_get_list_cancel_roundtrip() {
         zone_id: Some(1),
         ..Default::default()
     };
-    let (res, _) = svc.submit_order(ctx(), owned_view(&submit)).await.expect("submit ok");
+    let (res, _) = svc
+        .submit_order(ctx(), owned_view(&submit))
+        .await
+        .expect("submit ok");
     assert!(res.success);
     let order_id = res.id.expect("submit returns id");
 
     // get_order — the order just inserted round-trips back.
-    let get = GetOrderRequest { order_id: order_id.clone(), ..Default::default() };
-    let (got, _) = svc.get_order(ctx(), owned_view(&get)).await.expect("get ok");
+    let get = GetOrderRequest {
+        order_id: order_id.clone(),
+        ..Default::default()
+    };
+    let (got, _) = svc
+        .get_order(ctx(), owned_view(&get))
+        .await
+        .expect("get ok");
     assert_eq!(got.id, order_id);
     assert_eq!(got.user_id, uid.to_string());
     assert_eq!(got.side, "buy");
 
     // list_orders — scoped to the user; exactly the one we created.
-    let list = ListOrdersRequest { user_id: uid.to_string(), ..Default::default() };
-    let (listed, _) = svc.list_orders(ctx(), owned_view(&list)).await.expect("list ok");
+    let list = ListOrdersRequest {
+        user_id: uid.to_string(),
+        ..Default::default()
+    };
+    let (listed, _) = svc
+        .list_orders(ctx(), owned_view(&list))
+        .await
+        .expect("list ok");
     assert_eq!(listed.orders.len(), 1);
     assert_eq!(listed.orders[0].id, order_id);
 
@@ -1579,7 +2308,10 @@ async fn test_grpc_submit_get_list_cancel_roundtrip() {
         user_id: uid.to_string(),
         ..Default::default()
     };
-    let (cancelled, _) = svc.cancel_order(ctx(), owned_view(&cancel)).await.expect("cancel ok");
+    let (cancelled, _) = svc
+        .cancel_order(ctx(), owned_view(&cancel))
+        .await
+        .expect("cancel ok");
     assert!(cancelled.success);
 }
 
@@ -1618,42 +2350,78 @@ async fn test_grpc_submit_order_expiry_forms_and_rejections() {
     };
 
     // Relative form.
-    let req = base(SubmitOrderRequest { expires_in_secs: Some(900), ..Default::default() });
-    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "expires_in_secs must be accepted");
+    let req = base(SubmitOrderRequest {
+        expires_in_secs: Some(900),
+        ..Default::default()
+    });
+    assert!(
+        svc.submit_order(ctx(), owned_view(&req)).await.is_ok(),
+        "expires_in_secs must be accepted"
+    );
 
     // Absolute form, RFC 3339.
     let req = base(SubmitOrderRequest {
         expires_at: Some((Utc::now() + chrono::Duration::hours(2)).to_rfc3339()),
         ..Default::default()
     });
-    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "RFC 3339 expires_at must be accepted");
+    assert!(
+        svc.submit_order(ctx(), owned_view(&req)).await.is_ok(),
+        "RFC 3339 expires_at must be accepted"
+    );
 
     // Omitted → the configured default, as before.
     let req = base(SubmitOrderRequest::default());
-    assert!(svc.submit_order(ctx(), owned_view(&req)).await.is_ok(), "an absent expiry must still default");
+    assert!(
+        svc.submit_order(ctx(), owned_view(&req)).await.is_ok(),
+        "an absent expiry must still default"
+    );
 
     // Refusals mirror REST. A malformed timestamp must NOT fall back to the
     // default — that would hand back a lifetime the client never asked for.
     for (case, req) in [
-        ("past absolute", base(SubmitOrderRequest {
-            expires_at: Some((Utc::now() - chrono::Duration::hours(1)).to_rfc3339()),
-            ..Default::default()
-        })),
-        ("unparseable absolute", base(SubmitOrderRequest {
-            expires_at: Some("next tuesday".into()),
-            ..Default::default()
-        })),
-        ("zero ttl", base(SubmitOrderRequest { expires_in_secs: Some(0), ..Default::default() })),
-        ("negative ttl", base(SubmitOrderRequest { expires_in_secs: Some(-60), ..Default::default() })),
-        ("beyond max ttl", base(SubmitOrderRequest {
-            expires_in_secs: Some(8 * 24 * 60 * 60),
-            ..Default::default()
-        })),
-        ("both forms", base(SubmitOrderRequest {
-            expires_at: Some((Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
-            expires_in_secs: Some(3600),
-            ..Default::default()
-        })),
+        (
+            "past absolute",
+            base(SubmitOrderRequest {
+                expires_at: Some((Utc::now() - chrono::Duration::hours(1)).to_rfc3339()),
+                ..Default::default()
+            }),
+        ),
+        (
+            "unparseable absolute",
+            base(SubmitOrderRequest {
+                expires_at: Some("next tuesday".into()),
+                ..Default::default()
+            }),
+        ),
+        (
+            "zero ttl",
+            base(SubmitOrderRequest {
+                expires_in_secs: Some(0),
+                ..Default::default()
+            }),
+        ),
+        (
+            "negative ttl",
+            base(SubmitOrderRequest {
+                expires_in_secs: Some(-60),
+                ..Default::default()
+            }),
+        ),
+        (
+            "beyond max ttl",
+            base(SubmitOrderRequest {
+                expires_in_secs: Some(8 * 24 * 60 * 60),
+                ..Default::default()
+            }),
+        ),
+        (
+            "both forms",
+            base(SubmitOrderRequest {
+                expires_at: Some((Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+                expires_in_secs: Some(3600),
+                ..Default::default()
+            }),
+        ),
     ] {
         assert!(
             svc.submit_order(ctx(), owned_view(&req)).await.is_err(),
@@ -1680,7 +2448,10 @@ async fn test_grpc_submit_order_invalid_user_rejected() {
 #[tokio::test]
 async fn test_grpc_get_order_not_found() {
     let svc = grpc_service();
-    let get = GetOrderRequest { order_id: Uuid::new_v4().to_string(), ..Default::default() };
+    let get = GetOrderRequest {
+        order_id: Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
     assert!(svc.get_order(ctx(), owned_view(&get)).await.is_err());
 }
 
@@ -1694,7 +2465,10 @@ async fn test_grpc_dispatch_vpp_succeeds() {
         target_kw: 10.0,
         ..Default::default()
     };
-    let (res, _) = svc.dispatch_vpp(ctx(), owned_view(&req)).await.expect("dispatch ok");
+    let (res, _) = svc
+        .dispatch_vpp(ctx(), owned_view(&req))
+        .await
+        .expect("dispatch ok");
     assert!(res.success);
 }
 
@@ -1729,9 +2503,18 @@ async fn test_submit_order_expiry_forms_and_rejections() {
             "side": "sell", "order_type": "limit",
             "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
         });
-        let (obj, add) = (body.as_object_mut().unwrap(), extra.as_object().unwrap().clone());
+        let (obj, add) = (
+            body.as_object_mut().unwrap(),
+            extra.as_object().unwrap().clone(),
+        );
         obj.extend(add);
-        request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body.to_string()))
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/orders",
+            user_id,
+            Body::from(body.to_string()),
+        )
     };
 
     // Omitted → the configured default: 15 min, one interval-clearing window.
@@ -1739,7 +2522,11 @@ async fn test_submit_order_expiry_forms_and_rejections() {
     assert_eq!(submit(json!({})).await.status(), StatusCode::OK);
     {
         let orders = mock.orders.lock().unwrap();
-        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        let stored = orders
+            .last()
+            .expect("order captured")
+            .expires_at
+            .expect("expiry stamped");
         // Bounded loosely on BOTH sides: the handler stamps with the telemetry
         // (NTP) clock while `before` comes from the local clock, so the measured
         // span can exceed the nominal TTL by that offset.
@@ -1752,10 +2539,17 @@ async fn test_submit_order_expiry_forms_and_rejections() {
 
     // Relative form: stored as now + ttl.
     let before = Utc::now();
-    assert_eq!(submit(json!({"expires_in_secs": 900})).await.status(), StatusCode::OK);
+    assert_eq!(
+        submit(json!({"expires_in_secs": 900})).await.status(),
+        StatusCode::OK
+    );
     {
         let orders = mock.orders.lock().unwrap();
-        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        let stored = orders
+            .last()
+            .expect("order captured")
+            .expires_at
+            .expect("expiry stamped");
         let ttl = stored - before;
         assert!(
             ttl > chrono::Duration::seconds(870) && ttl < chrono::Duration::seconds(960),
@@ -1766,12 +2560,18 @@ async fn test_submit_order_expiry_forms_and_rejections() {
     // Absolute form: stored verbatim (to the second — Postgres/serde round-trip).
     let target = (Utc::now() + chrono::Duration::hours(2)).trunc_subsecs(0);
     assert_eq!(
-        submit(json!({"expires_at": target.to_rfc3339()})).await.status(),
+        submit(json!({"expires_at": target.to_rfc3339()}))
+            .await
+            .status(),
         StatusCode::OK
     );
     {
         let orders = mock.orders.lock().unwrap();
-        let stored = orders.last().expect("order captured").expires_at.expect("expiry stamped");
+        let stored = orders
+            .last()
+            .expect("order captured")
+            .expires_at
+            .expect("expiry stamped");
         assert_eq!(stored, target, "absolute expiry must be stored as sent");
     }
 
@@ -1779,14 +2579,27 @@ async fn test_submit_order_expiry_forms_and_rejections() {
     // must also leave nothing behind in the repo.
     let count_before = mock.orders.lock().unwrap().len();
     for (case, body) in [
-        ("past absolute", json!({"expires_at": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339()})),
+        (
+            "past absolute",
+            json!({"expires_at": (Utc::now() - chrono::Duration::hours(1)).to_rfc3339()}),
+        ),
         ("zero ttl", json!({"expires_in_secs": 0})),
         ("negative ttl", json!({"expires_in_secs": -60})),
-        ("beyond max ttl", json!({"expires_in_secs": 8 * 24 * 60 * 60})),
-        ("both forms", json!({"expires_at": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(), "expires_in_secs": 3600})),
+        (
+            "beyond max ttl",
+            json!({"expires_in_secs": 8 * 24 * 60 * 60}),
+        ),
+        (
+            "both forms",
+            json!({"expires_at": (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(), "expires_in_secs": 3600}),
+        ),
     ] {
         let res = submit(body).await;
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{case} must be rejected");
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "{case} must be rejected"
+        );
     }
     assert_eq!(
         mock.orders.lock().unwrap().len(),
@@ -1822,7 +2635,10 @@ async fn test_submit_order_parses_tif_and_segment() {
         let orders = mock.orders.lock().unwrap();
         let o = orders.last().expect("order captured");
         assert_eq!(o.time_in_force, TimeInForce::Ioc);
-        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Realtime);
+        assert_eq!(
+            o.market_segment,
+            trading_core::types::MarketSegment::Realtime
+        );
     }
 
     // Interval + GTC is the valid interval combination.
@@ -1846,7 +2662,10 @@ async fn test_submit_order_parses_tif_and_segment() {
         let orders = mock.orders.lock().unwrap();
         let o = orders.last().expect("order captured");
         assert_eq!(o.time_in_force, TimeInForce::Gtc);
-        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Interval);
+        assert_eq!(
+            o.market_segment,
+            trading_core::types::MarketSegment::Interval
+        );
     }
 
     // Guard: interval + ioc is rejected — IOC has no meaning in batch clearing,
@@ -1888,7 +2707,10 @@ async fn test_submit_order_parses_tif_and_segment() {
         let orders = mock.orders.lock().unwrap();
         let o = orders.last().unwrap();
         assert_eq!(o.time_in_force, TimeInForce::Gtc);
-        assert_eq!(o.market_segment, trading_core::types::MarketSegment::Realtime);
+        assert_eq!(
+            o.market_segment,
+            trading_core::types::MarketSegment::Realtime
+        );
     }
 
     // A market order with no explicit TIF auto-maps to IOC (not GTC).
@@ -1953,51 +2775,94 @@ async fn test_market_order_semantics() {
     let user_id = Uuid::new_v4();
 
     let post = |app: axum::Router, body: serde_json::Value| async move {
-        request(app, "POST", "/api/v1/orders", user_id, Body::from(body.to_string())).await
+        request(
+            app,
+            "POST",
+            "/api/v1/orders",
+            user_id,
+            Body::from(body.to_string()),
+        )
+        .await
     };
 
     // Market BUY, no price → OK; stored at the ceiling bid, IOC.
-    let res = post(app.clone(), json!({
-        "side": "buy", "order_type": "market",
-        "energy_amount_kwh": "10", "zone_id": 1
-    })).await;
+    let res = post(
+        app.clone(),
+        json!({
+            "side": "buy", "order_type": "market",
+            "energy_amount_kwh": "10", "zone_id": 1
+        }),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK, "market buy needs no price");
     {
         let orders = mock.orders.lock().unwrap();
         let o = orders.last().unwrap();
-        assert_eq!(o.price_per_kwh, rust_decimal::Decimal::new(1_000_000, 0), "ceiling bid");
+        assert_eq!(
+            o.price_per_kwh,
+            rust_decimal::Decimal::new(1_000_000, 0),
+            "ceiling bid"
+        );
         assert_eq!(o.time_in_force, TimeInForce::Ioc);
         assert_eq!(o.order_type, OrderType::Market);
     }
 
     // Market SELL → 400 (unsupported by the maker/sell-priced matcher).
-    let res = post(app.clone(), json!({
-        "side": "sell", "order_type": "market",
-        "energy_amount_kwh": "10", "zone_id": 1
-    })).await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "market sell rejected");
+    let res = post(
+        app.clone(),
+        json!({
+            "side": "sell", "order_type": "market",
+            "energy_amount_kwh": "10", "zone_id": 1
+        }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "market sell rejected"
+    );
 
     // Market + explicit GTC → 400 (market must be immediate).
-    let res = post(app.clone(), json!({
-        "side": "buy", "order_type": "market", "time_in_force": "gtc",
-        "energy_amount_kwh": "10", "zone_id": 1
-    })).await;
+    let res = post(
+        app.clone(),
+        json!({
+            "side": "buy", "order_type": "market", "time_in_force": "gtc",
+            "energy_amount_kwh": "10", "zone_id": 1
+        }),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST, "market gtc rejected");
 
     // Limit without a price → 400.
-    let res = post(app, json!({
-        "side": "buy", "order_type": "limit",
-        "energy_amount_kwh": "10", "zone_id": 1
-    })).await;
+    let res = post(
+        app,
+        json!({
+            "side": "buy", "order_type": "limit",
+            "energy_amount_kwh": "10", "zone_id": 1
+        }),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST, "limit needs a price");
 }
 
 // ── Quote computation ────────────────────────────────────────────────────────
 
-async fn post_quote_json(app: axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
-    let res = request(app, "POST", "/api/v1/quotes", Uuid::new_v4(), Body::from(body.to_string())).await;
+async fn post_quote_json(
+    app: axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/quotes",
+        Uuid::new_v4(),
+        Body::from(body.to_string()),
+    )
+    .await;
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     // 400s return a bare string body, not JSON — tolerate that.
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
@@ -2014,12 +2879,16 @@ async fn create_quote_computes_cross_zone_breakdown_from_config() {
     //   total       = 450 + 2 + 13.50      = 465.50
     //   effective   = 100 * (1 - 0.03)     =  97.0000
     //   distance    = |1 - 2| * 10         =  10.0
-    let (status, body) = post_quote_json(app, json!({
-        "buyer_zone_id": 1,
-        "seller_zone_id": 2,
-        "energy_amount_kwh": "100",
-        "agreed_price": "4.50"
-    })).await;
+    let (status, body) = post_quote_json(
+        app,
+        json!({
+            "buyer_zone_id": 1,
+            "seller_zone_id": 2,
+            "energy_amount_kwh": "100",
+            "agreed_price": "4.50"
+        }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["breakdown"]["energy_cost"], "450.00");
@@ -2037,12 +2906,16 @@ async fn create_quote_same_zone_has_no_wheeling_and_low_loss() {
     let app = build_router(setup_test_state(test_oracle_key()));
     // Same zone: intra wheeling 0.00, intra loss factor 1.01 (0.01 fraction).
     //   energy_cost = 10 * 5.00 = 50.00 ; wheeling = 0 ; loss = 50 * 0.01 = 0.50
-    let (status, body) = post_quote_json(app, json!({
-        "buyer_zone_id": 3,
-        "seller_zone_id": 3,
-        "energy_amount_kwh": "10",
-        "agreed_price": "5.00"
-    })).await;
+    let (status, body) = post_quote_json(
+        app,
+        json!({
+            "buyer_zone_id": 3,
+            "seller_zone_id": 3,
+            "energy_amount_kwh": "10",
+            "agreed_price": "5.00"
+        }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["breakdown"]["energy_cost"], "50.00");
@@ -2058,12 +2931,16 @@ async fn create_quote_rejects_zero_price_without_market_history() {
     // agreed_price "0.00" -> falls back to the trade-derived market price, not a
     // static config default. This mock has no completed settlements, so there is
     // no VWAP to quote and the request is rejected rather than invented.
-    let (status, _) = post_quote_json(app, json!({
-        "buyer_zone_id": 1,
-        "seller_zone_id": 1,
-        "energy_amount_kwh": "10",
-        "agreed_price": "0.00"
-    })).await;
+    let (status, _) = post_quote_json(
+        app,
+        json!({
+            "buyer_zone_id": 1,
+            "seller_zone_id": 1,
+            "energy_amount_kwh": "10",
+            "agreed_price": "0.00"
+        }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -2071,17 +2948,29 @@ async fn create_quote_rejects_zero_price_without_market_history() {
 #[tokio::test]
 async fn create_quote_rejects_non_positive_energy() {
     let app = build_router(setup_test_state(test_oracle_key()));
-    let (status, _) = post_quote_json(app.clone(), json!({
-        "buyer_zone_id": 1, "seller_zone_id": 2,
-        "energy_amount_kwh": "0", "agreed_price": "4.50"
-    })).await;
+    let (status, _) = post_quote_json(
+        app.clone(),
+        json!({
+            "buyer_zone_id": 1, "seller_zone_id": 2,
+            "energy_amount_kwh": "0", "agreed_price": "4.50"
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "zero energy rejected");
 
-    let (status, _) = post_quote_json(app, json!({
-        "buyer_zone_id": 1, "seller_zone_id": 2,
-        "energy_amount_kwh": "abc", "agreed_price": "4.50"
-    })).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "non-numeric energy rejected");
+    let (status, _) = post_quote_json(
+        app,
+        json!({
+            "buyer_zone_id": 1, "seller_zone_id": 2,
+            "energy_amount_kwh": "abc", "agreed_price": "4.50"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-numeric energy rejected"
+    );
 }
 
 // ── Sell-side meter-verification gate ────────────────────────────────────────
@@ -2097,7 +2986,11 @@ fn mock_meter(mock: &MockSystem, serial: &str, owner: Uuid, is_verified: bool) -
     let meter_id = Uuid::new_v4();
     mock.meters.lock().unwrap().push((
         serial.to_string(),
-        MeterIdentity { meter_id, user_id: owner, is_verified },
+        MeterIdentity {
+            meter_id,
+            user_id: owner,
+            is_verified,
+        },
     ));
     meter_id
 }
@@ -2111,13 +3004,27 @@ async fn sell_naming_an_unverified_meter_is_refused_and_stores_nothing() {
     // Even with another verified meter to their name, the NAMED meter governs.
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
 
-    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
-        "side": "sell", "order_type": "limit",
-        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
-        "meter_serial": "SN-UNVERIFIED"
-    }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        seller,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "meter_serial": "SN-UNVERIFIED"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
 
-    assert_eq!(res.status(), StatusCode::FORBIDDEN, "unverified meter must not sell");
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "unverified meter must not sell"
+    );
     assert!(
         mock.orders.lock().unwrap().is_empty(),
         "a refused sell must not reach the book — the refusal runs before the insert"
@@ -2133,11 +3040,21 @@ async fn sell_naming_a_verified_meter_is_admitted_and_binds_the_meter_id() {
     // No blanket verified meter: the named one alone must carry the order.
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(false);
 
-    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
-        "side": "sell", "order_type": "limit",
-        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
-        "meter_serial": "SN-VERIFIED"
-    }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        seller,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "meter_serial": "SN-VERIFIED"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
 
     assert_eq!(res.status(), StatusCode::OK);
     let orders = mock.orders.lock().unwrap();
@@ -2156,11 +3073,21 @@ async fn sell_naming_someone_elses_meter_is_refused() {
     mock_meter(&mock, "SN-THEIRS", Uuid::new_v4(), true);
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
 
-    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
-        "side": "sell", "order_type": "limit",
-        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
-        "meter_serial": "SN-THEIRS"
-    }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        seller,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "meter_serial": "SN-THEIRS"
+            })
+            .to_string(),
+        ),
+    )
+    .await;
 
     assert_eq!(
         res.status(),
@@ -2177,21 +3104,53 @@ async fn meterless_sell_requires_a_verified_meter_but_buying_never_does() {
     // The bypass this closes: omitting meter_serial must not skip the gate.
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(false);
 
-    let body = |side: &str| json!({
-        "side": side, "order_type": "limit",
-        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
-    }).to_string();
+    let body = |side: &str| {
+        json!({
+            "side": side, "order_type": "limit",
+            "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+        })
+        .to_string()
+    };
 
-    let res = request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body("sell"))).await;
-    assert_eq!(res.status(), StatusCode::FORBIDDEN, "meterless sell without any verified meter");
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(body("sell")),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "meterless sell without any verified meter"
+    );
 
     // A consumer needs no meter to bid — the gate must not touch buys.
-    let res = request(app.clone(), "POST", "/api/v1/orders", user_id, Body::from(body("buy"))).await;
-    assert_eq!(res.status(), StatusCode::OK, "buy orders are never gated on meters");
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(body("buy")),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "buy orders are never gated on meters"
+    );
 
     // Once the seller owns any verified meter, the meterless sell is admitted.
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
-    let res = request(app, "POST", "/api/v1/orders", user_id, Body::from(body("sell"))).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        user_id,
+        Body::from(body("sell")),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 }
 
@@ -2229,14 +3188,24 @@ async fn grpc_submit_reaches_the_same_gate() {
         svc.submit_order(ctx(), owned_view(&req)).await.is_err(),
         "gRPC must refuse a meterless sell from a seller with no verified meter"
     );
-    assert!(mock.orders.lock().unwrap().is_empty(), "nothing may be stored");
+    assert!(
+        mock.orders.lock().unwrap().is_empty(),
+        "nothing may be stored"
+    );
 
     // A verified meter admits it, and the id is bound to the stored order.
     let verified = mock_meter(&mock, "SN-GRPC-OK", seller, true);
     let req = sell(verified.to_string());
-    svc.submit_order(ctx(), owned_view(&req)).await.expect("verified meter admits the sell");
+    svc.submit_order(ctx(), owned_view(&req))
+        .await
+        .expect("verified meter admits the sell");
     assert_eq!(
-        mock.orders.lock().unwrap().last().expect("order stored").meter_id,
+        mock.orders
+            .lock()
+            .unwrap()
+            .last()
+            .expect("order stored")
+            .meter_id,
         Some(verified)
     );
 }
@@ -2250,12 +3219,26 @@ async fn submit_refuses_a_meter_id_naming_no_known_meter() {
     let seller = Uuid::new_v4();
     *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
 
-    let res = request(app, "POST", "/api/v1/orders", seller, Body::from(json!({
-        "side": "sell", "order_type": "limit",
-        "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
-        "meter_id": Uuid::new_v4()
-    }).to_string())).await;
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        seller,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1,
+                "meter_id": Uuid::new_v4()
+            })
+            .to_string(),
+        ),
+    )
+    .await;
 
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST, "unknown meter_id is refused");
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown meter_id is refused"
+    );
     assert!(mock.orders.lock().unwrap().is_empty());
 }

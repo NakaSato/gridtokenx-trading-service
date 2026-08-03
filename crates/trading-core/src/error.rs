@@ -135,7 +135,10 @@ mod tests {
             "blockhash not found",
             "connection refused",
         ] {
-            assert!(!is_deterministic_chain_rejection(msg), "{msg} must stay retryable");
+            assert!(
+                !is_deterministic_chain_rejection(msg),
+                "{msg} must stay retryable"
+            );
         }
     }
 }

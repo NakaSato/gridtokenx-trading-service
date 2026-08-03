@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
-use uuid::Uuid;
-use trading_core::models::VppCluster;
-use trading_core::traits::{VppRepository, TraitResult, AuditLog, EventPublisher};
 use trading_core::events::{Event, VppDispatchedPayload};
+use trading_core::models::VppCluster;
+use trading_core::traits::{AuditLog, EventPublisher, TraitResult, VppRepository};
+use uuid::Uuid;
 
 /// Service for VPP (Virtual Power Plant) orchestration and optimization.
 pub struct VppService {
@@ -19,14 +19,25 @@ impl VppService {
         audit: Arc<dyn AuditLog>,
         events: Arc<dyn EventPublisher>,
     ) -> Self {
-        Self { repo, audit, events }
+        Self {
+            repo,
+            audit,
+            events,
+        }
     }
 
     /// Get cluster status with aggregated real-time metrics.
     pub async fn get_cluster_status(&self, cluster_id: &str) -> TraitResult<VppCluster> {
-        let cluster = self.repo.get_cluster_by_id(cluster_id).await?
-            .ok_or_else(|| trading_core::error::ApiError::NotFound(format!("VPP Cluster {cluster_id} not found")))?;
-        
+        let cluster = self
+            .repo
+            .get_cluster_by_id(cluster_id)
+            .await?
+            .ok_or_else(|| {
+                trading_core::error::ApiError::NotFound(format!(
+                    "VPP Cluster {cluster_id} not found"
+                ))
+            })?;
+
         Ok(cluster)
     }
 
@@ -50,7 +61,12 @@ impl VppService {
             return Ok(HashMap::new());
         }
 
-        info!("Optimizing VPP dispatch for {}: target={}kW, members={}", cluster_id, target_kw, members.len());
+        info!(
+            "Optimizing VPP dispatch for {}: target={}kW, members={}",
+            cluster_id,
+            target_kw,
+            members.len()
+        );
 
         // Weights: SOC (30%), Price (40%), Carbon (30%)
         let mut weights = HashMap::new();
@@ -67,7 +83,11 @@ impl VppService {
             };
 
             // 2. Price Weight
-            let price = nodal_prices.as_ref().and_then(|p| p.get(&m.meter_id)).copied().unwrap_or(4.0);
+            let price = nodal_prices
+                .as_ref()
+                .and_then(|p| p.get(&m.meter_id))
+                .copied()
+                .unwrap_or(4.0);
             let price_w = if target_kw > 0.0 {
                 price / 6.0 // Normalized to max 6 THB
             } else {
@@ -84,7 +104,7 @@ impl VppService {
 
             let contribution_weight = m.contribution_weight.unwrap_or(1.0);
             let weight = (soc_w * 0.3 + price_w * 0.4 + carbon_w * 0.3) * contribution_weight;
-            
+
             weights.insert(m.meter_id.clone(), weight);
             total_weight += weight;
         }
@@ -92,7 +112,7 @@ impl VppService {
         let mut dispatches = HashMap::new();
         if total_weight <= 0.0 {
             #[allow(clippy::cast_precision_loss)] // member counts are tiny
-        let shared_target = target_kw / members.len() as f64;
+            let shared_target = target_kw / members.len() as f64;
             for m in members {
                 dispatches.insert(m.meter_id, shared_target);
             }
@@ -102,7 +122,7 @@ impl VppService {
         for m in members {
             let w = weights.get(&m.meter_id).unwrap_or(&0.0);
             let raw_dispatch = (w / total_weight) * target_kw;
-            
+
             // Clip to member physical limits
             let max_p = m.rated_power_kw.unwrap_or(5.0);
             let final_dispatch = if target_kw > 0.0 {
@@ -110,15 +130,22 @@ impl VppService {
             } else {
                 raw_dispatch.max(-max_p)
             };
-            
+
             dispatches.insert(m.meter_id, final_dispatch);
         }
 
-        self.audit.log_action(
-            Uuid::nil(), // System action
-            "vpp_dispatch",
-            &format!("Cluster {}: Dispatched {}kW across {} members", cluster_id, target_kw, dispatches.len())
-        ).await?;
+        self.audit
+            .log_action(
+                Uuid::nil(), // System action
+                "vpp_dispatch",
+                &format!(
+                    "Cluster {}: Dispatched {}kW across {} members",
+                    cluster_id,
+                    target_kw,
+                    dispatches.len()
+                ),
+            )
+            .await?;
 
         // 3. Publish Event
         let event = Event::VppDispatched(VppDispatchedPayload {
@@ -127,7 +154,7 @@ impl VppService {
             members_commanded: dispatches.len(),
             timestamp: gridtokenx_telemetry::time::now(),
         });
-        
+
         if let Err(e) = self.events.publish(event).await {
             tracing::error!("Failed to publish VppDispatched event: {}", e);
         }
@@ -138,28 +165,34 @@ impl VppService {
     /// Synchronize cluster state from real-time telemetry aggregates.
     pub async fn sync_cluster_state(&self, cluster_id: &str) -> TraitResult<()> {
         let members = self.repo.get_cluster_members(cluster_id).await?;
-        
+
         let mut total_capacity = 0.0;
         let mut total_power = 0.0;
         let mut current_stored = 0.0;
-        
+
         for m in members {
             total_capacity += m.rated_capacity_kwh.unwrap_or(10.0);
             total_power += m.rated_power_kw.unwrap_or(5.0);
             // In a real system, we would fetch the latest SOC from Redis here.
             // For now, we simulate an update.
-            current_stored += m.rated_capacity_kwh.unwrap_or(10.0) * 0.5; 
+            current_stored += m.rated_capacity_kwh.unwrap_or(10.0) * 0.5;
         }
 
-        let soc = if total_capacity > 0.0 { (current_stored / total_capacity) * 100.0 } else { 0.0 };
+        let soc = if total_capacity > 0.0 {
+            (current_stored / total_capacity) * 100.0
+        } else {
+            0.0
+        };
 
-        self.repo.update_cluster_metrics(
-            cluster_id,
-            current_stored,
-            soc,
-            total_power, // Simplified: flex_up = total_power
-            total_power, // Simplified: flex_down = total_power
-        ).await?;
+        self.repo
+            .update_cluster_metrics(
+                cluster_id,
+                current_stored,
+                soc,
+                total_power, // Simplified: flex_up = total_power
+                total_power, // Simplified: flex_down = total_power
+            )
+            .await?;
 
         Ok(())
     }

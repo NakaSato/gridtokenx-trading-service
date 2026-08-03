@@ -1,8 +1,8 @@
-use trading_service::builder::ServiceBuilder;
 use sqlx::postgres::PgPoolOptions;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use trading_api::state::AppState;
+use trading_service::builder::ServiceBuilder;
 
 #[tokio::main]
 // Boot sequence: build once, then spawn each worker — reads as the runtime map.
@@ -189,9 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // route simply never emits, so this is inert when Kafka is disabled.
     let ws_hub = std::sync::Arc::new(trading_api::websocket::ZoneHub::new());
     if config.kafka_enabled {
-        let topics = trading_infra::events::kafka::KafkaTopics::with_prefix(
-            &config.kafka_topic_prefix,
-        );
+        let topics =
+            trading_infra::events::kafka::KafkaTopics::with_prefix(&config.kafka_topic_prefix);
         trading_api::websocket::spawn_kafka_pump(
             config.kafka_bootstrap_servers.clone(),
             vec![

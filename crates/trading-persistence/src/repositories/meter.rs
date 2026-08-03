@@ -42,11 +42,12 @@ impl MeterRepository for PostgresMeterRepository {
         }
 
         // db-split cutover: see resolve_id_by_serial — Trading-owned `meter_read_model`.
-        let rows =
-            sqlx::query("SELECT meter_id, serial_number FROM meter_read_model WHERE meter_id = ANY($1)")
-                .bind(ids)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query(
+            "SELECT meter_id, serial_number FROM meter_read_model WHERE meter_id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut out = HashMap::with_capacity(rows.len());
         for row in &rows {

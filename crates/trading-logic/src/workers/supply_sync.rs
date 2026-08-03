@@ -55,10 +55,7 @@ impl SupplySyncWorker {
                             e
                         );
                     } else {
-                        debug!(
-                            "SupplySyncWorker failure #{}: {}",
-                            consecutive_failures, e
-                        );
+                        debug!("SupplySyncWorker failure #{}: {}", consecutive_failures, e);
                     }
 
                     // Exponential backoff: interval * 2^(n-1), capped.

@@ -16,10 +16,10 @@
 use chrono::Utc;
 use rust_decimal_macros::dec;
 use sqlx::PgPool;
+use trading_core::models::TradingOrder;
 use trading_core::models::{Settlement, SettlementStatus};
 use trading_core::traits::{OrderRepository, SettlementRepository};
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
-use trading_core::models::TradingOrder;
 use trading_persistence::repositories::{PostgresOrderRepository, PostgresSettlementRepository};
 use uuid::Uuid;
 
@@ -65,8 +65,18 @@ async fn seed_fk_chain(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
     let buy_order_id = Uuid::new_v4();
     let sell_order_id = Uuid::new_v4();
     for (oid, side, idx, pda) in [
-        (buy_order_id, OrderSide::Buy, 1, "BuyPDA1111111111111111111111111111111111"),
-        (sell_order_id, OrderSide::Sell, 2, "SellPDA111111111111111111111111111111111"),
+        (
+            buy_order_id,
+            OrderSide::Buy,
+            1,
+            "BuyPDA1111111111111111111111111111111111",
+        ),
+        (
+            sell_order_id,
+            OrderSide::Sell,
+            2,
+            "SellPDA111111111111111111111111111111111",
+        ),
     ] {
         let order = TradingOrder {
             id: oid,
@@ -159,8 +169,16 @@ async fn cleanup(pool: &PgPool, user_id: Uuid, epoch_id: Uuid) {
     // Orders first: the DB-per-service split dropped the cross-domain FK to IAM
     // `users` (migration 20260728000000), so deleting the owner no longer
     // cascades them away.
-    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1").bind(user_id).execute(pool).await.ok();
-    sqlx::query("DELETE FROM market_epochs WHERE id = $1").bind(epoch_id).execute(pool).await.ok();
+    sqlx::query("DELETE FROM trading_orders WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM market_epochs WHERE id = $1")
+        .bind(epoch_id)
+        .execute(pool)
+        .await
+        .ok();
 }
 
 /// claim_settlements_for_processing is a single-statement CAS: claiming the same
@@ -180,14 +198,23 @@ async fn claim_is_mint_once_under_double_claim() {
     let ids = [s.id];
 
     // First claimer wins the row.
-    let first = repo.claim_settlements_for_processing(&ids).await.expect("first claim");
+    let first = repo
+        .claim_settlements_for_processing(&ids)
+        .await
+        .expect("first claim");
     assert_eq!(first.len(), 1, "first claim must capture the pending row");
     assert_eq!(first[0].id, s.id);
 
     // Second claimer over the SAME id set gets nothing — row is already
     // `processing`, so it can never be minted twice.
-    let second = repo.claim_settlements_for_processing(&ids).await.expect("second claim");
-    assert!(second.is_empty(), "second claim must be empty (no double-claim)");
+    let second = repo
+        .claim_settlements_for_processing(&ids)
+        .await
+        .expect("second claim");
+    assert!(
+        second.is_empty(),
+        "second claim must be empty (no double-claim)"
+    );
 
     assert_eq!(status_of(&pool, s.id).await, "processing");
 
@@ -214,18 +241,29 @@ async fn reset_increments_then_parks_permanently_failed() {
     // processing) then reset (processing → pending, retry_count++), except the
     // final reset which tips it over the cap into permanently_failed.
     for expected_retry in 1..=MAX_SETTLEMENT_RETRIES {
-        let claimed = repo.claim_settlements_for_processing(&ids).await.expect("claim");
+        let claimed = repo
+            .claim_settlements_for_processing(&ids)
+            .await
+            .expect("claim");
         assert_eq!(claimed.len(), 1, "row must be re-claimable until terminal");
 
         let affected = repo
-            .reset_settlements_for_retry(&ids, MAX_SETTLEMENT_RETRIES, Some("simulated chain failure"))
+            .reset_settlements_for_retry(
+                &ids,
+                MAX_SETTLEMENT_RETRIES,
+                Some("simulated chain failure"),
+            )
             .await
             .expect("reset");
         assert_eq!(affected, 1, "reset must touch the processing row");
         assert_eq!(retry_count_of(&pool, s.id).await, expected_retry);
 
         if expected_retry < MAX_SETTLEMENT_RETRIES {
-            assert_eq!(status_of(&pool, s.id).await, "pending", "released for retry");
+            assert_eq!(
+                status_of(&pool, s.id).await,
+                "pending",
+                "released for retry"
+            );
         } else {
             assert_eq!(
                 status_of(&pool, s.id).await,
@@ -237,8 +275,14 @@ async fn reset_increments_then_parks_permanently_failed() {
 
     // Once permanently_failed it is no longer pending, so it can never be
     // re-claimed and re-minted.
-    let post = repo.claim_settlements_for_processing(&ids).await.expect("post claim");
-    assert!(post.is_empty(), "permanently_failed row must not be claimable");
+    let post = repo
+        .claim_settlements_for_processing(&ids)
+        .await
+        .expect("post claim");
+    assert!(
+        post.is_empty(),
+        "permanently_failed row must not be claimable"
+    );
 
     cleanup(&pool, user_id, epoch_id).await;
 }
@@ -259,7 +303,9 @@ async fn reclaim_releases_stale_processing_rows() {
     repo.insert_settlement(&s).await.expect("insert settlement");
     let ids = [s.id];
 
-    repo.claim_settlements_for_processing(&ids).await.expect("claim");
+    repo.claim_settlements_for_processing(&ids)
+        .await
+        .expect("claim");
     assert_eq!(status_of(&pool, s.id).await, "processing");
 
     // A fresh claim is NOT stale — reaper leaves it alone.
@@ -282,12 +328,14 @@ async fn reclaim_releases_stale_processing_rows() {
             .execute(&mut *conn)
             .await
             .expect("disable triggers");
-        sqlx::query("UPDATE settlements SET updated_at = NOW() - make_interval(secs => $2) WHERE id = $1")
-            .bind(s.id)
-            .bind((STALE_PROCESSING_SECS + 60) as f64)
-            .execute(&mut *conn)
-            .await
-            .expect("backdate updated_at");
+        sqlx::query(
+            "UPDATE settlements SET updated_at = NOW() - make_interval(secs => $2) WHERE id = $1",
+        )
+        .bind(s.id)
+        .bind((STALE_PROCESSING_SECS + 60) as f64)
+        .execute(&mut *conn)
+        .await
+        .expect("backdate updated_at");
         sqlx::query("SET session_replication_role = DEFAULT")
             .execute(&mut *conn)
             .await
@@ -299,8 +347,16 @@ async fn reclaim_releases_stale_processing_rows() {
         .await
         .expect("reclaim stale");
     assert_eq!(reclaimed, 1, "stale processing row must be reclaimed");
-    assert_eq!(status_of(&pool, s.id).await, "pending", "reclaimed → retryable");
-    assert_eq!(retry_count_of(&pool, s.id).await, 1, "reclaim counts as a retry");
+    assert_eq!(
+        status_of(&pool, s.id).await,
+        "pending",
+        "reclaimed → retryable"
+    );
+    assert_eq!(
+        retry_count_of(&pool, s.id).await,
+        1,
+        "reclaim counts as a retry"
+    );
 
     cleanup(&pool, user_id, epoch_id).await;
 }

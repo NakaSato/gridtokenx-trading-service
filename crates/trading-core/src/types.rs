@@ -184,7 +184,6 @@ pub enum TimeInForce {
     Ioc,
 }
 
-
 impl TimeInForce {
     /// Immediate time-in-force: the order must fill in the matching pass it
     /// enters and must never rest in the book. Both IOC and FOK are immediate;

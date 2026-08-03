@@ -52,11 +52,8 @@ pub trait OrderRepository: Send + Sync {
     /// can never be lost relative to the state change (the separate
     /// `insert_order` + `EventPublisher::publish` calls are two transactions
     /// and are NOT atomic — a crash between them drops the event).
-    async fn insert_order_with_event(
-        &self,
-        order: &TradingOrder,
-        event: &Event,
-    ) -> TraitResult<()>;
+    async fn insert_order_with_event(&self, order: &TradingOrder, event: &Event)
+        -> TraitResult<()>;
 
     /// Store the wallet Ed25519 signature that authorises this order for
     /// per-user-escrow settlement (config `per_user_escrow_settlement`).
@@ -101,8 +98,12 @@ pub trait OrderRepository: Send + Sync {
     async fn update_order_status(&self, id: Uuid, status: OrderStatus) -> TraitResult<()>;
 
     /// Persist the on-chain order PDA + index after custodial placement.
-    async fn update_order_pda(&self, id: Uuid, order_pda: &str, order_index: i64)
-        -> TraitResult<()>;
+    async fn update_order_pda(
+        &self,
+        id: Uuid,
+        order_pda: &str,
+        order_index: i64,
+    ) -> TraitResult<()>;
 
     /// Update filled amount on an order.
     async fn update_filled_amount(
@@ -270,10 +271,7 @@ pub trait SettlementRepository: Send + Sync {
     /// for the given ids in a single statement and return only the rows actually
     /// claimed. Concurrent callers (settlement worker vs. RPC) each receive a
     /// disjoint subset, so a settlement can be minted at most once.
-    async fn claim_settlements_for_processing(
-        &self,
-        ids: &[Uuid],
-    ) -> TraitResult<Vec<Settlement>>;
+    async fn claim_settlements_for_processing(&self, ids: &[Uuid]) -> TraitResult<Vec<Settlement>>;
 
     /// Release claimed settlements back to a retryable state after a failed (or
     /// skipped) mint: increment `retry_count` and set status to `pending`, or to

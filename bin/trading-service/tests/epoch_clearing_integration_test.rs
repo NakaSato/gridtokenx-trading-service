@@ -88,8 +88,14 @@ async fn test_epoch_clearing_lifecycle_e2e() {
     .await
     .unwrap();
     assert_eq!(row.get::<String, _>("status"), "cleared");
-    assert_eq!(row.get::<rust_decimal::Decimal, _>("clearing_price"), dec!(0.8));
-    assert_eq!(row.get::<rust_decimal::Decimal, _>("total_volume"), dec!(10.0));
+    assert_eq!(
+        row.get::<rust_decimal::Decimal, _>("clearing_price"),
+        dec!(0.8)
+    );
+    assert_eq!(
+        row.get::<rust_decimal::Decimal, _>("total_volume"),
+        dec!(10.0)
+    );
     assert_eq!(row.get::<i64, _>("matched_orders"), 1);
 
     // Idempotency: a second call finds no `active` row to update, so the stamped
@@ -104,7 +110,11 @@ async fn test_epoch_clearing_lifecycle_e2e() {
             .await
             .unwrap()
             .get("clearing_price");
-    assert_eq!(price, dec!(0.8), "second close is a no-op; summary unchanged");
+    assert_eq!(
+        price,
+        dec!(0.8),
+        "second close is a no-op; summary unchanged"
+    );
 
     // E1 no longer due after clearing.
     let due_after: HashSet<Uuid> = repo
@@ -113,7 +123,10 @@ async fn test_epoch_clearing_lifecycle_e2e() {
         .unwrap()
         .into_iter()
         .collect();
-    assert!(!due_after.contains(&e1), "cleared epoch drops out of the work-list");
+    assert!(
+        !due_after.contains(&e1),
+        "cleared epoch drops out of the work-list"
+    );
 
     // Cleanup.
     for id in [e1, e2, e3] {
@@ -161,11 +174,17 @@ async fn test_list_recent_cleared_epochs_e2e() {
         .expect("close c1");
 
     let listed = repo.list_recent_cleared_epochs(100).await.expect("list");
-    let found = listed.iter().find(|e| e.id == c1).expect("cleared epoch listed");
+    let found = listed
+        .iter()
+        .find(|e| e.id == c1)
+        .expect("cleared epoch listed");
     assert_eq!(found.clearing_price, Some(dec!(1.25)));
     assert_eq!(found.total_volume, Some(dec!(42.0)));
     assert_eq!(found.matched_orders, Some(3));
-    assert!(!listed.iter().any(|e| e.id == a1), "active epoch is not a clearing result");
+    assert!(
+        !listed.iter().any(|e| e.id == a1),
+        "active epoch is not a clearing result"
+    );
 
     for id in [c1, a1] {
         sqlx::query("DELETE FROM market_epochs WHERE id = $1")

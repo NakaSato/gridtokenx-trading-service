@@ -109,11 +109,7 @@ pub struct SettlementCharges {
 /// is a real economic outcome, not an error, so it is reported rather than clamped
 /// — clamping would silently misreport the ledger, which is the very bug this
 /// module exists to fix.
-pub fn compute_charges(
-    total: Decimal,
-    kwh: Decimal,
-    rates: &dyn ChargeRates,
-) -> SettlementCharges {
+pub fn compute_charges(total: Decimal, kwh: Decimal, rates: &dyn ChargeRates) -> SettlementCharges {
     let fee = total * Decimal::from(i64::from(rates.fee_bps())) / Decimal::from(BPS);
     let wheeling =
         kwh * Decimal::from(rates.wheeling_rate_per_kwh()) / Decimal::from(CURRENCY_SCALE);
@@ -155,7 +151,11 @@ mod tests {
         assert_eq!(c.fee, dec!(0.0025));
         assert_eq!(c.wheeling, dec!(0.100000));
         assert_eq!(c.loss, dec!(0.000500));
-        assert_eq!(c.net, dec!(0.897), "must equal the seller's on-chain credit");
+        assert_eq!(
+            c.net,
+            dec!(0.897),
+            "must equal the seller's on-chain credit"
+        );
     }
 
     /// The second measured trade: 3 kWh @ THB4.00, seller credited 11.66.

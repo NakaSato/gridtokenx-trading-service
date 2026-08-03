@@ -154,10 +154,7 @@ mod tests {
             _group_name: &str,
             _consumer_name: &str,
             _handler: Arc<
-                dyn Fn(
-                        Event,
-                    )
-                        -> Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>>
+                dyn Fn(Event) -> Pin<Box<dyn std::future::Future<Output = TraitResult<()>> + Send>>
                     + Send
                     + Sync,
             >,
@@ -185,8 +182,16 @@ mod tests {
         let count = worker.process_batch().await.unwrap();
 
         assert_eq!(count, 1);
-        assert_eq!(publisher.published.lock().unwrap().len(), 1, "event published to bus");
-        assert_eq!(repo.processed.lock().unwrap().as_slice(), &[row_id], "row marked processed");
+        assert_eq!(
+            publisher.published.lock().unwrap().len(),
+            1,
+            "event published to bus"
+        );
+        assert_eq!(
+            repo.processed.lock().unwrap().as_slice(),
+            &[row_id],
+            "row marked processed"
+        );
         assert!(repo.failed.lock().unwrap().is_empty(), "not marked failed");
     }
 
@@ -209,9 +214,19 @@ mod tests {
         let count = worker.process_batch().await.unwrap();
 
         assert_eq!(count, 1);
-        assert!(publisher.published.lock().unwrap().is_empty(), "nothing published");
-        assert!(repo.processed.lock().unwrap().is_empty(), "must NOT mark processed");
-        assert_eq!(repo.failed.lock().unwrap().len(), 1, "row marked failed for retry");
+        assert!(
+            publisher.published.lock().unwrap().is_empty(),
+            "nothing published"
+        );
+        assert!(
+            repo.processed.lock().unwrap().is_empty(),
+            "must NOT mark processed"
+        );
+        assert_eq!(
+            repo.failed.lock().unwrap().len(),
+            1,
+            "row marked failed for retry"
+        );
         assert_eq!(repo.failed.lock().unwrap()[0].0, row_id);
     }
 }

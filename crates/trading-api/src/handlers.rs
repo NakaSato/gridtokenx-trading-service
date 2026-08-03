@@ -11,7 +11,24 @@ use uuid::Uuid;
 use crate::state::AppState;
 use trading_core::models::TradingOrder;
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
-use trading_protocol::trading_proto::{TradingService, SubmitOrderRequestView, TradingResponse, GetOrderRequestView, OrderResponse, CancelOrderRequestView, ListOrdersRequestView, ListOrdersResponse, UpdateOrderRequestView, NotifyOrderRequestView, GetOrderBookRequestView, ListTradesRequestView, ListTradesResponse, ExecuteSettlementRequestView, SettlementResponse, BatchExecuteSettlementsRequestView, BatchSettlementResponse, IssueERCRequestView, TransferERCRequestView, RetireERCRequestView, GetERCBalanceRequestView, ERCBalanceResponse, CalculateP2PCostRequestView, P2PTransactionCost, P2PMarketPrices, RelayOrderRequestView, BlockchainMarketDataResponse, MarketStatsResponse, MatchingStatusResponse, SettlementStatsResponse, GetTokenBalanceRequestView, TokenBalanceResponse, CreateConditionalOrderRequestView, ListConditionalOrdersRequestView, ListConditionalOrdersResponse, CancelConditionalOrderRequestView, GetConditionalOrderRequestView, ConditionalOrderData, CreateRecurringOrderRequestView, ListRecurringOrdersRequestView, ListRecurringOrdersResponse, GetRecurringOrderRequestView, RecurringOrderResponse, CancelRecurringOrderRequestView, PauseRecurringOrderRequestView, ResumeRecurringOrderRequestView, GetVppClusterRequestView, VppClusterResponse, ListVppClustersRequestView, ListVppClustersResponse, DispatchVppRequestView};
+use trading_protocol::trading_proto::{
+    BatchExecuteSettlementsRequestView, BatchSettlementResponse, BlockchainMarketDataResponse,
+    CalculateP2PCostRequestView, CancelConditionalOrderRequestView, CancelOrderRequestView,
+    CancelRecurringOrderRequestView, ConditionalOrderData, CreateConditionalOrderRequestView,
+    CreateRecurringOrderRequestView, DispatchVppRequestView, ERCBalanceResponse,
+    ExecuteSettlementRequestView, GetConditionalOrderRequestView, GetERCBalanceRequestView,
+    GetOrderBookRequestView, GetOrderRequestView, GetRecurringOrderRequestView,
+    GetTokenBalanceRequestView, GetVppClusterRequestView, IssueERCRequestView,
+    ListConditionalOrdersRequestView, ListConditionalOrdersResponse, ListOrdersRequestView,
+    ListOrdersResponse, ListRecurringOrdersRequestView, ListRecurringOrdersResponse,
+    ListTradesRequestView, ListTradesResponse, ListVppClustersRequestView, ListVppClustersResponse,
+    MarketStatsResponse, MatchingStatusResponse, NotifyOrderRequestView, OrderResponse,
+    P2PMarketPrices, P2PTransactionCost, PauseRecurringOrderRequestView, RecurringOrderResponse,
+    RelayOrderRequestView, ResumeRecurringOrderRequestView, RetireERCRequestView,
+    SettlementResponse, SettlementStatsResponse, SubmitOrderRequestView, TokenBalanceResponse,
+    TradingResponse, TradingService, TransferERCRequestView, UpdateOrderRequestView,
+    VppClusterResponse,
+};
 
 pub struct TradingGrpcService {
     state: AppState,
@@ -38,10 +55,7 @@ impl TradingService for TradingGrpcService {
         );
 
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
-            ConnectError::new(
-                ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {e}"),
-            )
+            ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid user_id: {e}"))
         })?;
 
         let side = match request.side.to_lowercase().as_str() {
@@ -119,9 +133,11 @@ impl TradingService for TradingGrpcService {
         let price_input = if request.price_per_kwh == 0.0 {
             None
         } else {
-            Some(Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
-                ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
-            })?)
+            Some(
+                Decimal::from_f64_retain(request.price_per_kwh).ok_or_else(|| {
+                    ConnectError::new(ErrorCode::InvalidArgument, "Invalid price_per_kwh")
+                })?,
+            )
         };
         let price = trading_core::order_policy::resolve_order_price(
             order_type,
@@ -262,17 +278,18 @@ impl TradingService for TradingGrpcService {
         // Insert the order and its OrderCreated event in one transaction so the
         // event can never be lost relative to the state change (the outbox row
         // is written atomically with the order; OutboxWorker relays it later).
-        let event = trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
-            id: order.id,
-            user_id: order.user_id,
-            order_type: order.order_type.to_string(),
-            side: order.side.to_string(),
-            energy_amount: order.energy_amount,
-            price_per_kwh: order.price_per_kwh,
-            status: order.status.to_string(),
-            zone_id: order.zone_id,
-            created_at: order.created_at,
-        });
+        let event =
+            trading_core::events::Event::OrderCreated(trading_core::events::OrderCreatedPayload {
+                id: order.id,
+                user_id: order.user_id,
+                order_type: order.order_type.to_string(),
+                side: order.side.to_string(),
+                energy_amount: order.energy_amount,
+                price_per_kwh: order.price_per_kwh,
+                status: order.status.to_string(),
+                zone_id: order.zone_id,
+                created_at: order.created_at,
+            });
 
         self.state
             .order_repo
@@ -289,7 +306,9 @@ impl TradingService for TradingGrpcService {
         // when enabled + on-chain succeeds does the order become settle-eligible.
         if self.state.config.trade_settlement_enabled {
             let seed = u64::from_le_bytes(
-                order.id.as_bytes()[0..8].try_into().expect("uuid has 16 bytes"),
+                order.id.as_bytes()[0..8]
+                    .try_into()
+                    .expect("uuid has 16 bytes"),
             );
             let is_buy = matches!(order.side, trading_core::types::OrderSide::Buy);
             match self
@@ -317,7 +336,10 @@ impl TradingService for TradingGrpcService {
                     {
                         tracing::warn!("order {}: persist order_pda failed: {}", order.id, e);
                     } else {
-                        info!("order {} placed on-chain: pda={} sig={}", order.id, pda, sig);
+                        info!(
+                            "order {} placed on-chain: pda={} sig={}",
+                            order.id, pda, sig
+                        );
                     }
                 }
                 Err(e) => {
@@ -337,7 +359,10 @@ impl TradingService for TradingGrpcService {
                         if let Err(e2) = self
                             .state
                             .order_repo
-                            .update_order_status(order.id, trading_core::types::OrderStatus::Cancelled)
+                            .update_order_status(
+                                order.id,
+                                trading_core::types::OrderStatus::Cancelled,
+                            )
                             .await
                         {
                             tracing::error!(
@@ -382,10 +407,7 @@ impl TradingService for TradingGrpcService {
         request: OwnedView<GetOrderRequestView<'static>>,
     ) -> Result<(OrderResponse, Context), ConnectError> {
         let order_id = Uuid::parse_str(request.order_id).map_err(|e| {
-            ConnectError::new(
-                ErrorCode::InvalidArgument,
-                format!("Invalid order_id: {e}"),
-            )
+            ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid order_id: {e}"))
         })?;
 
         let order = self
@@ -416,16 +438,10 @@ impl TradingService for TradingGrpcService {
         request: OwnedView<CancelOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
         let order_id = Uuid::parse_str(request.order_id).map_err(|e| {
-            ConnectError::new(
-                ErrorCode::InvalidArgument,
-                format!("Invalid order_id: {e}"),
-            )
+            ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid order_id: {e}"))
         })?;
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
-            ConnectError::new(
-                ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {e}"),
-            )
+            ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid user_id: {e}"))
         })?;
 
         let success = self
@@ -454,10 +470,7 @@ impl TradingService for TradingGrpcService {
         request: OwnedView<ListOrdersRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
-            ConnectError::new(
-                ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {e}"),
-            )
+            ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid user_id: {e}"))
         })?;
 
         let orders = self
@@ -584,16 +597,22 @@ impl TradingService for TradingGrpcService {
         ctx: Context,
         request: OwnedView<BatchExecuteSettlementsRequestView<'static>>,
     ) -> Result<(BatchSettlementResponse, Context), ConnectError> {
-        info!("💠 BatchExecuteSettlements: count={}", request.settlements.len());
+        info!(
+            "💠 BatchExecuteSettlements: count={}",
+            request.settlements.len()
+        );
 
         let mut settlements = Vec::new();
         for req in &request.settlements {
             let id = Uuid::parse_str(req.settlement_id).map_err(|e| {
-                ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid settlement_id: {e}"))
+                ConnectError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("Invalid settlement_id: {e}"),
+                )
             })?;
 
             // Reconstruct a partial settlement for the service to process
-            // The service will fetch the full record from DB anyway if needed, 
+            // The service will fetch the full record from DB anyway if needed,
             // but we can pass the PDAs/wallets if we want to bypass DB.
             // For now, we'll let the service fetch the full records.
             if let Ok(Some(s)) = self.state.settlement_repo.get_settlement(id).await {
@@ -616,8 +635,14 @@ impl TradingService for TradingGrpcService {
                 ConnectError::new(ErrorCode::Internal, "Blockchain execution failed")
             })?;
 
-        let first_sig = tx_results.first().map(|r| r.signature.clone()).unwrap_or_default();
-        let ids = tx_results.into_iter().map(|r| r.settlement_id.to_string()).collect();
+        let first_sig = tx_results
+            .first()
+            .map(|r| r.signature.clone())
+            .unwrap_or_default();
+        let ids = tx_results
+            .into_iter()
+            .map(|r| r.settlement_id.to_string())
+            .collect();
 
         let mut res = BatchSettlementResponse::default();
         res.success = true;
@@ -800,22 +825,32 @@ impl TradingService for TradingGrpcService {
         ctx: Context,
         request: OwnedView<DispatchVppRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        info!("🚀 DispatchVpp: cluster={}, target={}kW", request.cluster_id, request.target_kw);
+        info!(
+            "🚀 DispatchVpp: cluster={}, target={}kW",
+            request.cluster_id, request.target_kw
+        );
 
-        let dispatches = self.state.vpp.optimize_dispatch(
-            request.cluster_id,
-            request.target_kw,
-            None, // No nodal prices for now
-            None, // No carbon intensity for now
-        ).await
-        .map_err(|e| {
-            error!("VPP Dispatch optimization failed: {}", e);
-            ConnectError::new(ErrorCode::Internal, "Optimization failed")
-        })?;
+        let dispatches = self
+            .state
+            .vpp
+            .optimize_dispatch(
+                request.cluster_id,
+                request.target_kw,
+                None, // No nodal prices for now
+                None, // No carbon intensity for now
+            )
+            .await
+            .map_err(|e| {
+                error!("VPP Dispatch optimization failed: {}", e);
+                ConnectError::new(ErrorCode::Internal, "Optimization failed")
+            })?;
 
-        info!("✅ VPP Dispatch optimized: {} members to be commanded", dispatches.len());
+        info!(
+            "✅ VPP Dispatch optimized: {} members to be commanded",
+            dispatches.len()
+        );
 
-        // In a real system, we would now push these commands to the Oracle Bridge 
+        // In a real system, we would now push these commands to the Oracle Bridge
         // via NATS or gRPC. For now, we return success.
 
         let mut res = TradingResponse::default();
@@ -825,4 +860,3 @@ impl TradingService for TradingGrpcService {
         Ok((res, ctx))
     }
 }
-

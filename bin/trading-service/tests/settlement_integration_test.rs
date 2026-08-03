@@ -1,32 +1,50 @@
 #![allow(clippy::unwrap_used)] // unwrap is idiomatic in integration tests
 
-use rust_decimal_macros::dec;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use uuid::Uuid;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
+use trading_core::config::SolanaProgramsConfig;
 use trading_core::fast_price::FastPrice;
 use trading_core::models::TradeMatch;
 use trading_infra::blockchain::settlement::BlockchainSettlementProvider;
 use trading_infra::blockchain::BlockchainService;
-use trading_core::config::SolanaProgramsConfig;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn test_settlement_numeric_integrity() {
     // 1. Setup Environment
     std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
-    std::env::set_var("ENERGY_TOKEN_MINT", "EneryTokenMint111111111111111111111111111");
-    std::env::set_var("CURRENCY_TOKEN_MINT", "CurrntTokenMint1111111111111111111111111");
-    std::env::set_var("FEE_COLLECTOR_WALLET", "FeeCollector111111111111111111111111111");
-    std::env::set_var("WHEELING_COLLECTOR_WALLET", "WheelCollector111111111111111111111111");
-    std::env::set_var("LOSS_COLLECTOR_WALLET", "LossCollector1111111111111111111111111");
-    std::env::set_var("SOLANA_TRADING_PROGRAM_ID", "Trade1111111111111111111111111111111111");
+    std::env::set_var(
+        "ENERGY_TOKEN_MINT",
+        "EneryTokenMint111111111111111111111111111",
+    );
+    std::env::set_var(
+        "CURRENCY_TOKEN_MINT",
+        "CurrntTokenMint1111111111111111111111111",
+    );
+    std::env::set_var(
+        "FEE_COLLECTOR_WALLET",
+        "FeeCollector111111111111111111111111111",
+    );
+    std::env::set_var(
+        "WHEELING_COLLECTOR_WALLET",
+        "WheelCollector111111111111111111111111",
+    );
+    std::env::set_var(
+        "LOSS_COLLECTOR_WALLET",
+        "LossCollector1111111111111111111111111",
+    );
+    std::env::set_var(
+        "SOLANA_TRADING_PROGRAM_ID",
+        "Trade1111111111111111111111111111111111",
+    );
 
     // 2. Simulate Engine Output (FastPrice precision)
     // Price: 5.123456789 (9 decimals)
     let engine_price = FastPrice::from(dec!(5.123456789));
     let engine_quantity = dec!(10.5); // 10.5 kWh
-    
+
     // Convert back to Decimal as the engine does when emitting matches
     let match_price = engine_price.to_decimal();
     assert_eq!(match_price, dec!(5.123456789));
@@ -65,29 +83,35 @@ async fn test_settlement_numeric_integrity() {
     };
 
     // We use a dummy URL. Service creation should succeed if it doesn't try to connect immediately.
-    let blockchain = Arc::new(BlockchainService::new(
-        "http://localhost:8899".to_string(),
-        "localnet".to_string(),
-        program_ids,
-        None,
-        None,
-    ).await.unwrap());
+    let blockchain = Arc::new(
+        BlockchainService::new(
+            "http://localhost:8899".to_string(),
+            "localnet".to_string(),
+            program_ids,
+            None,
+            None,
+        )
+        .await
+        .unwrap(),
+    );
 
     let _provider = BlockchainSettlementProvider::new(blockchain.clone());
 
     // 5. Verify Atomic Conversion Logic (replicating internal provider logic)
-    let amount_atomic = ToPrimitive::to_u64(
-        &(trade.quantity * Decimal::from(1_000_000_000i64)).trunc(),
-    ).unwrap_or(0);
-    
-    let price_atomic = ToPrimitive::to_u64(
-        &(trade.price * Decimal::from(1_000_000i64)).trunc()
-    ).unwrap_or(0);
-    
+    let amount_atomic =
+        ToPrimitive::to_u64(&(trade.quantity * Decimal::from(1_000_000_000i64)).trunc())
+            .unwrap_or(0);
+
+    let price_atomic =
+        ToPrimitive::to_u64(&(trade.price * Decimal::from(1_000_000i64)).trunc()).unwrap_or(0);
+
     // 10.5 * 1e9 = 10,500,000,000
     assert_eq!(amount_atomic, 10_500_000_000);
     // 5.123456789 * 1e6 = 5,123,456 (truncated to 6 decimals)
     assert_eq!(price_atomic, 5_123_456);
 
-    println!("✅ Atomic conversion verified: {} energy, {} price", amount_atomic, price_atomic);
+    println!(
+        "✅ Atomic conversion verified: {} energy, {} price",
+        amount_atomic, price_atomic
+    );
 }

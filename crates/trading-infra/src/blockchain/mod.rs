@@ -42,15 +42,21 @@ use uuid::Uuid;
 #[async_trait]
 impl BlockchainGateway for BlockchainService {
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<trading_core::models::ZoneConfig> {
-        let pda = self.instruction_builder().get_zone_config_pda(u32::try_from(zone_id).unwrap_or(0))
-            .map_err(|e| trading_core::error::ApiError::Internal(format!("PDA derivation error: {e}")))?;
+        let pda = self
+            .instruction_builder()
+            .get_zone_config_pda(u32::try_from(zone_id).unwrap_or(0))
+            .map_err(|e| {
+                trading_core::error::ApiError::Internal(format!("PDA derivation error: {e}"))
+            })?;
 
         match self.get_account_data(&pda).await {
             Ok(data) => {
                 if data.len() < 8 + 136 {
-                    return Err(trading_core::error::ApiError::Internal("Invalid ZoneConfig account data size".to_string()));
+                    return Err(trading_core::error::ApiError::Internal(
+                        "Invalid ZoneConfig account data size".to_string(),
+                    ));
                 }
-                
+
                 // Skip Anchor discriminator (8 bytes)
                 let multiplier_bps = u64::from_le_bytes(data[16..24].try_into().unwrap_or([0; 8]));
                 let wheeling_bps = u64::from_le_bytes(data[24..32].try_into().unwrap_or([0; 8]));
@@ -62,11 +68,15 @@ impl BlockchainGateway for BlockchainService {
                     incentive_multiplier: Decimal::from(multiplier_bps) / Decimal::from(10_000),
                     wheeling_charge: Decimal::from(wheeling_bps) / Decimal::from(10_000),
                     maintenance_mode,
-                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(gridtokenx_telemetry::time::now),
+                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0)
+                        .unwrap_or_else(gridtokenx_telemetry::time::now),
                 })
             }
             Err(e) => {
-                warn!("⚠️ Failed to fetch on-chain ZoneConfig for {}: {}. Falling back to default.", zone_id, e);
+                warn!(
+                    "⚠️ Failed to fetch on-chain ZoneConfig for {}: {}. Falling back to default.",
+                    zone_id, e
+                );
                 Ok(trading_core::models::ZoneConfig {
                     zone_id,
                     incentive_multiplier: Decimal::from(1),
@@ -109,7 +119,9 @@ impl BlockchainGateway for BlockchainService {
             .get_user_primary_wallet(&user_id)
             .await
             .map_err(|e| ApiError::Internal(format!("resolve wallet: {e}")))?
-            .ok_or_else(|| ApiError::Validation(format!("no on-chain wallet for user {user_id}")))?;
+            .ok_or_else(|| {
+                ApiError::Validation(format!("no on-chain wallet for user {user_id}"))
+            })?;
 
         // GRID energy = 9-dec atomic; currency price = 6-dec atomic.
         let energy_atomic = (energy_amount * rust_decimal::Decimal::from(1_000_000_000i64))
@@ -146,8 +158,9 @@ impl BlockchainGateway for BlockchainService {
                 "ENERGY_TOKEN_MINT environment variable is required".to_string(),
             )
         })?;
-        let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str)
-            .map_err(|e| trading_core::error::ApiError::Internal(format!("invalid ENERGY_TOKEN_MINT: {e}")))?;
+        let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str).map_err(|e| {
+            trading_core::error::ApiError::Internal(format!("invalid ENERGY_TOKEN_MINT: {e}"))
+        })?;
 
         self.get_token_balance(&owner, &mint)
             .await
@@ -204,7 +217,10 @@ impl BlockchainGateway for BlockchainService {
             return Ok(Vec::new());
         }
 
-        info!("Executing batched on-chain settlements for {} records", settlements.len());
+        info!(
+            "Executing batched on-chain settlements for {} records",
+            settlements.len()
+        );
 
         let mut results = Vec::new();
 
@@ -223,21 +239,25 @@ impl BlockchainGateway for BlockchainService {
                 // left for retry instead of failing the whole batch.
                 let mut inputs = Vec::new();
                 for settlement in &trade_settlements {
-                    let Ok(Some(buy_pda)) = self.get_order_pda(&settlement.buy_order_id).await else {
+                    let Ok(Some(buy_pda)) = self.get_order_pda(&settlement.buy_order_id).await
+                    else {
                         warn!(
                             "Settlement {}: buy order {} has no on-chain PDA; skipping",
                             settlement.id, settlement.buy_order_id
                         );
                         continue;
                     };
-                    let Ok(Some(sell_pda)) = self.get_order_pda(&settlement.sell_order_id).await else {
+                    let Ok(Some(sell_pda)) = self.get_order_pda(&settlement.sell_order_id).await
+                    else {
                         warn!(
                             "Settlement {}: sell order {} has no on-chain PDA; skipping",
                             settlement.id, settlement.sell_order_id
                         );
                         continue;
                     };
-                    let Ok(Some(buyer_pubkey)) = self.get_user_primary_wallet(&settlement.buyer_id).await else {
+                    let Ok(Some(buyer_pubkey)) =
+                        self.get_user_primary_wallet(&settlement.buyer_id).await
+                    else {
                         warn!(
                             "Settlement {}: buyer {} has no primary wallet; skipping",
                             settlement.id, settlement.buyer_id
@@ -245,13 +265,14 @@ impl BlockchainGateway for BlockchainService {
                         continue;
                     };
                     let Ok(Some(seller_pubkey)) =
-                        self.get_user_primary_wallet(&settlement.seller_id).await else {
-                            warn!(
-                                "Settlement {}: seller {} has no primary wallet; skipping",
-                                settlement.id, settlement.seller_id
-                            );
-                            continue;
-                        };
+                        self.get_user_primary_wallet(&settlement.seller_id).await
+                    else {
+                        warn!(
+                            "Settlement {}: seller {} has no primary wallet; skipping",
+                            settlement.id, settlement.seller_id
+                        );
+                        continue;
+                    };
 
                     // Per-user escrow path: settle from the parties' OWN escrow
                     // PDAs so the seller's GRX is actually debited, instead of the
@@ -265,7 +286,9 @@ impl BlockchainGateway for BlockchainService {
                             self.get_signed_order_side(&settlement.sell_order_id).await;
                         match (buyer_side, seller_side) {
                             (Ok(Some(b)), Ok(Some(s))) => {
-                                match provider.execute_offchain_settlement(settlement, &b, &s).await
+                                match provider
+                                    .execute_offchain_settlement(settlement, &b, &s)
+                                    .await
                                 {
                                     Ok(tx) => {
                                         results.push(tx);
@@ -338,7 +361,11 @@ impl BlockchainGateway for BlockchainService {
             })?;
 
         // Format certificate ID: ERC-{meter_id}-{timestamp}
-        let cert_id = format!("ERC-{}-{}", meter_id, gridtokenx_telemetry::time::now().timestamp());
+        let cert_id = format!(
+            "ERC-{}-{}",
+            meter_id,
+            gridtokenx_telemetry::time::now().timestamp()
+        );
 
         // Convert decimal to u64 (9 decimals for GRX/ERC). Negative or
         // out-of-range amounts must fail loudly — silently minting a

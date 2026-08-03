@@ -458,8 +458,12 @@ mod tests {
     #[test]
     fn market_buy_non_positive_cap_rejected() {
         for bad in [dec!(0), dec!(-1)] {
-            let p =
-                resolve_order_price(OrderType::Market, OrderSide::Buy, TimeInForce::Ioc, Some(bad));
+            let p = resolve_order_price(
+                OrderType::Market,
+                OrderSide::Buy,
+                TimeInForce::Ioc,
+                Some(bad),
+            );
             assert_eq!(p, Err(OrderPriceError::MarketCapNonPositive));
         }
     }
@@ -485,12 +489,20 @@ mod tests {
     #[test]
     fn fok_buy_and_ioc_sell_still_ok() {
         // FOK BUY is fine (engine enforces buy-side all-or-nothing).
-        let fok_buy =
-            resolve_order_price(OrderType::Limit, OrderSide::Buy, TimeInForce::Fok, Some(dec!(1.0)));
+        let fok_buy = resolve_order_price(
+            OrderType::Limit,
+            OrderSide::Buy,
+            TimeInForce::Fok,
+            Some(dec!(1.0)),
+        );
         assert_eq!(fok_buy, Ok(dec!(1.0)));
         // IOC SELL is fine (partial fill + cancel remainder is IOC's contract).
-        let ioc_sell =
-            resolve_order_price(OrderType::Limit, OrderSide::Sell, TimeInForce::Ioc, Some(dec!(0.5)));
+        let ioc_sell = resolve_order_price(
+            OrderType::Limit,
+            OrderSide::Sell,
+            TimeInForce::Ioc,
+            Some(dec!(0.5)),
+        );
         assert_eq!(ioc_sell, Ok(dec!(0.5)));
     }
 
@@ -502,8 +514,7 @@ mod tests {
 
     #[test]
     fn limit_requires_price() {
-        let missing =
-            resolve_order_price(OrderType::Limit, OrderSide::Buy, TimeInForce::Gtc, None);
+        let missing = resolve_order_price(OrderType::Limit, OrderSide::Buy, TimeInForce::Gtc, None);
         assert_eq!(missing, Err(OrderPriceError::LimitMissingPrice));
         let ok = resolve_order_price(
             OrderType::Limit,
@@ -571,14 +582,20 @@ mod tests {
     #[test]
     fn sending_both_forms_is_rejected() {
         let at = now() + chrono::Duration::seconds(60);
-        assert_eq!(resolve(Some(at), Some(60), None), Err(OrderExpiryError::BothForms));
+        assert_eq!(
+            resolve(Some(at), Some(60), None),
+            Err(OrderExpiryError::BothForms)
+        );
     }
 
     /// A past or now expiry can never match (the engine skips expired orders), so
     /// it is a 400 instead of an order that rests as dead weight until reaped.
     #[test]
     fn past_or_present_expiry_is_rejected() {
-        assert_eq!(resolve(Some(now()), None, None), Err(OrderExpiryError::NotInFuture));
+        assert_eq!(
+            resolve(Some(now()), None, None),
+            Err(OrderExpiryError::NotInFuture)
+        );
         assert_eq!(
             resolve(Some(now() - chrono::Duration::seconds(1)), None, None),
             Err(OrderExpiryError::NotInFuture)
@@ -609,7 +626,10 @@ mod tests {
             Err(OrderExpiryError::BeyondMaxTtl)
         );
         // An extreme TTL must report the cap, not panic on duration overflow.
-        assert_eq!(resolve(None, Some(i64::MAX), None), Err(OrderExpiryError::BeyondMaxTtl));
+        assert_eq!(
+            resolve(None, Some(i64::MAX), None),
+            Err(OrderExpiryError::BeyondMaxTtl)
+        );
     }
 
     /// A signed expiry is authoritative: settlement re-derives the signed payload
@@ -622,11 +642,19 @@ mod tests {
         // Signing a past instant is a client bug, not a licence to rest an
         // unmatchable order.
         assert_eq!(
-            resolve(None, None, Some((now() - chrono::Duration::seconds(1)).timestamp())),
+            resolve(
+                None,
+                None,
+                Some((now() - chrono::Duration::seconds(1)).timestamp())
+            ),
             Err(OrderExpiryError::NotInFuture)
         );
         assert_eq!(
-            resolve(None, None, Some((now() + chrono::Duration::days(30)).timestamp())),
+            resolve(
+                None,
+                None,
+                Some((now() + chrono::Duration::days(30)).timestamp())
+            ),
             Err(OrderExpiryError::BeyondMaxTtl)
         );
     }
@@ -637,8 +665,14 @@ mod tests {
     fn client_expiry_with_a_signed_expiry_is_rejected() {
         let signed = (now() + chrono::Duration::seconds(600)).timestamp();
         let at = now() + chrono::Duration::seconds(60);
-        assert_eq!(resolve(Some(at), None, Some(signed)), Err(OrderExpiryError::SignedConflict));
-        assert_eq!(resolve(None, Some(60), Some(signed)), Err(OrderExpiryError::SignedConflict));
+        assert_eq!(
+            resolve(Some(at), None, Some(signed)),
+            Err(OrderExpiryError::SignedConflict)
+        );
+        assert_eq!(
+            resolve(None, Some(60), Some(signed)),
+            Err(OrderExpiryError::SignedConflict)
+        );
     }
 
     /// The default is exempt from the max check on purpose: a config with
