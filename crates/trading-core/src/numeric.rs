@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 /// - Precision loss would occur (input has more than `decimals` significant fractional digits)
 pub fn to_u64_atomic(val: Decimal, decimals: u32, label: &str) -> Result<u64> {
     if val.is_sign_negative() {
-        return Err(anyhow!("Negative value for {}: {}", label, val));
+        return Err(anyhow!("Negative value for {label}: {val}"));
     }
 
     let multiplier = Decimal::from(10u64.pow(decimals));
@@ -26,16 +26,12 @@ pub fn to_u64_atomic(val: Decimal, decimals: u32, label: &str) -> Result<u64> {
     // Ensure it's an integer (no fractional parts after scaling)
     if atomic_val.fract() != Decimal::ZERO {
         return Err(anyhow!(
-            "Precision loss for {}: {} with {} decimals would lose fractional digits",
-            label,
-            val,
-            decimals
+            "Precision loss for {label}: {val} with {decimals} decimals would lose fractional digits"
         ));
     }
 
     atomic_val.to_u64().context(format!(
-        "Value too large for u64 after scaling {}: {} (scaled: {})",
-        label, val, atomic_val
+        "Value too large for u64 after scaling {label}: {val} (scaled: {atomic_val})"
     ))
 }
 
@@ -43,24 +39,21 @@ pub fn to_u64_atomic(val: Decimal, decimals: u32, label: &str) -> Result<u64> {
 pub fn safe_div(numerator: Decimal, denominator: Decimal, label: &str) -> Result<Decimal> {
     if denominator.is_zero() {
         return Err(anyhow!(
-            "Division by zero for {}: {} / {}",
-            label,
-            numerator,
-            denominator
+            "Division by zero for {label}: {numerator} / {denominator}"
         ));
     }
     Ok(numerator / denominator)
 }
 
-/// Safely casts an i32 (common for DB zone_id) to u32
+/// Safely casts an i32 (common for DB `zone_id`) to u32
 pub fn to_u32_safe(val: i32, label: &str) -> Result<u32> {
     if val < 0 {
-        return Err(anyhow!("Negative value for {}: {}", label, val));
+        return Err(anyhow!("Negative value for {label}: {val}"));
     }
-    u32::try_from(val).context(format!("Failed to cast {} ({}) to u32", label, val))
+    u32::try_from(val).context(format!("Failed to cast {label} ({val}) to u32"))
 }
 
-/// Safely casts u32 to i64 (for DB order_index)
-pub fn to_i64_safe(val: u32, label: &str) -> Result<i64> {
-    i64::try_from(val).context(format!("Failed to cast {} ({}) to i64", label, val))
+/// Safely casts u32 to i64 (for DB `order_index`)
+pub fn to_i64_safe(val: u32, _label: &str) -> Result<i64> {
+    Ok(i64::from(val))
 }

@@ -17,7 +17,7 @@ pub(crate) async fn insert_event_in_tx(
     event: &Event,
 ) -> TraitResult<()> {
     let payload = serde_json::to_value(event).map_err(|e| {
-        trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))
+        trading_core::error::ApiError::Internal(format!("Failed to serialize event: {e}"))
     })?;
 
     sqlx::query("INSERT INTO outbox_events (event_type, payload) VALUES ($1, $2)")
@@ -34,6 +34,7 @@ pub struct PostgresOutboxRepository {
 }
 
 impl PostgresOutboxRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -45,7 +46,7 @@ impl OutboxRepository for PostgresOutboxRepository {
         let event_type = event.outbox_event_type();
 
         let payload = serde_json::to_value(event).map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to serialize event: {}", e))
+            trading_core::error::ApiError::Internal(format!("Failed to serialize event: {e}"))
         })?;
 
         sqlx::query(

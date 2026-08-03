@@ -11,6 +11,7 @@ pub struct SettlementWorker {
 }
 
 impl SettlementWorker {
+    #[must_use]
     pub fn new(service: Arc<SettlementService>, interval: Duration, batch_limit: i64) -> Self {
         Self {
             service,

@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{Deserialize, ToSchema, Serialize, Decimal, Settlement, Uuid, TradeRecordResponse, TradesListResponse, TradesQuery, State, Query, ServiceRole, UserContext, AppState, Json, Response, IntoResponse, header};
 
 pub(super) fn dec_opt_str(d: Option<Decimal>) -> String {
     d.unwrap_or(Decimal::ZERO).to_string()
@@ -132,7 +132,7 @@ pub async fn get_trades(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -172,7 +172,7 @@ pub async fn export_trades(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 

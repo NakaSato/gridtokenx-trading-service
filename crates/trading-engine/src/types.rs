@@ -40,10 +40,12 @@ pub struct OrderMetadata {
 }
 
 impl FastOrder {
+    #[must_use]
     pub fn remaining_amount(&self) -> Decimal {
         self.energy_amount - self.filled_amount
     }
 
+    #[must_use]
     pub fn is_expired(&self, now_ns: i64) -> bool {
         if let Some(expires_at) = self.expires_at_ns {
             expires_at <= now_ns

@@ -14,7 +14,7 @@ pub struct KafkaConsumer {
 }
 
 impl KafkaConsumer {
-    /// Create a new Kafka consumer. If group_id is None, an ephemeral one is generated (for rehydration).
+    /// Create a new Kafka consumer. If `group_id` is None, an ephemeral one is generated (for rehydration).
     pub fn new(
         bootstrap_servers: &str,
         topics: Vec<String>,
@@ -34,14 +34,15 @@ impl KafkaConsumer {
             .set("auto.offset.reset", "earliest")
             .set("fetch.message.max.bytes", "10485760") // 10MB
             .create()
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka consumer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka consumer: {e}"))?;
 
         Ok(Self { consumer, topics })
     }
 
     /// Subscribe to configured topics and seek to start of history.
+    #[allow(clippy::unused_async)] // API symmetry with the other subscribe paths
     pub async fn subscribe_from_beginning(&self) -> Result<()> {
-        let topic_names: Vec<&str> = self.topics.iter().map(|s| s.as_str()).collect();
+        let topic_names: Vec<&str> = self.topics.iter().map(std::string::String::as_str).collect();
         self.consumer.subscribe(&topic_names)?;
 
         info!("Subscribed to topics: {:?}", topic_names);
@@ -128,7 +129,7 @@ impl KafkaConsumer {
         F: Fn(Event) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        let topic_names: Vec<&str> = self.topics.iter().map(|s| s.as_str()).collect();
+        let topic_names: Vec<&str> = self.topics.iter().map(std::string::String::as_str).collect();
         self.consumer.subscribe(&topic_names)?;
 
         info!(

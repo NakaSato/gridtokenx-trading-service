@@ -15,6 +15,7 @@ pub struct ClearingWorker {
 }
 
 impl ClearingWorker {
+    #[must_use]
     pub fn new(service: Arc<ClearingService>, interval: Duration) -> Self {
         Self { service, interval }
     }

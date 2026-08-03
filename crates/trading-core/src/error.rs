@@ -1,4 +1,4 @@
-//! Error types for the GridTokenX trading service.
+//! Error types for the `GridTokenX` trading service.
 
 use serde::Serialize;
 use thiserror::Error;
@@ -96,6 +96,7 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 /// Matching on the serialized error text is deliberate: the gateway trait returns
 /// `ApiError`, so the structured `TransactionError` is already stringified by the time any
 /// caller sees it, and re-plumbing that type is a larger change than this predicate.
+#[must_use]
 pub fn is_deterministic_chain_rejection(message: &str) -> bool {
     message.contains("InstructionError")
 }

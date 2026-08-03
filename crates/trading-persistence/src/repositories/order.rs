@@ -13,7 +13,7 @@ use trading_core::types::{
     MarketSegment, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerStatus, TriggerType,
 };
 
-/// Database-specific order model with SQLx metadata.
+/// Database-specific order model with `SQLx` metadata.
 #[derive(Debug, Clone, FromRow)]
 pub struct TradingOrderDb {
     pub id: Uuid,
@@ -87,6 +87,7 @@ pub struct PostgresOrderRepository {
 }
 
 impl PostgresOrderRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -96,14 +97,14 @@ impl PostgresOrderRepository {
 impl OrderRepository for PostgresOrderRepository {
     async fn insert_order(&self, order: &TradingOrder) -> TraitResult<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO trading_orders (
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
                 epoch_id, market_segment, expires_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            "#,
+            ",
         )
         .bind(order.id)
         .bind(order.user_id)
@@ -144,14 +145,14 @@ impl OrderRepository for PostgresOrderRepository {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO trading_orders (
                 id, user_id, order_type, side, energy_amount, price_per_kwh,
                 status, time_in_force, zone_id, meter_id, session_token,
                 order_pda, order_index, blockchain_tx_hash, blockchain_status,
                 epoch_id, market_segment, expires_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            "#,
+            ",
         )
         .bind(order.id)
         .bind(order.user_id)
@@ -227,11 +228,11 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_active_orders_by_zone(&self, zone_id: i32) -> TraitResult<Vec<OrderBookEntry>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            r#"
+            r"
             SELECT * FROM trading_orders 
             WHERE zone_id = $1 
             AND status IN ('pending', 'active', 'partially_filled')
-            "#,
+            ",
         )
         .bind(zone_id)
         .fetch_all(&self.pool)
@@ -259,7 +260,7 @@ impl OrderRepository for PostgresOrderRepository {
                 energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
                 original_amount: o.energy_amount,
                 price_per_kwh: o.price_per_kwh,
-                created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
+                created_at: o.created_at.unwrap_or_else(gridtokenx_telemetry::time::now),
                 zone_id: o.zone_id,
                 session_token: o.session_token,
                 signature: None, // Logic for signatures will be handled in logic crate
@@ -271,10 +272,10 @@ impl OrderRepository for PostgresOrderRepository {
 
     async fn get_all_active_orders(&self) -> TraitResult<Vec<OrderBookEntry>> {
         let orders = sqlx::query_as::<_, TradingOrderDb>(
-            r#"
+            r"
             SELECT * FROM trading_orders
             WHERE status IN ('pending', 'active', 'partially_filled')
-            "#,
+            ",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -301,7 +302,7 @@ impl OrderRepository for PostgresOrderRepository {
                 energy_amount: o.energy_amount - o.filled_amount.unwrap_or(Decimal::ZERO),
                 original_amount: o.energy_amount,
                 price_per_kwh: o.price_per_kwh,
-                created_at: o.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
+                created_at: o.created_at.unwrap_or_else(gridtokenx_telemetry::time::now),
                 zone_id: o.zone_id,
                 session_token: o.session_token,
                 signature: None,

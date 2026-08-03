@@ -47,7 +47,7 @@ impl OutboxWorker {
             let event: trading_core::events::Event = serde_json::from_value(outbox_event.payload)?;
 
             match self.publisher.publish(event).await {
-                Ok(_) => {
+                Ok(()) => {
                     self.repository.mark_processed(outbox_event.id).await?;
                 }
                 Err(e) => {

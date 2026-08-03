@@ -18,7 +18,7 @@ use trading_core::traits::{SettlementRepository, TradeFill, TraitResult};
 /// (`pending`/`active`/`partially_filled`). `filled_amount` is nullable, so it is
 /// coalesced to 0 before adding. A terminal order matches 0 rows (returns `None`),
 /// which the atomic trade path uses to roll the whole trade back.
-const INCREMENTAL_FILL_SQL: &str = r#"
+const INCREMENTAL_FILL_SQL: &str = r"
     UPDATE trading_orders
     SET filled_amount = COALESCE(filled_amount, 0) + $1,
         status = CASE
@@ -31,7 +31,7 @@ const INCREMENTAL_FILL_SQL: &str = r#"
         END
     WHERE id = $2 AND status IN ('pending', 'active', 'partially_filled')
     RETURNING filled_amount, status::text AS status_text
-"#;
+";
 
 /// Bind every settlement column onto an INSERT query — shared by the plain and
 /// transactional insert paths so the column list cannot drift between them.
@@ -68,7 +68,7 @@ fn bind_settlement<'q>(
         .bind(&s.erc_transfer_tx)
 }
 
-const INSERT_SETTLEMENT_SQL: &str = r#"
+const INSERT_SETTLEMENT_SQL: &str = r"
     INSERT INTO settlements (
         id, trade_id, epoch_id, buyer_id, seller_id, buy_order_id, sell_order_id,
         energy_amount, price_per_kwh, total_amount, fee_amount,
@@ -77,15 +77,15 @@ const INSERT_SETTLEMENT_SQL: &str = r#"
         buyer_session_token, seller_session_token, transaction_hash,
         created_at, processed_at, erc_certificate_id, erc_transfer_tx
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
-"#;
+";
 
-const INSERT_MATCH_SQL: &str = r#"
+const INSERT_MATCH_SQL: &str = r"
     INSERT INTO order_matches (
         id, epoch_id, buy_order_id, sell_order_id,
         matched_amount, match_price, match_time, status,
         settlement_id, zone_id
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-"#;
+";
 
 /// Bind every order-match column — shared by the plain and transactional
 /// insert paths.
@@ -212,6 +212,7 @@ pub struct PostgresSettlementRepository {
 }
 
 impl PostgresSettlementRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -453,6 +454,10 @@ impl SettlementRepository for PostgresSettlementRepository {
         // Same retry accounting as reset_settlements_for_retry, but selects rows
         // by staleness instead of id — recovers settlements orphaned in
         // `processing` by a crash or partial failure between claim and finalize.
+        // Staleness horizon in seconds; f64 precision is irrelevant at these
+        // magnitudes and make_interval() takes double precision.
+        #[allow(clippy::cast_precision_loss)]
+        let stale_after = stale_after_secs as f64;
         let result = sqlx::query(
             "UPDATE settlements \
              SET retry_count = retry_count + 1, \
@@ -461,7 +466,7 @@ impl SettlementRepository for PostgresSettlementRepository {
              WHERE status = 'processing' \
                AND updated_at < NOW() - make_interval(secs => $1::double precision)",
         )
-        .bind(stale_after_secs as f64)
+        .bind(stale_after)
         .bind(max_retries)
         .execute(&self.pool)
         .await?;
@@ -476,12 +481,12 @@ impl SettlementRepository for PostgresSettlementRepository {
         offset: i64,
     ) -> TraitResult<(Vec<Settlement>, i64)> {
         let rows = sqlx::query_as::<_, SettlementDb>(
-            r#"
+            r"
             SELECT * FROM settlements
             WHERE buyer_id = $1 OR seller_id = $1
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3
-            "#,
+            ",
         )
         .bind(user_id)
         .bind(limit)
@@ -501,7 +506,7 @@ impl SettlementRepository for PostgresSettlementRepository {
 
     async fn get_settlement_stats(&self) -> TraitResult<SettlementStats> {
         let row = sqlx::query_as::<_, SettlementStatsRow>(
-            r#"
+            r"
             SELECT
                 COUNT(*) FILTER (WHERE status = 'pending')    AS pending,
                 COUNT(*) FILTER (WHERE status = 'processing') AS processing,
@@ -509,7 +514,7 @@ impl SettlementRepository for PostgresSettlementRepository {
                 COUNT(*) FILTER (WHERE status = 'failed')     AS failed,
                 COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) AS total_settled_value
             FROM settlements
-            "#,
+            ",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -585,7 +590,7 @@ impl SettlementRepository for PostgresSettlementRepository {
         // Distinct users across both sides: UNION the buyer and seller id sets,
         // then count the deduped rows.
         let row: (i64,) = sqlx::query_as(
-            r#"
+            r"
             SELECT COUNT(*) FROM (
                 SELECT buyer_id AS uid FROM settlements
                 WHERE status = 'completed'
@@ -595,7 +600,7 @@ impl SettlementRepository for PostgresSettlementRepository {
                 WHERE status = 'completed'
                   AND ($2::bool OR created_at >= NOW() - make_interval(hours => $1::int))
             ) AS traders
-            "#,
+            ",
         )
         .bind(hours)
         .bind(all_time)

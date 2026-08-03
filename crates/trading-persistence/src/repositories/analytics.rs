@@ -13,6 +13,7 @@ pub struct PostgresAnalyticsRepository {
 }
 
 impl PostgresAnalyticsRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -44,13 +45,13 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         }
 
         let txs = sqlx::query_as::<_, TxRow>(
-            r#"
+            r"
             SELECT id, 'trading' as tx_type, total_amount, 'GRID' as asset, status::text as status, created_at
             FROM settlements
             WHERE buyer_id = $1 OR seller_id = $1
             ORDER BY created_at DESC
             LIMIT 50
-            "#,
+            ",
         )
         .bind(user_id)
         .fetch_all(&self.pool)

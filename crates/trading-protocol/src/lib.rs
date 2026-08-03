@@ -1,7 +1,7 @@
-//! `trading-protocol` — Protobuf / ConnectRPC wire types.
+//! `trading-protocol` — Protobuf / `ConnectRPC` wire types.
 //!
 //! This crate owns the `trading.proto` definition and generated
-//! ConnectRPC stubs. API and binary crates depend on this for
+//! `ConnectRPC` stubs. API and binary crates depend on this for
 //! gRPC service definitions.
 
 // The generated ConnectRPC code references `::buffa_types::google::protobuf::Empty`.
@@ -54,7 +54,7 @@ pub mod google {
                 Empty {}
             }
         }
-        /// SAFETY: EmptyView is stateless — the default instance is valid for 'static.
+        /// SAFETY: `EmptyView` is stateless — the default instance is valid for 'static.
         unsafe impl ::buffa::DefaultViewInstance for EmptyView<'static> {
             fn default_view_instance() -> &'static Self {
                 static VALUE: EmptyView<'static> = EmptyView(::std::marker::PhantomData);
@@ -64,6 +64,12 @@ pub mod google {
     }
 }
 
+// Generated wire code (buffa/connectrpc codegen) — exempt from all lints. The
+// workspace's `clippy::pedantic = warn` + `-D warnings` otherwise fails the
+// build on ~950 sites nobody hand-wrote (cast truncation, `__buffa_*` fields,
+// partial Debug impls). `warnings` is the dynamic everything-at-warn group, so
+// this tracks whatever lint config the workspace adopts later.
+#[allow(warnings, clippy::all, clippy::pedantic)]
 pub mod trading_proto {
     include!(concat!(env!("OUT_DIR"), "/_trading_include.rs"));
     pub use trading::*;

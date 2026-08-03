@@ -61,7 +61,7 @@ struct Candidate {
     sort_id: uuid::Uuid,
 }
 
-/// Wheeling + loss for a (sell_zone, buy_zone) pair — constant across every sell
+/// Wheeling + loss for a (`sell_zone`, `buy_zone`) pair — constant across every sell
 /// in one zone book for a given buy, so computed once per zone, not per sell.
 #[derive(Clone, Copy)]
 struct ZoneFees {
@@ -219,6 +219,7 @@ impl MatchingEngine {
     /// it (rather than reading `buy` live) makes a rebuild after a partial fill price
     /// each sell exactly as a single full pass would.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // one line over; splitting hurts the walk-through
     fn gather_candidates(
         candidates: &mut Vec<Candidate>,
         zone_books: &ZoneBooks,
@@ -271,6 +272,7 @@ impl MatchingEngine {
 
         // Multi-zone: k-way merge. One cursor per reachable zone — a landed-ordered
         // iterator over that zone's crossing sells (raw ask <= bid) plus its fees.
+        #[allow(clippy::items_after_statements)] // local helper, defined at use site
         struct ZoneCursor<'a> {
             fees: ZoneFees,
             range: std::collections::btree_map::Range<'a, (FastPrice, i64, uuid::Uuid), usize>,
@@ -334,8 +336,8 @@ impl MatchingEngine {
         }
 
         let mut heap: BinaryHeap<HeapHead> = BinaryHeap::with_capacity(cursors.len());
-        for idx in 0..cursors.len() {
-            if let Some(cand) = next_priced(&mut cursors[idx]) {
+        for (idx, cursor) in cursors.iter_mut().enumerate() {
+            if let Some(cand) = next_priced(cursor) {
                 heap.push(HeapHead { cand, cursor: idx });
             }
         }
@@ -362,6 +364,9 @@ impl MatchingEngine {
 
     /// Execute a matching cycle on a set of orders.
     /// Optimized for grid-scale throughput using zone-segmented order books.
+    // The CDA cycle is one deliberate sequence; splitting it would scatter
+    // the invariants the comments walk through in order.
+    #[allow(clippy::too_many_lines)]
     pub fn match_cycle(
         buy_orders: &mut [FastOrder],
         sell_orders: &mut [FastOrder],
@@ -486,7 +491,7 @@ impl MatchingEngine {
                 if buy.time_in_force == TimeInForce::Fok {
                     let mut need = buy.remaining_amount();
                     let mut sim_flow = committed_flow.clone();
-                    for c in candidates.iter() {
+                    for c in &candidates {
                         let sim_sell = &sell_orders[c.sell_idx];
                         if let Some(take) = fill_take(need, sim_sell.remaining_amount()) {
                             let key = (sim_sell.zone_id, buy.zone_id);

@@ -37,6 +37,7 @@ pub struct PostgresCarbonRepository {
 }
 
 impl PostgresCarbonRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -73,11 +74,11 @@ impl CarbonRepository for PostgresCarbonRepository {
 
     async fn insert_transaction(&self, tx: &CarbonTransaction) -> TraitResult<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO carbon_transactions (
                 id, from_user_id, to_user_id, amount, price_per_credit, status
             ) VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
+            ",
         )
         .bind(tx.id)
         .bind(tx.from_user_id)

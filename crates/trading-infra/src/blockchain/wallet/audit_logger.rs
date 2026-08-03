@@ -12,6 +12,7 @@ pub struct WalletAuditLogger {
 }
 
 impl WalletAuditLogger {
+    #[must_use]
     pub fn new(db: PgPool) -> Self {
         Self { db }
     }
@@ -28,7 +29,7 @@ impl WalletAuditLogger {
     ) -> Result<()> {
         self.log_operation(
             user_id,
-            &format!("decrypt_{}", operation),
+            &format!("decrypt_{operation}"),
             success,
             ip_address,
             user_agent,
@@ -107,6 +108,7 @@ impl WalletAuditLogger {
     }
 
     /// Generic operation logger
+    #[allow(clippy::too_many_arguments)] // audit rows carry exactly these fields
     async fn log_operation(
         &self,
         user_id: Uuid,
@@ -119,11 +121,11 @@ impl WalletAuditLogger {
     ) -> Result<()> {
         // db-split cutover: Trading-owned wallet-audit table, not IAM's wallet_audit_log.
         let result = sqlx::query(
-            r#"
+            r"
             INSERT INTO trading_wallet_audit_log
                 (user_id, operation, success, ip_address, user_agent, error_message, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            "#,
+            ",
         )
         .bind(user_id)
         .bind(operation)
@@ -159,7 +161,7 @@ impl WalletAuditLogger {
         limit: i64,
     ) -> Result<Vec<WalletAuditEntry>> {
         let entries = sqlx::query_as::<_, WalletAuditEntry>(
-            r#"
+            r"
             SELECT 
                 id,
                 user_id,
@@ -174,7 +176,7 @@ impl WalletAuditLogger {
             WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT $2
-            "#,
+            ",
         )
         .bind(user_id)
         .bind(limit)

@@ -165,7 +165,7 @@ impl OrderData {
         // synthetic bid the user never set, so don't expose it as the price.
         let price_per_kwh = match o.order_type {
             OrderType::Market => None,
-            _ => Some(o.price_per_kwh.to_string()),
+            OrderType::Limit => Some(o.price_per_kwh.to_string()),
         };
         OrderData {
             id: o.id,

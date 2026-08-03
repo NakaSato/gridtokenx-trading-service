@@ -53,8 +53,7 @@ pub(crate) fn to_fast_orders(orders: &[TradingOrder]) -> (Vec<FastOrder>, Vec<Or
                 filled_amount: o.filled_amount,
                 created_at_ns: o
                     .created_at
-                    .map(|t| t.timestamp_nanos_opt().unwrap_or(0))
-                    .unwrap_or(0),
+                    .map_or(0, |t| t.timestamp_nanos_opt().unwrap_or(0)),
                 expires_at_ns: o.expires_at.map(|t| t.timestamp_nanos_opt().unwrap_or(0)),
                 zone_id: o.zone_id,
                 time_in_force: o.time_in_force,
@@ -154,8 +153,8 @@ pub(crate) async fn persist_matches(
             effective_energy: Some(m.match_amount),
             buyer_zone_id: m.buyer_zone_id,
             seller_zone_id: m.seller_zone_id,
-            buyer_session_token: buy_meta.session_token.as_ref().map(|s| s.to_string()),
-            seller_session_token: sell_meta.session_token.as_ref().map(|s| s.to_string()),
+            buyer_session_token: buy_meta.session_token.as_ref().map(std::string::ToString::to_string),
+            seller_session_token: sell_meta.session_token.as_ref().map(std::string::ToString::to_string),
             erc_certificate_id: None,
             erc_transfer_tx: None,
             retry_count: 0,

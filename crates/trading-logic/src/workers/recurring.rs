@@ -12,6 +12,7 @@ pub struct RecurringEvaluatorWorker {
 }
 
 impl RecurringEvaluatorWorker {
+    #[must_use]
     pub fn new(service: Arc<RecurringEvaluator>, interval: Duration) -> Self {
         Self { service, interval }
     }

@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{Deserialize, ToSchema, State, ServiceRole, AppState, Json, Uuid, UserContext, Path};
 
 /// List futures products.
 #[utoipa::path(
@@ -28,7 +28,7 @@ pub async fn get_futures_products(
     let products = state.futures_repo.get_products().await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
 
@@ -97,7 +97,7 @@ pub async fn get_futures_positions(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -132,7 +132,7 @@ pub async fn get_futures_orders(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -165,7 +165,7 @@ pub async fn close_futures_position(
     state.futures_repo.close_position(id).await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
 

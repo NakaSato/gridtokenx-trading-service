@@ -1,7 +1,7 @@
 //! Connection preflight: actively probe every internal dependency the trading
 //! service talks to, print a pass/fail table, and exit non-zero on any failure.
 //!
-//! Real (auth-level) probes: Postgres (`SELECT 1`), Redis (`PING` via CacheService).
+//! Real (auth-level) probes: Postgres (`SELECT 1`), Redis (`PING` via `CacheService`).
 //! Transport-level probes (TCP reachability): Chain Bridge gRPC, NATS, IAM, Kafka.
 //! Functional RPC probes (e.g. `GetSlot`, order submit) are out of scope here —
 //! run those against the live service with grpcurl (see verification plan Phase 3).

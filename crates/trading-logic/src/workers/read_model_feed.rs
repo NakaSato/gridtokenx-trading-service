@@ -141,11 +141,11 @@ enum FeedAction {
     },
     /// Route to `MeterReadModelRepository::upsert_meter`.
     UpsertMeter(MeterReadModelRecord),
-    /// A recognised event_type whose `data` failed to parse into the typed
+    /// A recognised `event_type` whose `data` failed to parse into the typed
     /// payload — logged and skipped by the caller (carries the original
-    /// event_type + serde error text for the warning).
+    /// `event_type` + serde error text for the warning).
     BadPayload { event_type: String, error: String },
-    /// An unrecognised event_type — logged at debug and skipped.
+    /// An unrecognised `event_type` — logged at debug and skipped.
     Skip { event_type: String },
 }
 
@@ -217,7 +217,7 @@ pub struct ReadModelFeedWorker {
     wallet_repo: Arc<dyn WalletReadModelRepository>,
     meter_repo: Arc<dyn MeterReadModelRepository>,
     brokers: String,
-    /// Cluster carrying `meter_topic`. Equals `brokers` unless meter_events lives on
+    /// Cluster carrying `meter_topic`. Equals `brokers` unless `meter_events` lives on
     /// a different Kafka cluster than iam.user.events (see [`run`]).
     meter_brokers: String,
     iam_topic: String,

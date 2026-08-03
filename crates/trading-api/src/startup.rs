@@ -23,8 +23,8 @@ pub async fn run(
     let grpc_server = Server::new(grpc_router);
 
     // 3. Start Servers
-    let rest_addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-    let grpc_addr: std::net::SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
+    let rest_addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    let grpc_addr: std::net::SocketAddr = format!("0.0.0.0:{grpc_port}").parse()?;
 
     info!("🚀 Trading REST API listening on {}", rest_addr);
     info!("🚀 Trading gRPC/ConnectRPC listening on {}", grpc_addr);
@@ -40,9 +40,9 @@ pub async fn run(
     let grpc_handle = async move {
         tokio::select! {
             res = grpc_server.serve(grpc_addr) => {
-                res.map_err(|e| anyhow::anyhow!("gRPC failed: {}", e))
+                res.map_err(|e| anyhow::anyhow!("gRPC failed: {e}"))
             }
-            _ = grpc_token.cancelled() => {
+            () = grpc_token.cancelled() => {
                 info!("🔄 Trading gRPC Service shutting down...");
                 Ok(())
             }
@@ -90,6 +90,8 @@ pub(crate) async fn metrics_handler() -> impl IntoResponse {
     (StatusCode::OK, trading_infra::metrics::render())
 }
 
+// The route table IS the function; splitting it hides the surface.
+#[allow(clippy::too_many_lines)]
 pub fn build_router(state: AppState) -> Router {
     use utoipa::OpenApi;
     Router::new()

@@ -36,6 +36,7 @@ pub struct SignedOrderSide {
 /// currency (THBC) is classic SPL Token. Deriving a classic-mint ATA under
 /// Token-2022 (or vice versa) yields a different, unfunded address, so the program
 /// must be chosen per mint and never assumed.
+#[allow(clippy::struct_field_names)] // the shared `_ata` suffix IS the meaning
 struct TradeAtas {
     buyer_currency_ata: Pubkey,
     seller_energy_ata: Pubkey,
@@ -83,6 +84,7 @@ pub struct BlockchainSettlementProvider {
 }
 
 impl BlockchainSettlementProvider {
+    #[must_use]
     pub fn new(blockchain: Arc<BlockchainService>) -> Self {
         Self { blockchain }
     }
@@ -125,6 +127,8 @@ impl BlockchainSettlementProvider {
     }
 
     #[tracing::instrument(skip(self, settlement), fields(settlement_id = %settlement.id))]
+    // One deliberate on-chain sequence; splitting scatters the invariants.
+    #[allow(clippy::too_many_lines)]
     pub async fn execute_atomic_settlement(
         &self,
         settlement: &Settlement,
@@ -136,21 +140,21 @@ impl BlockchainSettlementProvider {
         let trading_program_id = self
             .blockchain
             .trading_program_id()
-            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {e}")))?;
         let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
 
         let platform_authority = self
             .blockchain
             .get_authority_keypair()
             .await
-            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {e}")))?;
 
         // Mints: Energy Token is derived, Currency from env
         let energy_mint = self
             .blockchain
             .instruction_builder()
             .get_mint_pda()
-            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {e}")))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
@@ -253,7 +257,7 @@ impl BlockchainSettlementProvider {
                 // Per-match id (settlement row UUID) → on-chain TradeNullifier replay guard (F3c).
                 *settlement.id.as_bytes(),
             )
-            .map_err(|e| ApiError::Internal(format!("build settle ix: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("build settle ix: {e}")))?;
 
         let signature = self
             .blockchain
@@ -294,6 +298,8 @@ impl BlockchainSettlementProvider {
     /// Enabled by `per_user_escrow_settlement`; both orders must carry a valid
     /// wallet signature or the on-chain verification rejects the trade.
     #[tracing::instrument(skip(self, settlement, buyer, seller), fields(settlement_id = %settlement.id))]
+    // One deliberate on-chain sequence; splitting scatters the invariants.
+    #[allow(clippy::too_many_lines)]
     pub async fn execute_offchain_settlement(
         &self,
         settlement: &Settlement,
@@ -307,20 +313,20 @@ impl BlockchainSettlementProvider {
         let trading_program_id = self
             .blockchain
             .trading_program_id()
-            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {e}")))?;
         let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
 
         let platform_authority = self
             .blockchain
             .get_authority_keypair()
             .await
-            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {e}")))?;
 
         let energy_mint = self
             .blockchain
             .instruction_builder()
             .get_mint_pda()
-            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {e}")))?;
         let currency_mint = BlockchainService::parse_pubkey(
             &std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default(),
         )?;
@@ -401,7 +407,7 @@ impl BlockchainSettlementProvider {
                 zone_num_shards,
                 false, // REC leg is opt-in and requires both parties' REC escrows funded
             )
-            .map_err(|e| ApiError::Internal(format!("build settle_offchain ix: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("build settle_offchain ix: {e}")))?;
 
         // Order is load-bearing: the handler reads buyer at sysvar index 0 and
         // seller at index 1.
@@ -470,6 +476,8 @@ impl BlockchainSettlementProvider {
     }
 
     #[tracing::instrument(skip(self, inputs), fields(batch_count = inputs.len()))]
+    // One deliberate on-chain sequence; splitting scatters the invariants.
+    #[allow(clippy::too_many_lines)]
     pub async fn execute_batched_settlements(
         &self,
         inputs: Vec<(
@@ -488,21 +496,21 @@ impl BlockchainSettlementProvider {
         let trading_program_id = self
             .blockchain
             .trading_program_id()
-            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Trading program ID error: {e}")))?;
         let (market_pda, _) = Pubkey::find_program_address(&[b"market"], &trading_program_id);
 
         let platform_authority = self
             .blockchain
             .get_authority_keypair()
             .await
-            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to get authority: {e}")))?;
 
         // Mints: Energy Token is derived, Currency from env
         let energy_mint = self
             .blockchain
             .instruction_builder()
             .get_mint_pda()
-            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("Failed to derive energy mint PDA: {e}")))?;
         let currency_mint_str = std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default();
         let currency_mint = BlockchainService::parse_pubkey(&currency_mint_str)?;
 
@@ -612,7 +620,7 @@ impl BlockchainSettlementProvider {
                     // so the on-chain TradeNullifier rejects a replay that already landed (F3c).
                     *settlement.id.as_bytes(),
                 )
-                .map_err(|e| ApiError::Internal(format!("Failed to build instruction: {}", e)))?;
+                .map_err(|e| ApiError::Internal(format!("Failed to build instruction: {e}")))?;
 
             instructions.push(instruction);
             groups.push((instructions, settlement.id));
@@ -653,7 +661,7 @@ impl BlockchainSettlementProvider {
                 .execute_batched_instructions(&[&platform_authority], instructions)
                 .await
                 .map_err(|e| {
-                    ApiError::Internal(format!("Batch settlement execution failed: {}", e))
+                    ApiError::Internal(format!("Batch settlement execution failed: {e}"))
                 })?;
 
             // Poll until confirmed — if it doesn't land, return Err so the caller resets the

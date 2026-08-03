@@ -51,11 +51,13 @@ pub const CURRENCY_SCALE: i64 = 1_000_000;
 /// `trading-infra/src/blockchain/mod.rs:91` and `blockchain/settlement.rs:131`.
 /// Returns `None` on overflow or a negative amount rather than silently yielding
 /// zero.
+#[must_use]
 pub fn energy_to_base_units(kwh: rust_decimal::Decimal) -> Option<u64> {
     to_base_units(kwh, ENERGY_SCALE)
 }
 
 /// Currency → 6-decimal base units, truncating. See [`energy_to_base_units`].
+#[must_use]
 pub fn currency_to_base_units(amount: rust_decimal::Decimal) -> Option<u64> {
     to_base_units(amount, CURRENCY_SCALE)
 }
@@ -79,6 +81,7 @@ fn to_base_units(value: rust_decimal::Decimal, scale: i64) -> Option<u64> {
 /// key bytes. `energy_amount` and `price_per_kwh` are in on-chain base units (9-dec
 /// energy, 6-dec currency) — NOT decimals — because that is what the program
 /// compares against.
+#[must_use]
 pub fn message_for(
     order_id: &[u8; 16],
     user: &[u8; 32],

@@ -23,15 +23,16 @@ pub struct KafkaTopics {
 }
 
 impl KafkaTopics {
+    #[must_use]
     pub fn with_prefix(prefix: &str) -> Self {
         Self {
-            orders_created: format!("{}.orders.created", prefix),
-            orders_matched: format!("{}.orders.matched", prefix),
-            orders_updated: format!("{}.orders.updated", prefix),
-            settlements: format!("{}.settlements", prefix),
-            triggers: format!("{}.triggers", prefix),
-            participants: format!("{}.participants", prefix),
-            telemetry: format!("{}.telemetry", prefix),
+            orders_created: format!("{prefix}.orders.created"),
+            orders_matched: format!("{prefix}.orders.matched"),
+            orders_updated: format!("{prefix}.orders.updated"),
+            settlements: format!("{prefix}.settlements"),
+            triggers: format!("{prefix}.triggers"),
+            participants: format!("{prefix}.participants"),
+            telemetry: format!("{prefix}.telemetry"),
         }
     }
 }
@@ -54,6 +55,8 @@ pub struct KafkaEventBus {
     pub bootstrap_servers: String,
 }
 
+// Skips the non-Debug rdkafka producer handle on purpose.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for KafkaEventBus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaEventBus")
@@ -63,7 +66,7 @@ impl std::fmt::Debug for KafkaEventBus {
 }
 
 impl KafkaEventBus {
-    pub async fn new(bootstrap_servers: &str, topic_prefix: Option<&str>) -> Result<Self> {
+    pub fn new(bootstrap_servers: &str, topic_prefix: Option<&str>) -> Result<Self> {
         info!(
             "Initializing Kafka EventBus (brokers: {})",
             bootstrap_servers
@@ -81,7 +84,7 @@ impl KafkaEventBus {
             .set("retries", "10")
             .set("retry.backoff.ms", "100")
             .create()
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka producer: {e}"))?;
 
         let topics = match topic_prefix {
             Some(prefix) => KafkaTopics::with_prefix(prefix),
@@ -107,7 +110,7 @@ impl KafkaEventBus {
 
         match self.producer.send(record, Duration::from_secs(5)).await {
             Ok((partition, offset)) => {
-                let id = format!("{}:{}:{}", topic, partition, offset);
+                let id = format!("{topic}:{partition}:{offset}");
                 info!(
                     "Event published to Kafka topic {} (partition: {}, offset: {})",
                     topic, partition, offset
@@ -116,7 +119,7 @@ impl KafkaEventBus {
             }
             Err((e, _)) => {
                 error!("Failed to publish event to Kafka topic {}: {}", topic, e);
-                Err(anyhow::anyhow!("Kafka produce failed: {}", e))
+                Err(anyhow::anyhow!("Kafka produce failed: {e}"))
             }
         }
     }
@@ -150,6 +153,7 @@ impl KafkaEventBus {
                 &self.topics.orders_matched,
                 Self::zone_key(payload.zone_id, &payload.match_id),
             ),
+            #[allow(clippy::match_same_arms)] // same routing, semantically distinct events
             Event::OrderUpdate { id, zone_id, .. } => (
                 &self.topics.orders_updated,
                 Self::zone_key(*zone_id, id),
@@ -189,11 +193,11 @@ impl KafkaEventBus {
         }
     }
 
-    /// Helper to generate a consistent partition key based on zone_id.
-    /// Falls back to the object UUID if no zone_id is present.
+    /// Helper to generate a consistent partition key based on `zone_id`.
+    /// Falls back to the object UUID if no `zone_id` is present.
     fn zone_key(zone_id: Option<i32>, id: &Uuid) -> String {
         match zone_id {
-            Some(z) => format!("zone_{}", z),
+            Some(z) => format!("zone_{z}"),
             None => id.to_string(),
         }
     }
@@ -268,7 +272,7 @@ impl EventPublisher for KafkaEventBus {
 }
 
 impl KafkaEventBus {
-    /// Internal publish method that returns anyhow::Result and uses a reference to Event.
+    /// Internal publish method that returns `anyhow::Result` and uses a reference to Event.
     pub async fn publish_internal(&self, event: &Event) -> Result<String> {
         let (topic, key) = self.route_event(event);
         let payload = serde_json::to_vec(event)?;
@@ -277,7 +281,7 @@ impl KafkaEventBus {
 
         match self.producer.send(record, Duration::from_secs(5)).await {
             Ok((partition, offset)) => {
-                let id = format!("{}:{}:{}", topic, partition, offset);
+                let id = format!("{topic}:{partition}:{offset}");
                 info!(
                     "Event published to Kafka topic {} (partition: {}, offset: {})",
                     topic, partition, offset
@@ -286,7 +290,7 @@ impl KafkaEventBus {
             }
             Err((e, _)) => {
                 error!("Failed to publish event to Kafka topic {}: {}", topic, e);
-                Err(anyhow::anyhow!("Kafka produce failed: {}", e))
+                Err(anyhow::anyhow!("Kafka produce failed: {e}"))
             }
         }
     }

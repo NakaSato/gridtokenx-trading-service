@@ -77,6 +77,8 @@ impl Default for TokenizationConfig {
 
 impl TokenizationConfig {
     /// Load configuration from environment variables with defaults
+    // Linear env reading; splitting hurts top-to-bottom review.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self> {
         let mut config = Self::default();
 
@@ -141,13 +143,10 @@ impl TokenizationConfig {
         }
 
         if let Ok(val) = env::var("TOKENIZATION_AUTO_MINT_ENABLED") {
-            match val.parse::<bool>() {
-                Ok(enabled) => {
-                    config.auto_mint_enabled = enabled;
-                    info!("Using custom auto mint enabled: {}", enabled);
-                }
-                Err(_) => warn!("Failed to parse auto mint enabled: {}, using default", val),
-            }
+            if let Ok(enabled) = val.parse::<bool>() {
+                config.auto_mint_enabled = enabled;
+                info!("Using custom auto mint enabled: {}", enabled);
+            } else { warn!("Failed to parse auto mint enabled: {}, using default", val) }
         }
 
         if let Ok(val) = env::var("TOKENIZATION_POLLING_INTERVAL_SECS") {
@@ -182,13 +181,10 @@ impl TokenizationConfig {
         }
 
         if let Ok(val) = env::var("TOKENIZATION_MAX_RETRY_ATTEMPTS") {
-            match val.parse::<u32>() {
-                Ok(attempts) => {
-                    config.max_retry_attempts = attempts;
-                    info!("Using custom max retry attempts: {}", attempts);
-                }
-                Err(_) => warn!("Failed to parse max retry attempts: {}, using default", val),
-            }
+            if let Ok(attempts) = val.parse::<u32>() {
+                config.max_retry_attempts = attempts;
+                info!("Using custom max retry attempts: {}", attempts);
+            } else { warn!("Failed to parse max retry attempts: {}, using default", val) }
         }
 
         if let Ok(val) = env::var("TOKENIZATION_INITIAL_RETRY_DELAY_SECS") {
@@ -277,15 +273,14 @@ impl TokenizationConfig {
         }
 
         if let Ok(val) = env::var("TOKENIZATION_ENABLE_REAL_BLOCKCHAIN") {
-            match val.parse::<bool>() {
-                Ok(enabled) => {
-                    config.enable_real_blockchain = enabled;
-                    info!("Using real blockchain transactions: {}", enabled);
-                }
-                Err(_) => warn!(
+            if let Ok(enabled) = val.parse::<bool>() {
+                config.enable_real_blockchain = enabled;
+                info!("Using real blockchain transactions: {}", enabled);
+            } else {
+                warn!(
                     "Failed to parse enable real blockchain: {}, using default",
                     val
-                ),
+                );
             }
         }
 
@@ -324,31 +319,48 @@ impl TokenizationConfig {
         }
 
         let tokens_decimal =
-            kwh_amount * self.kwh_to_token_ratio * 10_f64.powi(self.decimals as i32);
+            kwh_amount * self.kwh_to_token_ratio * 10_f64.powi(i32::from(self.decimals));
 
-        // Ensure we're not losing precision and not exceeding u64 max
+        // Bounds-checked above; flooring to whole base units is the contract.
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         if tokens_decimal > u64::MAX as f64 {
             return Err(ValidationError::AmountExceedsMaximum);
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok(tokens_decimal as u64)
     }
 
     /// Convert token amount to kWh amount
+    #[must_use]
     pub fn tokens_to_kwh(&self, token_amount: u64) -> f64 {
-        token_amount as f64 / (self.kwh_to_token_ratio * 10_f64.powi(self.decimals as i32))
+        // Display-path conversion; f64 precision is ample for UI amounts.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            token_amount as f64 / (self.kwh_to_token_ratio * 10_f64.powi(i32::from(self.decimals)))
+        }
     }
 
     /// Calculate retry delay with exponential backoff
+    #[must_use]
     pub fn calculate_retry_delay(&self, attempt: u32) -> u64 {
         if attempt == 0 {
             return 0;
         }
 
-        // Exponential backoff with multiplier and max limit
-        let delay = self.initial_retry_delay_secs as f64
-            * self.retry_backoff_multiplier.powi(attempt as i32 - 1);
-        delay.min(self.max_retry_delay_secs as f64) as u64
+        // Exponential backoff with multiplier and max limit. Precision/sign are
+        // irrelevant at retry-delay magnitudes; the min() bounds the result.
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_possible_wrap
+        )]
+        {
+            let delay = self.initial_retry_delay_secs as f64
+                * self.retry_backoff_multiplier.powi(attempt as i32 - 1);
+            delay.min(self.max_retry_delay_secs as f64) as u64
+        }
     }
 }
 

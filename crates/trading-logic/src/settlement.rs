@@ -27,6 +27,7 @@ impl SettlementService {
         }
     }
 
+    #[must_use]
     pub fn platform_user_id(&self) -> Uuid {
         self.platform_user_id
     }
@@ -98,6 +99,8 @@ impl SettlementService {
     /// `pending`: the tokens already exist on-chain and a retry would double
     /// mint, so the row is forced out of `processing` by other means and the
     /// failure is logged loudly.
+    // One deliberate settle sequence; splitting scatters the failure taxonomy.
+    #[allow(clippy::too_many_lines)]
     async fn settle_claimed(
         &self,
         claimed: Vec<Settlement>,
@@ -294,10 +297,12 @@ impl SettlementService {
             // reason would erase the failure that actually started it and leave the real
             // cause undiagnosable, so any earlier error is carried forward here.
             if let Some(prior) = settlement.error_message.as_deref() {
-                reason.push_str(&format!(
+                use std::fmt::Write as _;
+                let _ = write!(
+                    reason,
                     "; earlier failure after {} attempt(s), which is the cause to investigate: {}",
                     settlement.retry_count, prior
-                ));
+                );
             }
             if let Err(e) = self
                 .repo

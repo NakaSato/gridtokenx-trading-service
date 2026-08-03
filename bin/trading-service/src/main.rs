@@ -5,6 +5,8 @@ use tracing::{error, info};
 use trading_api::state::AppState;
 
 #[tokio::main]
+// Boot sequence: build once, then spawn each worker — reads as the runtime map.
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup telemetry. Bind the guard for the whole process so a graceful
     // shutdown flushes buffered spans; the service.name matches the gridtokenx-*
@@ -75,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // clears + closes any epoch whose 15-minute window has elapsed.
     let clearing_worker = trading_logic::ClearingWorker::new(
         services.clearing.clone(),
-        tokio::time::Duration::from_secs(60),
+        tokio::time::Duration::from_mins(1),
     );
     tokio::spawn(async move {
         clearing_worker.run().await;
@@ -156,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Recurring-order evaluator: place due recurring orders (Phase 6).
     let recurring_worker = trading_logic::RecurringEvaluatorWorker::new(
         services.recurring_evaluator.clone(),
-        tokio::time::Duration::from_secs(60),
+        tokio::time::Duration::from_mins(1),
     );
     tokio::spawn(async move {
         recurring_worker.run().await;

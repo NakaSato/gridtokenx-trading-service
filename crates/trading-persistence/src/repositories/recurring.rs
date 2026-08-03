@@ -60,6 +60,7 @@ pub struct PostgresRecurringOrderRepository {
 }
 
 impl PostgresRecurringOrderRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -88,7 +89,7 @@ impl RecurringOrderRepository for PostgresRecurringOrderRepository {
         total_executions: i32,
     ) -> TraitResult<()> {
         sqlx::query(
-            r#"
+            r"
             UPDATE recurring_orders 
             SET next_execution_at = $1, 
                 total_executions = $2, 
@@ -96,7 +97,7 @@ impl RecurringOrderRepository for PostgresRecurringOrderRepository {
                 updated_at = NOW(),
                 status = CASE WHEN max_executions IS NOT NULL AND $2 >= max_executions THEN 'completed' ELSE status END
             WHERE id = $3
-            "#
+            "
         )
         .bind(next_execution)
         .bind(total_executions)
@@ -111,13 +112,13 @@ impl RecurringOrderRepository for PostgresRecurringOrderRepository {
         input: trading_core::models::NewRecurringOrder,
     ) -> TraitResult<RecurringOrder> {
         let row = sqlx::query_as::<_, RecurringOrderDb>(
-            r#"
+            r"
             INSERT INTO recurring_orders
                 (user_id, side, energy_amount, max_price_per_kwh, min_price_per_kwh,
                  interval_type, interval_value, next_execution_at, max_executions, name, description)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
-            "#,
+            ",
         )
         .bind(input.user_id)
         .bind(input.side)

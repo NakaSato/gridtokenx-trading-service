@@ -1,4 +1,4 @@
-//! Canonical enum types for the GridTokenX trading domain.
+//! Canonical enum types for the `GridTokenX` trading domain.
 //!
 //! These are the single source of truth — all other crates import from here.
 
@@ -30,6 +30,7 @@ pub enum OrderType {
 }
 
 impl OrderType {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Limit => "limit",
@@ -71,6 +72,7 @@ pub enum MarketSegment {
 }
 
 impl MarketSegment {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Realtime => "realtime",
@@ -101,6 +103,7 @@ pub enum OrderSide {
 }
 
 impl OrderSide {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Buy => "buy",
@@ -138,6 +141,7 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -169,8 +173,10 @@ impl OrderStatus {
 #[sqlx(type_name = "time_in_force", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
+#[derive(Default)]
 pub enum TimeInForce {
     /// Good-Til-Cancelled
+    #[default]
     Gtc,
     /// Fill-or-Kill
     Fok,
@@ -178,11 +184,6 @@ pub enum TimeInForce {
     Ioc,
 }
 
-impl Default for TimeInForce {
-    fn default() -> Self {
-        Self::Gtc
-    }
-}
 
 impl TimeInForce {
     /// Immediate time-in-force: the order must fill in the matching pass it
@@ -216,9 +217,9 @@ impl TimeInForce {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum TriggerType {
-    /// Sell when price drops below trigger_price (to limit losses)
+    /// Sell when price drops below `trigger_price` (to limit losses)
     StopLoss,
-    /// Sell when price rises above trigger_price (to lock in profits)
+    /// Sell when price rises above `trigger_price` (to lock in profits)
     TakeProfit,
     /// Dynamic stop that follows price movements
     TrailingStop,

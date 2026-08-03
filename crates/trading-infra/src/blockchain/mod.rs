@@ -23,7 +23,8 @@ pub use settlement::BlockchainSettlementProvider;
 ///
 /// Delegates to blockchain-core so the ATA derivations here and the `token_program`
 /// account the settlement instruction is built with can never disagree — a mismatch
-/// between the two is exactly the Anchor ConstraintOwner (2004) failure this replaced.
+/// between the two is exactly the Anchor `ConstraintOwner` (2004) failure this replaced.
+#[must_use]
 pub fn currency_token_program() -> Pubkey {
     gridtokenx_blockchain_core::rpc::instructions::currency_token_program()
 }
@@ -41,8 +42,8 @@ use uuid::Uuid;
 #[async_trait]
 impl BlockchainGateway for BlockchainService {
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<trading_core::models::ZoneConfig> {
-        let pda = self.instruction_builder().get_zone_config_pda(zone_id as u32)
-            .map_err(|e| trading_core::error::ApiError::Internal(format!("PDA derivation error: {}", e)))?;
+        let pda = self.instruction_builder().get_zone_config_pda(u32::try_from(zone_id).unwrap_or(0))
+            .map_err(|e| trading_core::error::ApiError::Internal(format!("PDA derivation error: {e}")))?;
 
         match self.get_account_data(&pda).await {
             Ok(data) => {
@@ -61,7 +62,7 @@ impl BlockchainGateway for BlockchainService {
                     incentive_multiplier: Decimal::from(multiplier_bps) / Decimal::from(10_000),
                     wheeling_charge: Decimal::from(wheeling_bps) / Decimal::from(10_000),
                     maintenance_mode,
-                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(|| gridtokenx_telemetry::time::now()),
+                    last_updated: chrono::DateTime::from_timestamp(last_updated_ts, 0).unwrap_or_else(gridtokenx_telemetry::time::now),
                 })
             }
             Err(e) => {
@@ -85,7 +86,7 @@ impl BlockchainGateway for BlockchainService {
 
     async fn get_user_wallet(&self, user_id: Uuid) -> TraitResult<Option<String>> {
         let pubkey = self.get_user_primary_wallet(&user_id).await.map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to resolve user wallet: {}", e))
+            trading_core::error::ApiError::Internal(format!("Failed to resolve user wallet: {e}"))
         })?;
 
         Ok(pubkey.map(|p| p.to_string()))
@@ -107,7 +108,7 @@ impl BlockchainGateway for BlockchainService {
         let wallet = self
             .get_user_primary_wallet(&user_id)
             .await
-            .map_err(|e| ApiError::Internal(format!("resolve wallet: {}", e)))?
+            .map_err(|e| ApiError::Internal(format!("resolve wallet: {e}")))?
             .ok_or_else(|| ApiError::Validation(format!("no on-chain wallet for user {user_id}")))?;
 
         // GRID energy = 9-dec atomic; currency price = 6-dec atomic.
@@ -127,11 +128,11 @@ impl BlockchainGateway for BlockchainService {
                 is_buy,
                 energy_atomic,
                 price_atomic,
-                zone_id as u32,
+                u32::try_from(zone_id).unwrap_or(0), // zone ids are non-negative by schema
                 expires_at_unix,
             )
             .await
-            .map_err(|e| ApiError::Internal(format!("place_order_on_chain: {}", e)))?;
+            .map_err(|e| ApiError::Internal(format!("place_order_on_chain: {e}")))?;
         Ok((sig.to_string(), pda.to_string()))
     }
 
@@ -146,7 +147,7 @@ impl BlockchainGateway for BlockchainService {
             )
         })?;
         let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str)
-            .map_err(|e| trading_core::error::ApiError::Internal(format!("invalid ENERGY_TOKEN_MINT: {}", e)))?;
+            .map_err(|e| trading_core::error::ApiError::Internal(format!("invalid ENERGY_TOKEN_MINT: {e}")))?;
 
         self.get_token_balance(&owner, &mint)
             .await
@@ -164,7 +165,7 @@ impl BlockchainGateway for BlockchainService {
             )
         })?;
         let mint = solana_sdk::pubkey::Pubkey::from_str(&mint_str).map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("invalid CURRENCY_TOKEN_MINT: {}", e))
+            trading_core::error::ApiError::Internal(format!("invalid CURRENCY_TOKEN_MINT: {e}"))
         })?;
 
         // MUST pass the token program explicitly. `get_token_balance(owner, mint)`
@@ -214,15 +215,7 @@ impl BlockchainGateway for BlockchainService {
         // skipped and left for retry rather than failing the whole batch.
         let trade_settlements = settlements;
         if !trade_settlements.is_empty() {
-            if !self.trade_settlement_enabled {
-                // Disabled until the swap path is validated against a live
-                // validator. Leave these unminted so the caller releases them
-                // for retry rather than dropping them silently.
-                warn!(
-                    "TRADE_SETTLEMENT_ENABLED=false: {} trade settlement(s) left for retry",
-                    trade_settlements.len()
-                );
-            } else {
+            if self.trade_settlement_enabled {
                 let provider = BlockchainSettlementProvider::new(Arc::new(self.clone()));
 
                 // Resolve on-chain order PDAs + party wallets. A settlement
@@ -230,47 +223,34 @@ impl BlockchainGateway for BlockchainService {
                 // left for retry instead of failing the whole batch.
                 let mut inputs = Vec::new();
                 for settlement in &trade_settlements {
-                    let buy_pda = match self.get_order_pda(&settlement.buy_order_id).await {
-                        Ok(Some(p)) => p,
-                        _ => {
+                    let Ok(Some(buy_pda)) = self.get_order_pda(&settlement.buy_order_id).await else {
+                        warn!(
+                            "Settlement {}: buy order {} has no on-chain PDA; skipping",
+                            settlement.id, settlement.buy_order_id
+                        );
+                        continue;
+                    };
+                    let Ok(Some(sell_pda)) = self.get_order_pda(&settlement.sell_order_id).await else {
+                        warn!(
+                            "Settlement {}: sell order {} has no on-chain PDA; skipping",
+                            settlement.id, settlement.sell_order_id
+                        );
+                        continue;
+                    };
+                    let Ok(Some(buyer_pubkey)) = self.get_user_primary_wallet(&settlement.buyer_id).await else {
+                        warn!(
+                            "Settlement {}: buyer {} has no primary wallet; skipping",
+                            settlement.id, settlement.buyer_id
+                        );
+                        continue;
+                    };
+                    let Ok(Some(seller_pubkey)) =
+                        self.get_user_primary_wallet(&settlement.seller_id).await else {
                             warn!(
-                                "Settlement {}: buy order {} has no on-chain PDA; skipping",
-                                settlement.id, settlement.buy_order_id
+                                "Settlement {}: seller {} has no primary wallet; skipping",
+                                settlement.id, settlement.seller_id
                             );
                             continue;
-                        }
-                    };
-                    let sell_pda = match self.get_order_pda(&settlement.sell_order_id).await {
-                        Ok(Some(p)) => p,
-                        _ => {
-                            warn!(
-                                "Settlement {}: sell order {} has no on-chain PDA; skipping",
-                                settlement.id, settlement.sell_order_id
-                            );
-                            continue;
-                        }
-                    };
-                    let buyer_pubkey = match self.get_user_primary_wallet(&settlement.buyer_id).await
-                    {
-                        Ok(Some(p)) => p,
-                        _ => {
-                            warn!(
-                                "Settlement {}: buyer {} has no primary wallet; skipping",
-                                settlement.id, settlement.buyer_id
-                            );
-                            continue;
-                        }
-                    };
-                    let seller_pubkey =
-                        match self.get_user_primary_wallet(&settlement.seller_id).await {
-                            Ok(Some(p)) => p,
-                            _ => {
-                                warn!(
-                                    "Settlement {}: seller {} has no primary wallet; skipping",
-                                    settlement.id, settlement.seller_id
-                                );
-                                continue;
-                            }
                         };
 
                     // Per-user escrow path: settle from the parties' OWN escrow
@@ -318,6 +298,14 @@ impl BlockchainGateway for BlockchainService {
                     let trade_results = provider.execute_batched_settlements(inputs, 0).await?;
                     results.extend(trade_results);
                 }
+            } else {
+                // Disabled until the swap path is validated against a live
+                // validator. Leave these unminted so the caller releases them
+                // for retry rather than dropping them silently.
+                warn!(
+                    "TRADE_SETTLEMENT_ENABLED=false: {} trade settlement(s) left for retry",
+                    trade_settlements.len()
+                );
             }
         }
 
@@ -340,14 +328,12 @@ impl BlockchainGateway for BlockchainService {
             .await
             .map_err(|e| {
                 trading_core::error::ApiError::Internal(format!(
-                    "Failed to resolve user wallet: {}",
-                    e
+                    "Failed to resolve user wallet: {e}"
                 ))
             })?
             .ok_or_else(|| {
                 trading_core::error::ApiError::NotFound(format!(
-                    "Primary wallet not found for user {}",
-                    user_id
+                    "Primary wallet not found for user {user_id}"
                 ))
             })?;
 
@@ -389,7 +375,7 @@ impl BlockchainGateway for BlockchainService {
     async fn sync_total_supply(&self) -> TraitResult<String> {
         info!("Syncing total supply for Energy Token...");
         let authority = self.get_authority_keypair().await.map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to load authority: {}", e))
+            trading_core::error::ApiError::Internal(format!("Failed to load authority: {e}"))
         })?;
 
         let signature = self
@@ -414,7 +400,7 @@ impl BlockchainGateway for BlockchainService {
         expires_at_unix: i64,
     ) -> TraitResult<(String, String, u64)> {
         let signer = self.get_custodial_signer(user_id).await.map_err(|e| {
-            trading_core::error::ApiError::Internal(format!("Failed to get custodial signer: {}", e))
+            trading_core::error::ApiError::Internal(format!("Failed to get custodial signer: {e}"))
         })?;
 
         let (sig, pda, index) = self

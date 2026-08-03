@@ -1,3 +1,6 @@
+// Response structs are buffa-generated without constructors; building them
+// mutably from Default is the idiom their API affords.
+#![allow(clippy::field_reassign_with_default)]
 use buffa::view::OwnedView;
 use connectrpc::{ConnectError, Context, ErrorCode};
 use rust_decimal::prelude::ToPrimitive;
@@ -8,22 +11,25 @@ use uuid::Uuid;
 use crate::state::AppState;
 use trading_core::models::TradingOrder;
 use trading_core::types::{OrderSide, OrderStatus, OrderType, TimeInForce};
-use trading_protocol::trading_proto::*;
+use trading_protocol::trading_proto::{TradingService, SubmitOrderRequestView, TradingResponse, GetOrderRequestView, OrderResponse, CancelOrderRequestView, ListOrdersRequestView, ListOrdersResponse, UpdateOrderRequestView, NotifyOrderRequestView, GetOrderBookRequestView, ListTradesRequestView, ListTradesResponse, ExecuteSettlementRequestView, SettlementResponse, BatchExecuteSettlementsRequestView, BatchSettlementResponse, IssueERCRequestView, TransferERCRequestView, RetireERCRequestView, GetERCBalanceRequestView, ERCBalanceResponse, CalculateP2PCostRequestView, P2PTransactionCost, P2PMarketPrices, RelayOrderRequestView, BlockchainMarketDataResponse, MarketStatsResponse, MatchingStatusResponse, SettlementStatsResponse, GetTokenBalanceRequestView, TokenBalanceResponse, CreateConditionalOrderRequestView, ListConditionalOrdersRequestView, ListConditionalOrdersResponse, CancelConditionalOrderRequestView, GetConditionalOrderRequestView, ConditionalOrderData, CreateRecurringOrderRequestView, ListRecurringOrdersRequestView, ListRecurringOrdersResponse, GetRecurringOrderRequestView, RecurringOrderResponse, CancelRecurringOrderRequestView, PauseRecurringOrderRequestView, ResumeRecurringOrderRequestView, GetVppClusterRequestView, VppClusterResponse, ListVppClustersRequestView, ListVppClustersResponse, DispatchVppRequestView};
 
 pub struct TradingGrpcService {
     state: AppState,
 }
 
 impl TradingGrpcService {
+    #[must_use]
     pub fn new(state: AppState) -> Self {
         Self { state }
     }
 }
 
 impl TradingService for TradingGrpcService {
+    // Mirrors REST submit_order: one gate-by-gate sequence, kept linear.
+    #[allow(clippy::too_many_lines)]
     async fn submit_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<SubmitOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
         info!(
@@ -34,7 +40,7 @@ impl TradingService for TradingGrpcService {
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
             ConnectError::new(
                 ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {}", e),
+                format!("Invalid user_id: {e}"),
             )
         })?;
 
@@ -50,16 +56,17 @@ impl TradingService for TradingGrpcService {
         };
 
         let order_type = match request.order_type.to_lowercase().as_str() {
+            #[allow(clippy::match_same_arms)] // explicit tokens beat a merged arm
             "limit" => OrderType::Limit,
             "market" => OrderType::Market,
             _ => OrderType::Limit,
         };
 
-        let time_in_force = match request.time_in_force.as_deref().map(str::to_lowercase).as_deref() {
+        let time_in_force = match request.time_in_force.map(str::to_lowercase).as_deref() {
             // Market orders default to IOC (fill now, never rest); limit → GTC.
             None => match order_type {
                 OrderType::Market => TimeInForce::Ioc,
-                _ => TimeInForce::Gtc,
+                OrderType::Limit => TimeInForce::Gtc,
             },
             Some("gtc") => TimeInForce::Gtc,
             Some("ioc") => TimeInForce::Ioc,
@@ -72,7 +79,7 @@ impl TradingService for TradingGrpcService {
             }
         };
 
-        let market_segment = match request.market_segment.as_deref().map(str::to_lowercase).as_deref() {
+        let market_segment = match request.market_segment.map(str::to_lowercase).as_deref() {
             None | Some("realtime") => trading_core::types::MarketSegment::Realtime,
             Some("interval") => trading_core::types::MarketSegment::Interval,
             Some(_) => {
@@ -195,7 +202,7 @@ impl TradingService for TradingGrpcService {
         // (proto has no timestamp type here); a malformed one is InvalidArgument
         // rather than a silent fallback to the default, which would hand back a
         // lifetime the client did not ask for.
-        let requested_expires_at = match request.expires_at.as_deref() {
+        let requested_expires_at = match request.expires_at {
             None => None,
             Some(raw) => Some(
                 chrono::DateTime::parse_from_rfc3339(raw)
@@ -305,7 +312,7 @@ impl TradingService for TradingGrpcService {
                     if let Err(e) = self
                         .state
                         .order_repo
-                        .update_order_pda(order.id, &pda, seed as i64)
+                        .update_order_pda(order.id, &pda, i64::try_from(seed).unwrap_or(i64::MAX))
                         .await
                     {
                         tracing::warn!("order {}: persist order_pda failed: {}", order.id, e);
@@ -366,18 +373,18 @@ impl TradingService for TradingGrpcService {
         res.message = "Order submitted successfully".to_string();
         res.id = Some(order.id.to_string());
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
 
     async fn get_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<GetOrderRequestView<'static>>,
     ) -> Result<(OrderResponse, Context), ConnectError> {
         let order_id = Uuid::parse_str(request.order_id).map_err(|e| {
             ConnectError::new(
                 ErrorCode::InvalidArgument,
-                format!("Invalid order_id: {}", e),
+                format!("Invalid order_id: {e}"),
             )
         })?;
 
@@ -400,24 +407,24 @@ impl TradingService for TradingGrpcService {
         res.created_at = order.created_at.map(|t| t.to_rfc3339()).unwrap_or_default();
         res.zone_id = order.zone_id;
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
 
     async fn cancel_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<CancelOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
         let order_id = Uuid::parse_str(request.order_id).map_err(|e| {
             ConnectError::new(
                 ErrorCode::InvalidArgument,
-                format!("Invalid order_id: {}", e),
+                format!("Invalid order_id: {e}"),
             )
         })?;
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
             ConnectError::new(
                 ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {}", e),
+                format!("Invalid user_id: {e}"),
             )
         })?;
 
@@ -438,18 +445,18 @@ impl TradingService for TradingGrpcService {
         .to_string();
         res.id = Some(order_id.to_string());
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
 
     async fn list_orders(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<ListOrdersRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
         let user_id = Uuid::parse_str(request.user_id).map_err(|e| {
             ConnectError::new(
                 ErrorCode::InvalidArgument,
-                format!("Invalid user_id: {}", e),
+                format!("Invalid user_id: {e}"),
             )
         })?;
 
@@ -480,26 +487,26 @@ impl TradingService for TradingGrpcService {
         let mut res = ListOrdersResponse::default();
         res.orders = order_responses;
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
 
     async fn update_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<UpdateOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn notify_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<NotifyOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn get_order_book(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<GetOrderBookRequestView<'static>>,
     ) -> Result<(ListOrdersResponse, Context), ConnectError> {
         // Zone-partitioned book: active orders for one grid zone, mirroring the
@@ -510,7 +517,7 @@ impl TradingService for TradingGrpcService {
 
         // Optional side filter (buy|sell). Compared as lowercase strings to keep
         // this independent of OrderSide's trait impls.
-        let side_filter: Option<String> = match request.side.as_deref().map(str::to_lowercase) {
+        let side_filter: Option<String> = match request.side.map(str::to_lowercase) {
             None => None,
             Some(s) if s == "buy" || s == "sell" => Some(s),
             Some(_) => {
@@ -556,33 +563,33 @@ impl TradingService for TradingGrpcService {
         let mut res = ListOrdersResponse::default();
         res.orders = orders;
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
     async fn list_trades(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ListTradesRequestView<'static>>,
     ) -> Result<(ListTradesResponse, Context), ConnectError> {
-        Ok((ListTradesResponse::default(), _ctx))
+        Ok((ListTradesResponse::default(), ctx))
     }
     async fn execute_settlement(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ExecuteSettlementRequestView<'static>>,
     ) -> Result<(SettlementResponse, Context), ConnectError> {
-        Ok((SettlementResponse::default(), _ctx))
+        Ok((SettlementResponse::default(), ctx))
     }
     async fn batch_execute_settlements(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<BatchExecuteSettlementsRequestView<'static>>,
     ) -> Result<(BatchSettlementResponse, Context), ConnectError> {
         info!("💠 BatchExecuteSettlements: count={}", request.settlements.len());
 
         let mut settlements = Vec::new();
-        for req in request.settlements.iter() {
+        for req in &request.settlements {
             let id = Uuid::parse_str(req.settlement_id).map_err(|e| {
-                ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid settlement_id: {}", e))
+                ConnectError::new(ErrorCode::InvalidArgument, format!("Invalid settlement_id: {e}"))
             })?;
 
             // Reconstruct a partial settlement for the service to process
@@ -595,7 +602,7 @@ impl TradingService for TradingGrpcService {
         }
 
         if settlements.is_empty() {
-            return Ok((BatchSettlementResponse::default(), _ctx));
+            return Ok((BatchSettlementResponse::default(), ctx));
         }
 
         // Execute via SettlementService
@@ -618,179 +625,179 @@ impl TradingService for TradingGrpcService {
         res.settlement_ids = ids;
         res.message = "Batch processed successfully".to_string();
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
     async fn issue_erc(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<IssueERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn transfer_erc(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<TransferERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn retire_erc(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<RetireERCRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn get_erc_balance(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<GetERCBalanceRequestView<'static>>,
     ) -> Result<(ERCBalanceResponse, Context), ConnectError> {
-        Ok((ERCBalanceResponse::default(), _ctx))
+        Ok((ERCBalanceResponse::default(), ctx))
     }
     async fn calculate_p2p_cost(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<CalculateP2PCostRequestView<'static>>,
     ) -> Result<(P2PTransactionCost, Context), ConnectError> {
-        Ok((P2PTransactionCost::default(), _ctx))
+        Ok((P2PTransactionCost::default(), ctx))
     }
     async fn get_market_prices(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<trading_protocol::google::protobuf::EmptyView<'static>>,
     ) -> Result<(P2PMarketPrices, Context), ConnectError> {
-        Ok((P2PMarketPrices::default(), _ctx))
+        Ok((P2PMarketPrices::default(), ctx))
     }
     async fn relay_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<RelayOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn get_blockchain_market_data(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<trading_protocol::google::protobuf::EmptyView<'static>>,
     ) -> Result<(BlockchainMarketDataResponse, Context), ConnectError> {
-        Ok((BlockchainMarketDataResponse::default(), _ctx))
+        Ok((BlockchainMarketDataResponse::default(), ctx))
     }
     async fn get_market_stats(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<trading_protocol::google::protobuf::EmptyView<'static>>,
     ) -> Result<(MarketStatsResponse, Context), ConnectError> {
-        Ok((MarketStatsResponse::default(), _ctx))
+        Ok((MarketStatsResponse::default(), ctx))
     }
     async fn get_matching_status(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<trading_protocol::google::protobuf::EmptyView<'static>>,
     ) -> Result<(MatchingStatusResponse, Context), ConnectError> {
-        Ok((MatchingStatusResponse::default(), _ctx))
+        Ok((MatchingStatusResponse::default(), ctx))
     }
     async fn get_settlement_stats(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<trading_protocol::google::protobuf::EmptyView<'static>>,
     ) -> Result<(SettlementStatsResponse, Context), ConnectError> {
-        Ok((SettlementStatsResponse::default(), _ctx))
+        Ok((SettlementStatsResponse::default(), ctx))
     }
     async fn get_token_balance(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<GetTokenBalanceRequestView<'static>>,
     ) -> Result<(TokenBalanceResponse, Context), ConnectError> {
-        Ok((TokenBalanceResponse::default(), _ctx))
+        Ok((TokenBalanceResponse::default(), ctx))
     }
     async fn create_conditional_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<CreateConditionalOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn list_conditional_orders(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ListConditionalOrdersRequestView<'static>>,
     ) -> Result<(ListConditionalOrdersResponse, Context), ConnectError> {
-        Ok((ListConditionalOrdersResponse::default(), _ctx))
+        Ok((ListConditionalOrdersResponse::default(), ctx))
     }
     async fn cancel_conditional_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<CancelConditionalOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn get_conditional_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<GetConditionalOrderRequestView<'static>>,
     ) -> Result<(ConditionalOrderData, Context), ConnectError> {
-        Ok((ConditionalOrderData::default(), _ctx))
+        Ok((ConditionalOrderData::default(), ctx))
     }
     async fn create_recurring_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<CreateRecurringOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn list_recurring_orders(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ListRecurringOrdersRequestView<'static>>,
     ) -> Result<(ListRecurringOrdersResponse, Context), ConnectError> {
-        Ok((ListRecurringOrdersResponse::default(), _ctx))
+        Ok((ListRecurringOrdersResponse::default(), ctx))
     }
     async fn get_recurring_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<GetRecurringOrderRequestView<'static>>,
     ) -> Result<(RecurringOrderResponse, Context), ConnectError> {
-        Ok((RecurringOrderResponse::default(), _ctx))
+        Ok((RecurringOrderResponse::default(), ctx))
     }
     async fn cancel_recurring_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<CancelRecurringOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn pause_recurring_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<PauseRecurringOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn resume_recurring_order(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ResumeRecurringOrderRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
-        Ok((TradingResponse::default(), _ctx))
+        Ok((TradingResponse::default(), ctx))
     }
     async fn get_vpp_cluster(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<GetVppClusterRequestView<'static>>,
     ) -> Result<(VppClusterResponse, Context), ConnectError> {
-        Ok((VppClusterResponse::default(), _ctx))
+        Ok((VppClusterResponse::default(), ctx))
     }
     async fn list_vpp_clusters(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _req: OwnedView<ListVppClustersRequestView<'static>>,
     ) -> Result<(ListVppClustersResponse, Context), ConnectError> {
-        Ok((ListVppClustersResponse::default(), _ctx))
+        Ok((ListVppClustersResponse::default(), ctx))
     }
     async fn dispatch_vpp(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: OwnedView<DispatchVppRequestView<'static>>,
     ) -> Result<(TradingResponse, Context), ConnectError> {
         info!("🚀 DispatchVpp: cluster={}, target={}kW", request.cluster_id, request.target_kw);
@@ -815,7 +822,7 @@ impl TradingService for TradingGrpcService {
         res.success = true;
         res.message = format!("Dispatched {} members", dispatches.len());
 
-        Ok((res, _ctx))
+        Ok((res, ctx))
     }
 }
 

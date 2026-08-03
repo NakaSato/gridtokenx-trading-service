@@ -322,19 +322,16 @@ async fn handle_socket(
     zone_id: Option<i32>,
     user_id: uuid::Uuid,
 ) {
-    let mut rx = match zone_id {
-        Some(zone) => {
-            let (rx, joined_at_seq) = hub.subscribe(zone);
-            info!(
-                "🌐 WS: user {} subscribed to zone {} at seq {}",
-                user_id, zone, joined_at_seq
-            );
-            rx
-        }
-        None => {
-            info!("🌐 WS: user {} subscribed to all zones", user_id);
-            hub.subscribe_all()
-        }
+    let mut rx = if let Some(zone) = zone_id {
+        let (rx, joined_at_seq) = hub.subscribe(zone);
+        info!(
+            "🌐 WS: user {} subscribed to zone {} at seq {}",
+            user_id, zone, joined_at_seq
+        );
+        rx
+    } else {
+        info!("🌐 WS: user {} subscribed to all zones", user_id);
+        hub.subscribe_all()
     };
     metrics::counter!("trading_ws_connections_opened").increment(1);
 

@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{Serialize, ToSchema, State, Path, ServiceRole, UserContext, AppState, Json, Decimal, Uuid, ToPrimitive, HashMap};
 
 /// GRID token balance for a wallet address (via Chain Bridge).
 #[utoipa::path(
@@ -36,12 +36,12 @@ pub async fn get_wallet_balance(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Blockchain error: {}", e),
+                format!("Blockchain error: {e}"),
             )
         })?;
 
     let decimals = 9;
-    let balance_decimal = Decimal::new(balance_raw as i64, decimals);
+    let balance_decimal = Decimal::new(i64::try_from(balance_raw).unwrap_or(i64::MAX), decimals);
 
     // Native SOL is a best-effort read: a chain hiccup here must not fail the
     // whole balance call, so fall back to 0.0 and log rather than 500.
@@ -64,6 +64,7 @@ pub async fn get_wallet_balance(
     // CURRENCY_DECIMALS is 6 against energy's 9. They are reported explicitly, per
     // leg, rather than left for the caller to infer — assuming one scale for both
     // is exactly the mistake that produces 1000x errors.
+    #[allow(clippy::items_after_statements)] // constant beside its use
     const CURRENCY_DECIMALS: u32 = 6;
     let currency_raw = match state.blockchain.get_currency_balance(&address).await {
         Ok(v) => v,
@@ -72,7 +73,7 @@ pub async fn get_wallet_balance(
             0
         }
     };
-    let currency_decimal = Decimal::new(currency_raw as i64, CURRENCY_DECIMALS);
+    let currency_decimal = Decimal::new(i64::try_from(currency_raw).unwrap_or(i64::MAX), CURRENCY_DECIMALS);
 
     Ok(Json(serde_json::json!({
         "wallet_address": address,
@@ -112,18 +113,18 @@ pub async fn get_user_analytics_stats(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let stats = state
+    let user_stats = state
         .analytics_repo
         .get_user_stats(user.user_id)
         .await
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
-    Ok(Json(stats))
+    Ok(Json(user_stats))
 }
 
 /// Analytics history. STUB — always returns `{"history": []}`.
@@ -176,7 +177,7 @@ pub async fn get_user_transactions(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -215,7 +216,7 @@ pub async fn get_carbon_balance(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -255,7 +256,7 @@ pub async fn get_carbon_history(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 

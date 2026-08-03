@@ -180,7 +180,9 @@ pub fn record_erc_retirement(amount: f64, success: bool, duration_ms: f64) {
 
 /// Records order book depth metrics
 pub fn record_order_book_depth(zone_id: &str, bids: u64, asks: u64) {
+    #[allow(clippy::cast_precision_loss)] // metrics API takes f64; counts < 2^52
     gauge!("trading_orderbook_bids_depth", "zone" => zone_id.to_string()).set(bids as f64);
+    #[allow(clippy::cast_precision_loss)] // metrics API takes f64; counts < 2^52
     gauge!("trading_orderbook_asks_depth", "zone" => zone_id.to_string()).set(asks as f64);
 }
 
@@ -192,7 +194,9 @@ pub fn record_spread(zone_id: &str, spread_bps: f64) {
 /// Records matching engine cycle metrics
 pub fn record_matching_cycle(duration_ms: f64, orders_processed: u64, matches: u64) {
     histogram!("trading_matching_cycle_duration_ms").record(duration_ms);
+    #[allow(clippy::cast_precision_loss)] // metrics API takes f64; counts < 2^52
     histogram!("trading_matching_orders_per_cycle").record(orders_processed as f64);
+    #[allow(clippy::cast_precision_loss)] // metrics API takes f64; counts < 2^52
     histogram!("trading_matching_matches_per_cycle").record(matches as f64);
 }
 
@@ -224,6 +228,7 @@ pub struct GrpcMetricsTimer {
 }
 
 impl GrpcMetricsTimer {
+    #[must_use]
     pub fn new(method: &str) -> Self {
         let start = Instant::now();
         gauge!("trading_grpc_requests_in_flight", "method" => method.to_string()).increment(1.0);
@@ -255,6 +260,7 @@ impl GrpcMetricsTimer {
 
 /// Records active connections gauge
 pub fn record_active_connections(count: u64) {
+    #[allow(clippy::cast_precision_loss)] // metrics API takes f64; counts < 2^52
     gauge!("trading_active_connections").set(count as f64);
 }
 

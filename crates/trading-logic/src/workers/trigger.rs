@@ -12,6 +12,7 @@ pub struct TriggerEvaluatorWorker {
 }
 
 impl TriggerEvaluatorWorker {
+    #[must_use]
     pub fn new(service: Arc<TriggerEvaluator>, interval: Duration) -> Self {
         Self { service, interval }
     }

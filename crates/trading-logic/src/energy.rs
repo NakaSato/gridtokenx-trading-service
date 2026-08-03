@@ -4,7 +4,14 @@ use trading_engine::engine::TopologySnapshot;
 /// Grid-Aware Topology that enforces island microgrid constraints.
 pub struct GridAwareTopology;
 
+impl Default for GridAwareTopology {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GridAwareTopology {
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

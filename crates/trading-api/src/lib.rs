@@ -1,6 +1,6 @@
 //! `trading-api` — HTTP/gRPC API handlers.
 //!
-//! ConnectRPC trading service implementation split into focused handler modules,
+//! `ConnectRPC` trading service implementation split into focused handler modules,
 //! REST endpoints, and middleware.
 
 pub mod auth;

@@ -4,10 +4,11 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{RecurringOrder, RecurringOrderWire, OrderSide, IntervalType, Decimal, FromStr, CreateRecurringRequest, State, Json, ServiceRole, UserContext, AppState, next_execution_at, NewRecurringOrder, Path, Uuid, RecurringStatus};
 
 /// Map a stored recurring order to the frontend wire shape (decimals → strings,
 /// enums → their serde-rename'd lowercase forms).
+#[must_use]
 pub fn build_recurring_response(o: &RecurringOrder) -> RecurringOrderWire {
     RecurringOrderWire {
         id: o.id,

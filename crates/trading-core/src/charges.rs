@@ -114,10 +114,10 @@ pub fn compute_charges(
     kwh: Decimal,
     rates: &dyn ChargeRates,
 ) -> SettlementCharges {
-    let fee = total * Decimal::from(rates.fee_bps() as i64) / Decimal::from(BPS);
+    let fee = total * Decimal::from(i64::from(rates.fee_bps())) / Decimal::from(BPS);
     let wheeling =
         kwh * Decimal::from(rates.wheeling_rate_per_kwh()) / Decimal::from(CURRENCY_SCALE);
-    let loss = total * Decimal::from(rates.loss_bps() as i64) / Decimal::from(BPS);
+    let loss = total * Decimal::from(i64::from(rates.loss_bps())) / Decimal::from(BPS);
     let net = total - fee - wheeling - loss;
     SettlementCharges {
         fee,

@@ -2,7 +2,7 @@
 //!
 //! The two API edges parse their own raw input (REST: a `String`, gRPC: an
 //! `f64`) and render their own error types, but the *policy* that turns an
-//! (order_type, side, time_in_force, optional price) into a matching price is
+//! (`order_type`, side, `time_in_force`, optional price) into a matching price is
 //! identical. Keep it here, once, as pure sync logic so the edges can't drift.
 
 use rust_decimal::Decimal;
@@ -103,7 +103,7 @@ pub fn resolve_order_price(
                 None => Ok(MARKET_BUY_CEILING_BID),
             }
         }
-        _ => match price_input {
+        OrderType::Limit => match price_input {
             None => Err(OrderPriceError::LimitMissingPrice),
             Some(p) if p <= Decimal::ZERO => Err(OrderPriceError::LimitNonPositive),
             Some(p) => Ok(p),

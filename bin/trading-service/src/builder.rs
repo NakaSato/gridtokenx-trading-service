@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use std::sync::Arc;
-use trading_core::traits::*;
+use trading_core::traits::{OrderRepository, MeterRepository, SettlementRepository, OutboxRepository, FuturesRepository, CarbonRepository, AnalyticsRepository, PriceAlertRepository, RecurringOrderRepository, VppRepository, BlockchainGateway, IdentityGateway, CacheStore, AuditLog, EventPublisher, WalletReadModelRepository, MeterReadModelRepository};
 use trading_infra::audit::AuditLogger;
 use trading_infra::blockchain::BlockchainService;
 use trading_infra::cache::CacheService;
@@ -51,6 +51,9 @@ pub struct AppServices {
 pub struct ServiceBuilder;
 
 impl ServiceBuilder {
+    // The composition root wires every dependency in one place BY DESIGN
+    // (see CLAUDE.md); its length is the inventory of the system.
+    #[allow(clippy::too_many_lines)]
     pub async fn build(
         db_pool: PgPool,
         config: Arc<trading_core::config::Config>,
@@ -94,10 +97,12 @@ impl ServiceBuilder {
         // behavior change) and the lazy-reconcile fallback is simply disabled.
         // The one-shot boot backfill (snapshot of the source tables) also runs
         // here; the live feed worker is spawned later from these same repos.
-        let (wallet_rm, meter_rm): (
+        #[allow(clippy::items_after_statements)] // alias belongs beside its binding
+        type ReadModelRepos = (
             Option<Arc<dyn WalletReadModelRepository>>,
             Option<Arc<dyn MeterReadModelRepository>>,
-        ) = if config.readmodel_feed_enabled {
+        );
+        let (wallet_rm, meter_rm): ReadModelRepos = if config.readmodel_feed_enabled {
             // Source pools live on other services' DBs (via pgdog). At cold boot
             // those backends can be briefly unready (DB still loading, pgdog not up
             // yet), so a single connect attempt races and drops the backfill to the
@@ -114,6 +119,7 @@ impl ServiceBuilder {
                     );
                     return None;
                 };
+                #[allow(clippy::items_after_statements)] // constant beside its loop
                 const MAX_ATTEMPTS: u32 = 5;
                 for attempt in 1..=MAX_ATTEMPTS {
                     match sqlx::postgres::PgPoolOptions::new()
@@ -172,7 +178,7 @@ impl ServiceBuilder {
         };
 
         let mut blockchain_svc = BlockchainService::new(
-            chain_bridge_url.to_string(),
+            chain_bridge_url.clone(),
             config.solana_cluster.clone(),
             config.solana_programs.clone(),
             Some(db_pool.clone()),

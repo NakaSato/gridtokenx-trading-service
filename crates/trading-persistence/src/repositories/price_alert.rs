@@ -49,6 +49,7 @@ pub struct PostgresPriceAlertRepository {
 }
 
 impl PostgresPriceAlertRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -58,9 +59,9 @@ impl PostgresPriceAlertRepository {
 impl PriceAlertRepository for PostgresPriceAlertRepository {
     async fn create_price_alert(&self, input: NewPriceAlert) -> TraitResult<PriceAlert> {
         let row = sqlx::query_as::<_, PriceAlertDb>(
-            r#"INSERT INTO price_alerts (user_id, target_price, condition, note)
+            r"INSERT INTO price_alerts (user_id, target_price, condition, note)
                VALUES ($1, $2, $3, $4)
-               RETURNING *"#,
+               RETURNING *",
         )
         .bind(input.user_id)
         .bind(input.target_price)
@@ -134,9 +135,9 @@ impl PriceAlertRepository for PostgresPriceAlertRepository {
     }
 }
 
-const MARK_TRIGGERED_SQL: &str = r#"UPDATE price_alerts
+const MARK_TRIGGERED_SQL: &str = r"UPDATE price_alerts
    SET triggered_at = NOW(),
        triggered_price = $2,
        status = CASE WHEN repeat THEN status ELSE 'triggered'::alert_status END,
        updated_at = NOW()
-   WHERE id = $1"#;
+   WHERE id = $1";

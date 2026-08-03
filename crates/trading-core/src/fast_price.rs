@@ -34,77 +34,93 @@ impl FastPrice {
 
     /// Create from raw mantissa value
     #[inline]
+    #[must_use]
     pub const fn from_raw(mantissa: i64) -> Self {
         Self(mantissa)
     }
 
     /// Create from Decimal (optimized)
     #[inline]
+    #[must_use]
     pub fn from_decimal(d: Decimal) -> Self {
         // Multiply by 10^9 to bring 9 decimal places into the integer part
         let scaled = d * Decimal::from(Self::FACTOR);
         let mantissa = scaled.round_dp(0).mantissa();
 
-        if mantissa > i64::MAX as i128 {
+        if mantissa > i128::from(i64::MAX) {
             Self(i64::MAX)
-        } else if mantissa < i64::MIN as i128 {
+        } else if mantissa < i128::from(i64::MIN) {
             Self(i64::MIN)
         } else {
+            // Guarded above: mantissa is within [i64::MIN, i64::MAX].
+            #[allow(clippy::cast_possible_truncation)]
             FastPrice(mantissa as i64)
         }
     }
 
     /// Get the raw mantissa value
     #[inline]
+    #[must_use]
     pub const fn raw(self) -> i64 {
         self.0
     }
 
     /// Convert back to Decimal
     #[inline]
+    #[must_use]
     pub fn to_decimal(self) -> Decimal {
-        Decimal::from_i128_with_scale(self.0 as i128, Self::SCALE)
+        Decimal::from_i128_with_scale(i128::from(self.0), Self::SCALE)
     }
 
-    /// Multiply two FastPrices (returns result at same scale)
+    /// Multiply two `FastPrices` (returns result at same scale)
     #[inline]
+    #[must_use]
     pub fn checked_mul(self, rhs: Self) -> Option<Self> {
-        let product = (self.0 as i128).checked_mul(rhs.0 as i128)?;
-        let result = product / (Self::FACTOR as i128);
+        let product = i128::from(self.0).checked_mul(i128::from(rhs.0))?;
+        let result = product / i128::from(Self::FACTOR);
 
-        if result > i64::MAX as i128 || result < i64::MIN as i128 {
+        if result > i128::from(i64::MAX) || result < i128::from(i64::MIN) {
             None
         } else {
+            // Guarded above: result is within [i64::MIN, i64::MAX].
+            #[allow(clippy::cast_possible_truncation)]
             Some(Self(result as i64))
         }
     }
 
     /// Fast multiplication without overflow checks (use only when bounds are known)
     #[inline]
+    #[must_use]
     pub fn unchecked_mul(self, rhs: Self) -> Self {
-        Self(((self.0 as i128 * rhs.0 as i128) / Self::FACTOR as i128) as i64)
+        // The contract IS "bounds are known" (see doc); the caller vouches.
+        #[allow(clippy::cast_possible_truncation)]
+        Self(((i128::from(self.0) * i128::from(rhs.0)) / i128::from(Self::FACTOR)) as i64)
     }
 
-    /// Add two FastPrices
+    /// Add two `FastPrices`
     #[inline]
+    #[must_use]
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         Some(Self(self.0.checked_add(rhs.0)?))
     }
 
     /// Fast addition without overflow checks
     #[inline]
+    #[must_use]
     pub fn unchecked_add(self, rhs: Self) -> Self {
         Self(self.0 + rhs.0)
     }
 
-    /// Subtract two FastPrices
+    /// Subtract two `FastPrices`
     #[inline]
+    #[must_use]
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         Some(Self(self.0.checked_sub(rhs.0)?))
     }
 
     /// Fast subtraction without overflow checks
     #[inline]
+    #[must_use]
     pub fn unchecked_sub(self, rhs: Self) -> Self {
         Self(self.0 - rhs.0)
     }
@@ -120,11 +136,13 @@ impl From<Decimal> for FastPrice {
         let mantissa = normalized.mantissa();
 
         // Truncate/clamp to i64
-        if mantissa > i64::MAX as i128 {
+        if mantissa > i128::from(i64::MAX) {
             Self(i64::MAX)
-        } else if mantissa < i64::MIN as i128 {
+        } else if mantissa < i128::from(i64::MIN) {
             Self(i64::MIN)
         } else {
+            // Guarded above: mantissa is within [i64::MIN, i64::MAX].
+            #[allow(clippy::cast_possible_truncation)]
             FastPrice(mantissa as i64)
         }
     }

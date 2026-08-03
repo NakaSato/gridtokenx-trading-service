@@ -32,6 +32,9 @@ pub struct IamIdentityGateway {
 
 impl IamIdentityGateway {
     /// Create a new IAM identity gateway.
+    #[must_use]
+    /// # Panics
+    /// Panics when `iam_url` is not a valid URL — a deploy-time config error.
     pub fn new(iam_url: &str, api_key: String) -> Self {
         let uri = iam_url.parse::<Uri>().expect("Invalid IAM URL");
         let transport = HttpClient::plaintext();

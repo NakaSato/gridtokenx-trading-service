@@ -312,7 +312,7 @@ pub trait SettlementRepository: Send + Sync {
 
     /// Real market price over a trailing `window_hours` window: VWAP, last,
     /// high/low, volume and trade count from `completed` settlements. Returns an
-    /// all-zero `MarketPrice` (trade_count = 0) when the window holds no trades.
+    /// all-zero `MarketPrice` (`trade_count` = 0) when the window holds no trades.
     /// `window_hours <= 0` means all-time (no time bound).
     async fn get_market_price(&self, window_hours: i64) -> TraitResult<MarketPrice>;
 
@@ -583,7 +583,7 @@ pub trait BlockchainGateway: Send + Sync {
     ) -> TraitResult<Vec<crate::models::SettlementTransaction>>;
 
     /// Custodial order placement (Option A): record the order PDA + fund its escrow
-    /// on the user's behalf, platform-signed. Returns (signature, order_pda). Default
+    /// on the user's behalf, platform-signed. Returns (signature, `order_pda`). Default
     /// is unsupported so mock/non-chain gateways need no override.
     ///
     /// `expires_at_unix` is the expiry already resolved for this order by
@@ -615,10 +615,10 @@ pub trait BlockchainGateway: Send + Sync {
         energy_amount: Decimal,
     ) -> TraitResult<String>;
 
-    /// Sync total supply from SPL Mint to TokenInfo PDA.
+    /// Sync total supply from SPL Mint to `TokenInfo` PDA.
     async fn sync_total_supply(&self) -> TraitResult<String>;
 
-    /// Execute on-chain create_order with custodial signing.
+    /// Execute on-chain `create_order` with custodial signing.
     ///
     /// `expires_at_unix` is the order's expiry in absolute unix seconds, `0` for
     /// none — see [`Self::place_order_on_chain`]. `create_{buy,sell}_order` stores

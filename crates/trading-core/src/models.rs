@@ -1,4 +1,4 @@
-//! Domain model structs for the GridTokenX trading service.
+//! Domain model structs for the `GridTokenX` trading service.
 //!
 //! These types represent the canonical domain shapes. Database-specific
 //! variants (e.g., `TradingOrderDb` with `sqlx::FromRow`) live in
@@ -300,7 +300,7 @@ pub struct NewRecurringOrder {
 
 /// A user-defined price alert (table `price_alerts`). The energy market has no
 /// per-symbol order books, so the frontend `symbol` is stored in `note` rather
-/// than a dedicated column (see BACKEND_GAP_PLAN.md §"Contract mismatches").
+/// than a dedicated column (see `BACKEND_GAP_PLAN.md` §"Contract mismatches").
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PriceAlert {
     pub id: Uuid,

@@ -1,6 +1,6 @@
 //! `trading-core` — Domain primitives, error types, and trait definitions.
 //!
-//! This is the foundation crate of the GridTokenX trading workspace.
+//! This is the foundation crate of the `GridTokenX` trading workspace.
 //! Every other crate depends on this one. It contains:
 //!
 //! - **`types`** — Canonical enum types (`OrderSide`, `OrderStatus`, `TriggerType`, etc.)

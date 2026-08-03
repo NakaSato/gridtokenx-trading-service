@@ -25,13 +25,13 @@ impl VppService {
     /// Get cluster status with aggregated real-time metrics.
     pub async fn get_cluster_status(&self, cluster_id: &str) -> TraitResult<VppCluster> {
         let cluster = self.repo.get_cluster_by_id(cluster_id).await?
-            .ok_or_else(|| trading_core::error::ApiError::NotFound(format!("VPP Cluster {} not found", cluster_id)))?;
+            .ok_or_else(|| trading_core::error::ApiError::NotFound(format!("VPP Cluster {cluster_id} not found")))?;
         
         Ok(cluster)
     }
 
     /// Optimized multi-objective dispatch for a VPP cluster.
-    /// Returns a map of meter_id -> dispatch_kw.
+    /// Returns a map of `meter_id` -> `dispatch_kw`.
     pub async fn optimize_dispatch(
         &self,
         cluster_id: &str,
@@ -91,7 +91,8 @@ impl VppService {
 
         let mut dispatches = HashMap::new();
         if total_weight <= 0.0 {
-            let shared_target = target_kw / members.len() as f64;
+            #[allow(clippy::cast_precision_loss)] // member counts are tiny
+        let shared_target = target_kw / members.len() as f64;
             for m in members {
                 dispatches.insert(m.meter_id, shared_target);
             }

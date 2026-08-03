@@ -1,4 +1,4 @@
-//! OpenAPI document for the REST surface (`rest.rs` + health/metrics).
+//! `OpenAPI` document for the REST surface (`rest.rs` + health/metrics).
 //!
 //! Served at `/api-docs/openapi.json` with Swagger UI at `/docs` (wired in
 //! `startup::build_router`). Schemas referenced from the `#[utoipa::path]`

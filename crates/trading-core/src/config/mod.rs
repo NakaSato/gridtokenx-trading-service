@@ -1,4 +1,4 @@
-//! Service configuration for the GridTokenX trading service.
+//! Service configuration for the `GridTokenX` trading service.
 
 pub mod tokenization;
 pub use tokenization::{ConfigError, TokenizationConfig, ValidationError};
@@ -10,6 +10,8 @@ use std::env;
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Feature flags ARE bools; a wrapper enum per flag would be ceremony.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     pub environment: String,
     pub database_url: String,
@@ -85,7 +87,7 @@ pub struct Config {
     pub readmodel_feed_enabled: bool,
     /// Kafka topic carrying IAM wallet domain events (default: "iam.user.events").
     pub readmodel_iam_topic: String,
-    /// Kafka topic carrying metering meter domain events (default: "meter_events").
+    /// Kafka topic carrying metering meter domain events (default: "`meter_events`").
     pub readmodel_meter_topic: String,
     /// Kafka cluster carrying `readmodel_meter_topic`. IAM wallet events and meter
     /// events can live on different clusters (IAM/noti on kafka-cmd, meter-service on
@@ -116,9 +118,9 @@ pub struct SolanaProgramsConfig {
 
 impl Default for SolanaProgramsConfig {
     /// Defaults MUST match `gridtokenx-blockchain-core`'s `SolanaProgramsConfig::default()`
-    /// (the Anchor.toml deployed ids) — the Chain Bridge PolicyEngine allowlist is derived
+    /// (the Anchor.toml deployed ids) — the Chain Bridge `PolicyEngine` allowlist is derived
     /// from that crate, so a divergent fallback here gets every settlement rejected as
-    /// "Unauthorized program ID" whenever the SOLANA_*_PROGRAM_ID env vars are unset.
+    /// "Unauthorized program ID" whenever the SOLANA_*_`PROGRAM_ID` env vars are unset.
     fn default() -> Self {
         Self {
             registry_program_id: "FcSd5x4X1nzJMKLZC4tMZXnQ1ipLrGsEfeoH8N4mvJX7".to_string(),
@@ -199,6 +201,8 @@ impl Default for OrderExpiryConfig {
 }
 
 impl OrderExpiryConfig {
+    // Linear env reading; splitting hurts top-to-bottom review.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self> {
         let d = OrderExpiryConfig::default();
         let cfg = OrderExpiryConfig {
@@ -364,6 +368,8 @@ impl MarketConfig {
 }
 
 impl Config {
+    // Linear env reading; splitting hurts top-to-bottom review.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 

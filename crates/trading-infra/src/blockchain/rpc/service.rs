@@ -83,6 +83,7 @@ impl BlockchainService {
     }
 
     /// Set the identity gateway for custodial signing
+    #[must_use]
     pub fn with_identity_gateway(mut self, gateway: Arc<dyn trading_core::traits::IdentityGateway>) -> Self {
         self.identity_gateway = Some(gateway);
         self
@@ -100,6 +101,7 @@ impl BlockchainService {
     }
 
     /// Enable/disable on-chain atomic-swap settlement of matching-engine trades.
+    #[must_use]
     pub fn with_trade_settlement_enabled(mut self, enabled: bool) -> Self {
         self.trade_settlement_enabled = enabled;
         self
@@ -107,6 +109,7 @@ impl BlockchainService {
 
     /// Settle from the parties' own escrow PDAs instead of the platform's pooled
     /// ATAs. See `Config::per_user_escrow_settlement`.
+    #[must_use]
     pub fn with_per_user_escrow_settlement(mut self, enabled: bool) -> Self {
         self.per_user_escrow_settlement = enabled;
         self
@@ -160,7 +163,18 @@ impl BlockchainService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Database pool not available in BlockchainService"))?;
 
-        let row: Option<(uuid::Uuid, String, rust_decimal::Decimal, rust_decimal::Decimal, Option<i32>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> =
+        // (user_id, side, energy, price, zone, expires_at, meter_serial)
+        #[allow(clippy::items_after_statements)] // alias belongs beside its query
+        type OrderRow = (
+            uuid::Uuid,
+            String,
+            rust_decimal::Decimal,
+            rust_decimal::Decimal,
+            Option<i32>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        );
+        let row: Option<OrderRow> =
             sqlx::query_as(
                 "SELECT user_id, side::text, energy_amount, price_per_kwh, zone_id, expires_at, signature \
                  FROM trading_orders WHERE id = $1",
@@ -195,8 +209,8 @@ impl BlockchainService {
             } else {
                 trading_core::offchain_payload::SIDE_BUY
             },
-            zone_id: zone_id.unwrap_or(0) as u32,
-            expires_at: expires_at.map(|t| t.timestamp()).unwrap_or(0),
+            zone_id: u32::try_from(zone_id.unwrap_or(0)).unwrap_or(0), // non-negative by schema
+            expires_at: expires_at.map_or(0, |t| t.timestamp()),
             signature,
         }))
     }
@@ -224,6 +238,7 @@ impl BlockchainService {
     }
 
     /// Load the authority keypair from the environment/config
+    #[allow(clippy::unused_async)] // API symmetry with the Vault-backed variant
     pub async fn get_authority_keypair(&self) -> Result<Keypair> {
         let wallet_path = std::env::var("AUTHORITY_WALLET_PATH")
             .unwrap_or_else(|_| "dev-wallet.json".to_string());
@@ -323,7 +338,7 @@ impl BlockchainService {
         self.core
             .request_airdrop(pubkey, lamports)
             .await
-            .map(|_| Signature::default())
+            .map(|()| Signature::default())
     }
 
     /// Get account balance in lamports
@@ -341,6 +356,7 @@ impl BlockchainService {
             .account_manager
             .get_balance(pubkey, force_refresh)
             .await?;
+        #[allow(clippy::cast_precision_loss)] // display-path SOL conversion
         Ok(balance as f64 / 1_000_000_000.0)
     }
 
@@ -433,10 +449,11 @@ impl BlockchainService {
     /// Parse Pubkey from string
     pub fn parse_pubkey(pubkey_str: &str) -> Result<Pubkey> {
         use std::str::FromStr;
-        Pubkey::from_str(pubkey_str).map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))
+        Pubkey::from_str(pubkey_str).map_err(|e| anyhow::anyhow!("Invalid pubkey: {e}"))
     }
 
     /// Get the instruction builder
+    #[must_use]
     pub fn instruction_builder(
         &self,
     ) -> &gridtokenx_blockchain_core::rpc::instructions::InstructionBuilder {
@@ -454,7 +471,7 @@ impl BlockchainService {
     }
 
     /// Custodial order placement (Option A): record the order PDA, platform-signed
-    /// (no user signature). Returns (signature, order_pda).
+    /// (no user signature). Returns (signature, `order_pda`).
     ///
     /// This deliberately does NOT fund `[b"escrow", user, mint]`. It used to, and the
     /// transfer was unspendable in both settlement modes:
@@ -476,6 +493,8 @@ impl BlockchainService {
     /// So the funding leg is dropped, not made conditional — there is no mode that
     /// wants it. The pooled ATA still pays the seller in custodial mode; that is the
     /// model's known economics, not this function's business.
+    // The on-chain placement genuinely takes this many independent params.
+    #[allow(clippy::too_many_arguments)]
     pub async fn place_order_on_chain(
         &self,
         user_wallet: &Pubkey,
@@ -530,7 +549,7 @@ impl BlockchainService {
         }
     }
 
-    /// Execute on-chain create_order
+    /// Execute on-chain `create_order`
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_create_order(
         &self,
@@ -575,7 +594,7 @@ impl BlockchainService {
         Ok((sig, order_pda.to_string(), index))
     }
 
-    /// Execute on-chain match_orders
+    /// Execute on-chain `match_orders`
     pub async fn execute_match_orders(
         &self,
         authority: &(dyn Signer + Send + Sync),
@@ -884,7 +903,7 @@ impl BlockchainService {
         let mut instructions = Vec::new();
 
         // Add bid levels
-        for (price, amount) in buy_prices.into_iter().zip(buy_amounts.into_iter()) {
+        for (price, amount) in buy_prices.into_iter().zip(buy_amounts) {
             instructions.push(
                 self.core
                     .instruction_builder
@@ -899,7 +918,7 @@ impl BlockchainService {
         }
 
         // Add ask levels
-        for (price, amount) in sell_prices.into_iter().zip(sell_amounts.into_iter()) {
+        for (price, amount) in sell_prices.into_iter().zip(sell_amounts) {
             instructions.push(
                 self.core
                     .instruction_builder

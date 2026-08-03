@@ -8,7 +8,7 @@
 //! source table) and the live NATS/Kafka event stream (see `trading-logic`
 //! `ReadModelFeedWorker`). The two cross-domain reads
 //! (`rpc/service.rs::get_user_primary_wallet`, `vpp.rs` meters JOIN) read from
-//! these tables. Runtime SQLx (no compile-time macros), per this workspace's
+//! these tables. Runtime `SQLx` (no compile-time macros), per this workspace's
 //! convention.
 //!
 //! Post DB-split the source tables (`user_wallets`, `meters`) live in the IAM
@@ -51,6 +51,7 @@ pub struct PgWalletReadModelRepository {
 }
 
 impl PgWalletReadModelRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool, source_pool: None }
     }
@@ -78,7 +79,7 @@ impl PgWalletReadModelRepository {
 /// (`rpc/service.rs::get_user_primary_wallet`). If IAM's per-user keying ever
 /// changes, this needs a real event-time/version guard here AND on
 /// `WALLET_DEMOTE_SIBLINGS` (which is currently unguarded).
-const WALLET_UPSERT: &str = r#"
+const WALLET_UPSERT: &str = r"
     INSERT INTO iam_wallet_read_model
         (user_id, wallet_address, is_primary, blockchain_registered,
          user_account_pda, shard_id, updated_at)
@@ -90,15 +91,15 @@ const WALLET_UPSERT: &str = r#"
         shard_id              = EXCLUDED.shard_id,
         updated_at            = EXCLUDED.updated_at
     WHERE iam_wallet_read_model.updated_at <= EXCLUDED.updated_at
-"#;
+";
 
 /// Demote every other primary wallet of a user (keeps the partial unique index
 /// `(user_id) WHERE is_primary` satisfiable when a new primary is set).
-const WALLET_DEMOTE_SIBLINGS: &str = r#"
+const WALLET_DEMOTE_SIBLINGS: &str = r"
     UPDATE iam_wallet_read_model
        SET is_primary = false, updated_at = now()
      WHERE user_id = $1 AND is_primary AND wallet_address <> $2
-"#;
+";
 
 #[async_trait]
 impl WalletReadModelRepository for PgWalletReadModelRepository {
@@ -154,9 +155,9 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         // row does not exist yet, this is a harmless no-op; a later link event
         // or the boot backfill will create it.
         sqlx::query(
-            r#"UPDATE iam_wallet_read_model
+            r"UPDATE iam_wallet_read_model
                   SET is_primary = $3, updated_at = now()
-                WHERE user_id = $1 AND wallet_address = $2"#,
+                WHERE user_id = $1 AND wallet_address = $2",
         )
         .bind(user_id)
         .bind(wallet_address)
@@ -171,8 +172,8 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         // Revocation propagation (IAM UserWalletUnlinked). Idempotent — deleting
         // a row that is already absent affects zero rows and is not an error.
         sqlx::query(
-            r#"DELETE FROM iam_wallet_read_model
-                WHERE user_id = $1 AND wallet_address = $2"#,
+            r"DELETE FROM iam_wallet_read_model
+                WHERE user_id = $1 AND wallet_address = $2",
         )
         .bind(user_id)
         .bind(wallet_address)
@@ -202,7 +203,7 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
                 return Ok(0);
             }
             let res = sqlx::query(
-                r#"INSERT INTO iam_wallet_read_model
+                r"INSERT INTO iam_wallet_read_model
                        (user_id, wallet_address, is_primary, blockchain_registered,
                         user_account_pda, shard_id, updated_at)
                    SELECT user_id, wallet_address,
@@ -210,7 +211,7 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
                           COALESCE(blockchain_registered, false),
                           user_account_pda, shard_id, now()
                      FROM user_wallets
-                   ON CONFLICT (user_id, wallet_address) DO NOTHING"#,
+                   ON CONFLICT (user_id, wallet_address) DO NOTHING",
             )
             .execute(&self.pool)
             .await?;
@@ -218,11 +219,11 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         };
 
         let rows = sqlx::query(
-            r#"SELECT user_id, wallet_address,
+            r"SELECT user_id, wallet_address,
                       COALESCE(is_primary, false)            AS is_primary,
                       COALESCE(blockchain_registered, false) AS blockchain_registered,
                       user_account_pda, shard_id
-                 FROM user_wallets"#,
+                 FROM user_wallets",
         )
         .fetch_all(source)
         .await?;
@@ -232,11 +233,11 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
             // DO NOTHING (not upsert): the backfill is a snapshot seed and must
             // never overwrite fresher state already applied by the event feed.
             let res = sqlx::query(
-                r#"INSERT INTO iam_wallet_read_model
+                r"INSERT INTO iam_wallet_read_model
                        (user_id, wallet_address, is_primary, blockchain_registered,
                         user_account_pda, shard_id, updated_at)
                    VALUES ($1, $2, $3, $4, $5, $6, now())
-                   ON CONFLICT (user_id, wallet_address) DO NOTHING"#,
+                   ON CONFLICT (user_id, wallet_address) DO NOTHING",
             )
             .bind(row.get::<Uuid, _>("user_id"))
             .bind(row.get::<String, _>("wallet_address"))
@@ -256,31 +257,28 @@ impl WalletReadModelRepository for PgWalletReadModelRepository {
         // (post-split IAM DB, or the local pool pre-cutover) and upsert each via
         // `upsert_wallet`, so primary-demotion + last-writer-wins match the event
         // path exactly. Then return the resulting primary wallet_address.
-        const SELECT_ONE_USER: &str = r#"
+        const SELECT_ONE_USER: &str = r"
             SELECT user_id, wallet_address,
                    COALESCE(is_primary, false)            AS is_primary,
                    COALESCE(blockchain_registered, false) AS blockchain_registered,
                    user_account_pda, shard_id
               FROM user_wallets
-             WHERE user_id = $1"#;
+             WHERE user_id = $1";
 
-        let rows = match &self.source_pool {
-            Some(source) => sqlx::query(SELECT_ONE_USER)
-                .bind(user_id)
-                .fetch_all(source)
-                .await?,
-            None => {
-                // No source pool: only the pre-cutover shared DB can answer.
-                // Post-split the table is absent locally — skip rather than error
-                // (mirrors the `backfill_wallets` no-source branch).
-                if !local_source_table_exists(&self.pool, "user_wallets").await? {
-                    return Ok(None);
-                }
-                sqlx::query(SELECT_ONE_USER)
-                    .bind(user_id)
-                    .fetch_all(&self.pool)
-                    .await?
+        let rows = if let Some(source) = &self.source_pool { sqlx::query(SELECT_ONE_USER)
+        .bind(user_id)
+        .fetch_all(source)
+        .await? } else {
+            // No source pool: only the pre-cutover shared DB can answer.
+            // Post-split the table is absent locally — skip rather than error
+            // (mirrors the `backfill_wallets` no-source branch).
+            if !local_source_table_exists(&self.pool, "user_wallets").await? {
+                return Ok(None);
             }
+            sqlx::query(SELECT_ONE_USER)
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await?
         };
 
         for row in &rows {
@@ -316,6 +314,7 @@ pub struct PgMeterReadModelRepository {
 }
 
 impl PgMeterReadModelRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool, source_pool: None }
     }
@@ -330,7 +329,7 @@ impl PgMeterReadModelRepository {
 /// Last-writer-wins upsert. `rated_power_kw` / `rated_capacity_kwh` are omitted
 /// (NULL on insert, untouched on update) — the metering `meters` table carries
 /// no such columns, so there is no event/backfill source for them.
-const METER_UPSERT: &str = r#"
+const METER_UPSERT: &str = r"
     INSERT INTO meter_read_model
         (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
     VALUES ($1, $2, $3, $4, $5, $6, now())
@@ -342,7 +341,7 @@ const METER_UPSERT: &str = r#"
         is_verified = EXCLUDED.is_verified,
         updated_at  = EXCLUDED.updated_at
     WHERE meter_read_model.updated_at <= EXCLUDED.updated_at
-"#;
+";
 
 #[async_trait]
 impl MeterReadModelRepository for PgMeterReadModelRepository {
@@ -376,12 +375,12 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
                 return Ok(0);
             }
             let res = sqlx::query(
-                r#"INSERT INTO meter_read_model
+                r"INSERT INTO meter_read_model
                        (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
                    SELECT serial_number, id, user_id, zone_id, status,
                           COALESCE(is_verified, false), now()
                      FROM meters
-                   ON CONFLICT (serial_number) DO NOTHING"#,
+                   ON CONFLICT (serial_number) DO NOTHING",
             )
             .execute(&self.pool)
             .await?;
@@ -394,9 +393,9 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
         // COALESCE because the source column is nullable; a NULL means "never
         // verified", which must read as false rather than dropping the row.
         let rows = sqlx::query(
-            r#"SELECT serial_number, id, user_id, zone_id, status,
+            r"SELECT serial_number, id, user_id, zone_id, status,
                       COALESCE(is_verified, false) AS is_verified
-                 FROM meters"#,
+                 FROM meters",
         )
         .fetch_all(source)
         .await?;
@@ -404,10 +403,10 @@ impl MeterReadModelRepository for PgMeterReadModelRepository {
         let mut inserted = 0u64;
         for row in rows {
             let res = sqlx::query(
-                r#"INSERT INTO meter_read_model
+                r"INSERT INTO meter_read_model
                        (serial_number, meter_id, user_id, zone_id, status, is_verified, updated_at)
                    VALUES ($1, $2, $3, $4, $5, $6, now())
-                   ON CONFLICT (serial_number) DO NOTHING"#,
+                   ON CONFLICT (serial_number) DO NOTHING",
             )
             .bind(row.get::<String, _>("serial_number"))
             .bind(row.get::<Uuid, _>("id"))

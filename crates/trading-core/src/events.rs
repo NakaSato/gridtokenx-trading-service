@@ -1,4 +1,4 @@
-//! Domain event definitions for the GridTokenX trading service.
+//! Domain event definitions for the `GridTokenX` trading service.
 //!
 //! These events flow through the event bus (Kafka/Redis) and are consumed
 //! by downstream services.
@@ -12,6 +12,9 @@ use crate::models::Settlement;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
+// Events are transient bus payloads; boxing the big variants would churn
+// every constructor/match for no steady-state win.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     OrderMatched(OrderMatchedPayload),
     SettlementRequested(Settlement),
@@ -51,6 +54,7 @@ impl Event {
     /// Stable string tag written to the `event_type` column of the outbox
     /// table (and used for downstream topic routing). Keep in sync with the
     /// `Event` variants — the persistence and outbox layers rely on it.
+    #[must_use]
     pub fn outbox_event_type(&self) -> &'static str {
         match self {
             Event::OrderMatched(_) => "OrderMatched",
@@ -92,7 +96,7 @@ pub struct PriceAlertTriggeredPayload {
     pub triggered_at: DateTime<Utc>,
 }
 
-/// Lightweight payload for OrderCreated events.
+/// Lightweight payload for `OrderCreated` events.
 /// The full `TradingOrderDb` struct lives in `trading-persistence`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderCreatedPayload {

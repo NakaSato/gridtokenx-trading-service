@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{info, Serialize, ToSchema, SubmitOrderRequest, SubmitOrderResponse, State, Json, ServiceRole, UserContext, AppState, Decimal, FromStr, OrderSide, OrderType, TimeInForce, Uuid, TradingOrder, OrderStatus, OrderBookResponse, Path, ActiveOrderMetersResponse, ActiveOrderMeter, HashMap, ListOrdersResponse, ListOrdersParams, Query, OrderData, Pagination, QuoteRequest, QuoteResponse, QuoteBreakdown, dec_f64, GridMetrics};
 
 /// Submit a spot order (limit or market) into the CDA or interval market.
 #[utoipa::path(
@@ -21,6 +21,10 @@ use super::*;
     ),
     security(("gateway_role" = [], "user_id" = [])),
 )]
+/// # Panics
+/// Panics only on a poisoned internal lock — process-fatal by design.
+// Gate-by-gate order intake; the sequence reads top-to-bottom.
+#[allow(clippy::too_many_lines)]
 pub async fn submit_order(
     role: ServiceRole,
     user: UserContext,
@@ -36,7 +40,7 @@ pub async fn submit_order(
     let amount = Decimal::from_str(&req.energy_amount_kwh).map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
-            format!("Invalid energy_amount_kwh: {}", e),
+            format!("Invalid energy_amount_kwh: {e}"),
         )
     })?;
 
@@ -52,6 +56,7 @@ pub async fn submit_order(
     };
 
     let order_type = match req.order_type.to_lowercase().as_str() {
+        #[allow(clippy::match_same_arms)] // explicit tokens beat a merged arm
         "limit" => OrderType::Limit,
         "market" => OrderType::Market,
         _ => OrderType::Limit,
@@ -63,7 +68,7 @@ pub async fn submit_order(
         // A limit order defaults to GTC.
         None => match order_type {
             OrderType::Market => TimeInForce::Ioc,
-            _ => TimeInForce::Gtc,
+            OrderType::Limit => TimeInForce::Gtc,
         },
         Some("gtc") => TimeInForce::Gtc,
         Some("ioc") => TimeInForce::Ioc,
@@ -89,7 +94,7 @@ pub async fn submit_order(
         Some(raw) => Some(Decimal::from_str(raw).map_err(|e| {
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                format!("Invalid price_per_kwh: {}", e),
+                format!("Invalid price_per_kwh: {e}"),
             )
         })?),
         None => None,
@@ -140,7 +145,7 @@ pub async fn submit_order(
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Database error: {}", e),
+                        format!("Database error: {e}"),
                     )
                 })?;
             Some(resolved.ok_or_else(|| {
@@ -161,7 +166,7 @@ pub async fn submit_order(
                     .map_err(|e| {
                         (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Database error: {}", e),
+                            format!("Database error: {e}"),
                         )
                     })?
                     .ok_or_else(|| {
@@ -191,7 +196,7 @@ pub async fn submit_order(
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Database error: {}", e),
+                        format!("Database error: {e}"),
                     )
                 })?
         } else {
@@ -280,7 +285,7 @@ pub async fn submit_order(
                 OrderSide::Buy => trading_core::offchain_payload::SIDE_BUY,
                 OrderSide::Sell => trading_core::offchain_payload::SIDE_SELL,
             },
-            req.zone_id as u32,
+            u32::try_from(req.zone_id).unwrap_or(0), // non-negative by schema
             signed_expires_at,
         );
 
@@ -305,7 +310,7 @@ pub async fn submit_order(
     .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.message().to_string()))?;
 
     let mut order = TradingOrder {
-        id: signed_order.as_ref().map(|(id, _, _)| *id).unwrap_or_else(Uuid::new_v4),
+        id: signed_order.as_ref().map_or_else(Uuid::new_v4, |(id, _, _)| *id),
         user_id: user.user_id,
         order_type,
         side,
@@ -373,7 +378,7 @@ pub async fn submit_order(
             Ok((sig, pda)) => {
                 info!("✅ On-chain order placed. Sig: {}, PDA: {}", sig, pda);
                 order.order_pda = Some(pda);
-                order.order_index = Some(seed as i64);
+                order.order_index = Some(i64::try_from(seed).unwrap_or(i64::MAX));
                 order.blockchain_tx_hash = Some(sig);
                 order.blockchain_status = Some("confirmed".to_string());
             }
@@ -429,7 +434,7 @@ pub async fn submit_order(
             .map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to resolve active epoch: {}", e),
+                    format!("Failed to resolve active epoch: {e}"),
                 )
             })?,
     );
@@ -465,7 +470,7 @@ pub async fn submit_order(
     insert_res.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
 
@@ -503,7 +508,7 @@ pub async fn submit_order(
     Ok(Json(SubmitOrderResponse {
         id: order.id,
         status: "open".to_string(),
-        created_at: order.created_at.unwrap_or_else(|| gridtokenx_telemetry::time::now()),
+        created_at: order.created_at.unwrap_or_else(gridtokenx_telemetry::time::now),
     }))
 }
 
@@ -535,15 +540,15 @@ pub async fn get_order_book(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
     // Aggregate remaining (unfilled) energy by price level. BTreeMap keeps the
     // levels ordered by price; asks (sells) ascend from the best (lowest) ask,
     // bids (buys) descend from the best (highest) bid.
-    let mut ask_levels: std::collections::BTreeMap<Decimal, Decimal> = Default::default();
-    let mut bid_levels: std::collections::BTreeMap<Decimal, Decimal> = Default::default();
+    let mut ask_levels = std::collections::BTreeMap::<Decimal, Decimal>::default();
+    let mut bid_levels = std::collections::BTreeMap::<Decimal, Decimal>::default();
     for e in &entries {
         let book = match e.side {
             trading_core::types::OrderSide::Sell => &mut ask_levels,
@@ -642,7 +647,7 @@ pub(super) async fn fetch_active_order_meters(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -668,7 +673,7 @@ pub(super) async fn fetch_active_order_meters(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -719,12 +724,12 @@ pub async fn list_orders(
 
     let orders = state
         .order_repo
-        .get_orders_by_user(user.user_id, limit as i64, offset as i64)
+        .get_orders_by_user(user.user_id, i64::try_from(limit).unwrap_or(i64::MAX), i64::try_from(offset).unwrap_or(i64::MAX))
         .await
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -786,7 +791,7 @@ pub async fn get_order_by_id(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?
         .ok_or((
@@ -837,7 +842,7 @@ pub async fn cancel_order(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 

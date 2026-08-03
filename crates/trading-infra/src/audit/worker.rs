@@ -14,6 +14,7 @@ const BATCH_SIZE: usize = 50;
 const BATCH_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl AuditWorker {
+    #[must_use]
     pub fn new(logger: AuditLogger, receiver: mpsc::Receiver<AuditEvent>) -> Self {
         Self { receiver, logger }
     }
@@ -30,35 +31,32 @@ impl AuditWorker {
             tokio::select! {
                 // Receive event from channel
                 maybe_event = self.receiver.recv() => {
-                    match maybe_event {
-                        Some(event) => {
-                            buffer.push(event);
+                    if let Some(event) = maybe_event {
+                        buffer.push(event);
 
-                            // Flush if batch size reached
-                            if buffer.len() >= BATCH_SIZE {
-                                debug!("AuditWorker: Batch size reached ({}), flushing...", BATCH_SIZE);
-                                if let Err(e) = self.logger.log_batch(&buffer).await {
-                                    error!("❌ AuditWorker failed to write batch: {}", e);
-                                }
-                                buffer.clear();
-                                sleep_timer.as_mut().reset(Instant::now() + BATCH_TIMEOUT);
+                        // Flush if batch size reached
+                        if buffer.len() >= BATCH_SIZE {
+                            debug!("AuditWorker: Batch size reached ({}), flushing...", BATCH_SIZE);
+                            if let Err(e) = self.logger.log_batch(&buffer).await {
+                                error!("❌ AuditWorker failed to write batch: {}", e);
+                            }
+                            buffer.clear();
+                            sleep_timer.as_mut().reset(Instant::now() + BATCH_TIMEOUT);
+                        }
+                    } else {
+                        // Channel closed, flush remaining and exit
+                        if !buffer.is_empty() {
+                            info!("AuditWorker: Channel closed, flushing final {} events...", buffer.len());
+                            if let Err(e) = self.logger.log_batch(&buffer).await {
+                                error!("❌ AuditWorker failed to write final batch: {}", e);
                             }
                         }
-                        None => {
-                            // Channel closed, flush remaining and exit
-                            if !buffer.is_empty() {
-                                info!("AuditWorker: Channel closed, flushing final {} events...", buffer.len());
-                                if let Err(e) = self.logger.log_batch(&buffer).await {
-                                    error!("❌ AuditWorker failed to write final batch: {}", e);
-                                }
-                            }
-                            break;
-                        }
+                        break;
                     }
                 }
 
                 // Timeout reached, flush if buffer not empty
-                _ = &mut sleep_timer => {
+                () = &mut sleep_timer => {
                     if !buffer.is_empty() {
                         debug!("AuditWorker: Timeout reached, flushing {} events...", buffer.len());
                         if let Err(e) = self.logger.log_batch(&buffer).await {

@@ -5,7 +5,7 @@ use tracing::{debug, error, info, warn};
 use trading_core::traits::{BlockchainGateway, TraitResult};
 
 /// Cap on the backoff delay applied after repeated sync failures.
-const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+const MAX_BACKOFF: Duration = Duration::from_mins(30);
 
 /// Worker for periodically syncing the on-chain total supply cache.
 /// This fulfills the "Deferred Supply Synchronization" architecture.

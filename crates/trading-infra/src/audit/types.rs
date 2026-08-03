@@ -77,6 +77,7 @@ pub enum AuditEvent {
 
 impl AuditEvent {
     /// Get the event type as a string for database storage
+    #[must_use]
     pub fn event_type(&self) -> &'static str {
         match self {
             AuditEvent::UserLogin { .. } => "user_login",
@@ -96,7 +97,8 @@ impl AuditEvent {
         }
     }
 
-    /// Extract user_id if present in the event
+    /// Extract `user_id` if present in the event
+    #[must_use]
     pub fn user_id(&self) -> Option<Uuid> {
         match self {
             AuditEvent::UserLogin { user_id, .. }
@@ -117,6 +119,7 @@ impl AuditEvent {
     }
 
     /// Extract IP address if present in the event
+    #[must_use]
     pub fn ip_address(&self) -> Option<&str> {
         match self {
             AuditEvent::UserLogin { ip, .. }

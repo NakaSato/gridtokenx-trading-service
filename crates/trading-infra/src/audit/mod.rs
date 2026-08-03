@@ -18,6 +18,7 @@ pub struct AuditLogger {
 
 impl AuditLogger {
     /// Create a new audit logger
+    #[must_use]
     pub fn new(db: PgPool, job_sender: tokio::sync::mpsc::Sender<AuditEvent>) -> Self {
         Self { db, job_sender }
     }
@@ -26,7 +27,7 @@ impl AuditLogger {
     pub async fn log(&self, event: AuditEvent) -> anyhow::Result<()> {
         let event_type = event.event_type();
         let user_id = event.user_id();
-        let ip_address_str = event.ip_address().map(|s| s.to_string());
+        let ip_address_str = event.ip_address().map(std::string::ToString::to_string);
         let ip_address = ip_address_str
             .as_deref()
             .and_then(|s| s.parse::<IpNetwork>().ok());
@@ -46,10 +47,10 @@ impl AuditLogger {
 
         // db-split cutover: write to the Trading-owned audit table, not IAM's user_activities.
         sqlx::query(
-            r#"
+            r"
             INSERT INTO trading_user_activities (activity_type, user_id, ip_address, metadata, created_at)
             VALUES ($1, $2, $3, $4, $5)
-            "#,
+            ",
         )
         .bind(event_type)
         .bind(user_id)
@@ -89,7 +90,7 @@ impl AuditLogger {
             let user_id = event.user_id();
             let ip_address = event.ip_address().and_then(|s| s.parse::<IpNetwork>().ok());
 
-            let event_data = match serde_json::to_value(&event) {
+            let event_data = match serde_json::to_value(event) {
                 Ok(data) => data,
                 Err(_) => {
                     serde_json::json!({ "error": "serialization_failed", "type": event_type })
@@ -105,10 +106,10 @@ impl AuditLogger {
 
         // db-split cutover: Trading-owned audit table (batch).
         sqlx::query(
-            r#"
+            r"
             INSERT INTO trading_user_activities (activity_type, user_id, ip_address, metadata, created_at)
             SELECT * FROM UNNEST($1::text[], $2::uuid[], $3::inet[], $4::jsonb[], $5::timestamptz[])
-            "#,
+            ",
         )
         .bind(&activity_types)
         .bind(&user_ids)
@@ -136,13 +137,13 @@ impl AuditLogger {
         limit: i64,
     ) -> anyhow::Result<Vec<AuditEventRecord>> {
         let records = sqlx::query_as::<_, AuditEventRecord>(
-            r#"
+            r"
             SELECT id, activity_type as event_type, user_id, ip_address, metadata as event_data, created_at
             FROM trading_user_activities
             WHERE user_id = $1
             ORDER BY created_at DESC
             LIMIT $2
-            "#,
+            ",
         )
         .bind(user_id)
         .bind(limit)

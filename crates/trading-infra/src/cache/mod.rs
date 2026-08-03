@@ -56,13 +56,13 @@ impl CacheService {
         let result: RedisResult<()> = conn.set_ex(key, serialized, ttl_seconds).await;
 
         match result {
-            Ok(_) => {
+            Ok(()) => {
                 debug!("Cache SET: {} (TTL: {}s)", key, ttl_seconds);
                 Ok(())
             }
             Err(e) => {
                 error!("Cache SET failed for key {}: {}", key, e);
-                Err(anyhow::anyhow!("Redis SET failed: {}", e))
+                Err(anyhow::anyhow!("Redis SET failed: {e}"))
             }
         }
     }
@@ -103,7 +103,7 @@ impl CacheService {
             }
             Err(e) => {
                 error!("Cache DELETE failed for key {}: {}", key, e);
-                Err(anyhow::anyhow!("Redis DEL failed: {}", e))
+                Err(anyhow::anyhow!("Redis DEL failed: {e}"))
             }
         }
     }
@@ -155,7 +155,7 @@ impl CacheService {
             }
             Err(e) => {
                 error!("Cache INCR failed for key {}: {}", key, e);
-                Err(anyhow::anyhow!("Redis INCR failed: {}", e))
+                Err(anyhow::anyhow!("Redis INCR failed: {e}"))
             }
         }
     }
@@ -185,13 +185,13 @@ impl CacheService {
         let result: RedisResult<()> = conn.flushall().await;
 
         match result {
-            Ok(_) => {
+            Ok(()) => {
                 info!("✅ Cache flushed successfully");
                 Ok(())
             }
             Err(e) => {
                 error!("Cache flush failed: {}", e);
-                Err(anyhow::anyhow!("Redis FLUSHALL failed: {}", e))
+                Err(anyhow::anyhow!("Redis FLUSHALL failed: {e}"))
             }
         }
     }
@@ -207,7 +207,7 @@ impl CacheService {
             Ok(info) => Ok(info),
             Err(e) => {
                 error!("Cache INFO failed: {}", e);
-                Err(anyhow::anyhow!("Redis INFO failed: {}", e))
+                Err(anyhow::anyhow!("Redis INFO failed: {e}"))
             }
         }
     }
@@ -218,43 +218,51 @@ pub struct CacheKeys;
 
 impl CacheKeys {
     /// Market epoch cache key
+    #[must_use]
     pub fn market_epoch() -> String {
         "market:current_epoch".to_string()
     }
 
     /// User profile cache key
+    #[must_use]
     pub fn user_profile(user_id: &Uuid) -> String {
-        format!("user:profile:{}", user_id)
+        format!("user:profile:{user_id}")
     }
 
     /// User wallet cache key
+    #[must_use]
     pub fn user_wallet(user_id: &Uuid) -> String {
-        format!("user:wallet:{}", user_id)
+        format!("user:wallet:{user_id}")
     }
 
     /// Order book cache key
+    #[must_use]
     pub fn order_book(market_id: &str) -> String {
-        format!("orderbook:{}", market_id)
+        format!("orderbook:{market_id}")
     }
 
     /// Market statistics cache key
+    #[must_use]
     pub fn market_stats(epoch_id: &str) -> String {
-        format!("market:stats:{}", epoch_id)
+        format!("market:stats:{epoch_id}")
     }
 
     /// Token balance cache key
+    #[must_use]
     pub fn token_balance(wallet_address: &str, mint: &str) -> String {
-        format!("token:balance:{}:{}", wallet_address, mint)
+        format!("token:balance:{wallet_address}:{mint}")
     }
 
     /// Settlement cache key
+    #[must_use]
     pub fn settlement(settlement_id: &Uuid) -> String {
-        format!("settlement:{}", settlement_id)
+        format!("settlement:{settlement_id}")
     }
 
     /// ERC certificate cache key
+    #[must_use]
     pub fn erc_certificate(certificate_id: &str) -> String {
-        format!("erc:certificate:{}", certificate_id)
+        format!("erc:certificate:{certificate_id}")
     }
 }
 
@@ -306,7 +314,7 @@ impl CacheStore for CacheService {
         let result: RedisResult<()> = conn.set_ex(key, value, ttl_secs).await;
 
         match result {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(e) => {
                 error!("Cache SET failed for key {}: {}", key, e);
                 Err(trading_core::error::ApiError::Internal(e.to_string()))

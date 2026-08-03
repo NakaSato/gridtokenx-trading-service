@@ -42,7 +42,7 @@ impl EventBus {
     ) -> Result<Self> {
         if kafka_enabled {
             if let Some(brokers) = kafka_brokers {
-                match KafkaEventBus::new(brokers, kafka_topic_prefix).await {
+                match KafkaEventBus::new(brokers, kafka_topic_prefix) {
                     Ok(kafka_bus) => {
                         info!("✅ EventBus initialized with Kafka backend");
                         return Ok(Self::Kafka(kafka_bus));
@@ -205,6 +205,8 @@ pub struct RedisEventBus {
     stream_name: String,
 }
 
+// Skips the non-Debug connection handles on purpose.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for RedisEventBus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisEventBus")
@@ -251,7 +253,7 @@ impl RedisEventBus {
                     "Failed to publish event to stream {}: {}",
                     self.stream_name, e
                 );
-                Err(anyhow::anyhow!("Redis XADD failed: {}", e))
+                Err(anyhow::anyhow!("Redis XADD failed: {e}"))
             }
         }
     }

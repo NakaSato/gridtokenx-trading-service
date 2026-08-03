@@ -4,7 +4,7 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{Serialize, ToSchema, Deserialize, IntoParams, MarketStatsResponse, State, ServiceRole, AppState, Json, MarketConfigResponse, dec_f64, P2PMarketPricesResponse, HashMap, MatchingStatusResponse, TradingOrder, PriceRange, SettlementStats, OrderBookEntry, Decimal, OrderSide, MarketPrice, Uuid};
 
 /// Real 24h market statistics, derived from completed settlements — no mock or
 /// static values. Price/volume come from the market-price aggregate (VWAP);
@@ -32,13 +32,13 @@ pub async fn get_market_stats(
     let price = state.settlement_repo.get_market_price(24).await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
     let active_users = state.settlement_repo.count_active_traders(24).await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
 
@@ -142,13 +142,13 @@ pub async fn get_matching_status(
     let buys = state.order_repo.get_active_buy_orders().await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
     let sells = state.order_repo.get_active_sell_orders().await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
 
@@ -208,12 +208,12 @@ pub(super) fn build_matching_status(
         pending_sell_orders: sells.len(),
         pending_matches,
         buy_price_range: PriceRange {
-            min: buy_min.map(dec_f64).unwrap_or(0.0),
-            max: buy_max.map(dec_f64).unwrap_or(0.0),
+            min: buy_min.map_or(0.0, dec_f64),
+            max: buy_max.map_or(0.0, dec_f64),
         },
         sell_price_range: PriceRange {
-            min: sell_min.map(dec_f64).unwrap_or(0.0),
-            max: sell_max.map(dec_f64).unwrap_or(0.0),
+            min: sell_min.map_or(0.0, dec_f64),
+            max: sell_max.map_or(0.0, dec_f64),
         },
         can_match,
         match_reason,
@@ -296,13 +296,13 @@ pub async fn get_settlement_stats(
     role.require_any(&[ServiceRole::ApiGateway, ServiceRole::Admin])
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
-    let stats = state.settlement_repo.get_settlement_stats().await.map_err(|e| {
+    let settlement_stats = state.settlement_repo.get_settlement_stats().await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
-    Ok(Json(build_settlement_stats_response(&stats)))
+    Ok(Json(build_settlement_stats_response(&settlement_stats)))
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -344,7 +344,7 @@ pub async fn get_market_price(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
     Ok(Json(price))
@@ -400,7 +400,7 @@ pub async fn get_clearing_epochs(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -443,7 +443,7 @@ pub async fn get_p2p_orderbook(
     let entries = state.order_repo.get_all_active_orders().await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+            format!("Database error: {e}"),
         )
     })?;
     Ok(Json(build_p2p_orderbook(&entries)))
@@ -506,7 +506,7 @@ pub struct TradeRecordResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TradesListResponse {
     pub trades: Vec<TradeRecordResponse>,
-    /// `getTrades` (TradeHistory) reads `total_count`.
+    /// `getTrades` (`TradeHistory`) reads `total_count`.
     pub total_count: i64,
     /// `getTradeHistory` reads `total`.
     pub total: i64,

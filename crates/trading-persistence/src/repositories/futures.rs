@@ -40,6 +40,7 @@ pub struct PostgresFuturesRepository {
 }
 
 impl PostgresFuturesRepository {
+    #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -69,11 +70,11 @@ impl FuturesRepository for PostgresFuturesRepository {
 
     async fn insert_order(&self, order: &FuturesOrder) -> TraitResult<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO futures_orders (
                 id, user_id, product_id, side, order_type, quantity, price, leverage, status
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            "#,
+            ",
         )
         .bind(order.id)
         .bind(order.user_id)

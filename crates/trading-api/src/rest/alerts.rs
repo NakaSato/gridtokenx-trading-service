@@ -4,10 +4,11 @@
 //! handlers are re-exported from `rest/mod.rs`, so every `crate::rest::<name>`
 //! path (router wiring, openapi.rs) resolves exactly as before.
 
-use super::*;
+use super::{Deserialize, ToSchema, Serialize, PriceAlert, PriceAlertResponse, AlertStatus, CreatePriceAlertRequest, State, Json, ServiceRole, UserContext, AppState, Decimal, FromStr, AlertCondition, NewPriceAlert, Path, Uuid};
 
 /// Map a stored alert to the frontend wire shape. `symbol` falls back to "" when
 /// `note` is null; `is_active` is true only while status == active.
+#[must_use]
 pub fn build_price_alert_response(a: &PriceAlert) -> PriceAlertResponse {
     PriceAlertResponse {
         id: a.id,
@@ -80,7 +81,7 @@ pub async fn create_price_alert(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -115,7 +116,7 @@ pub async fn list_price_alerts(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
@@ -153,7 +154,7 @@ pub async fn delete_price_alert(
         .map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                format!("Database error: {e}"),
             )
         })?;
 
