@@ -273,42 +273,70 @@ impl ReadModelFeedWorker {
         let _ = tokio::join!(iam, meter);
     }
 
-    /// Build a consumer on `brokers`, subscribe to `topics`, and stream forever. On a
-    /// fatal setup error (bad broker config / subscribe failure) it logs and returns —
-    /// the process keeps running with that consumer disabled rather than crashing.
+    /// Build a consumer on `brokers`, subscribe to `topics`, and stream forever,
+    /// REBUILDING the consumer whenever it goes bad. One client object is not
+    /// trustworthy for the process lifetime: after a broker blip
+    /// (`AllBrokersDown`, observed 2026-08-03) an rdkafka consumer can lose its
+    /// group membership and then sit silently fenced — `recv()` neither yields
+    /// messages nor errors, the group shows zero members, and every projection
+    /// this worker feeds goes stale (the sell-side meter gate then fails CLOSED
+    /// for newly verified meters until a service restart). Setup failures and
+    /// repeated recv errors therefore retry with a fresh consumer + backoff
+    /// instead of disabling the feed; committed offsets make the rejoin cheap.
     async fn drain(self: Arc<Self>, brokers: String, topics: Vec<String>, group_id: String) {
-        let consumer: StreamConsumer = match ClientConfig::new()
-            .set("bootstrap.servers", &brokers)
-            .set("group.id", &group_id)
-            .set("enable.auto.commit", "true")
-            .set("auto.offset.reset", "earliest")
-            .set("fetch.message.max.bytes", "10485760") // 10MB, mirrors kafka_consumer.rs
-            .create()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!("ReadModelFeedWorker: failed to create Kafka consumer ({group_id}) on {brokers}: {e}");
-                return;
-            }
-        };
-
-        let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
-        if let Err(e) = consumer.subscribe(&topic_refs) {
-            error!("ReadModelFeedWorker: failed to subscribe to {topics:?} on {brokers}: {e}");
-            return;
-        }
-        info!("📥 ReadModelFeedWorker streaming on {brokers} topics: {topics:?}");
-
+        let mut reconnects: u64 = 0;
         loop {
-            match consumer.recv().await {
-                Ok(msg) => {
-                    if let Some(payload) = msg.payload() {
-                        self.handle_payload(payload).await;
-                    }
-                }
+            if reconnects > 0 {
+                info!(
+                    "ReadModelFeedWorker: rebuilding Kafka consumer ({group_id}) on {brokers} (reconnect #{reconnects})"
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            reconnects += 1;
+
+            let consumer: StreamConsumer = match ClientConfig::new()
+                .set("bootstrap.servers", &brokers)
+                .set("group.id", &group_id)
+                .set("enable.auto.commit", "true")
+                .set("auto.offset.reset", "earliest")
+                .set("fetch.message.max.bytes", "10485760") // 10MB, mirrors kafka_consumer.rs
+                .create()
+            {
+                Ok(c) => c,
                 Err(e) => {
-                    error!("ReadModelFeedWorker: Kafka consumer error on {brokers}: {e}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    error!("ReadModelFeedWorker: failed to create Kafka consumer ({group_id}) on {brokers}: {e}");
+                    continue;
+                }
+            };
+
+            let topic_refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+            if let Err(e) = consumer.subscribe(&topic_refs) {
+                error!("ReadModelFeedWorker: failed to subscribe to {topics:?} on {brokers}: {e}");
+                continue;
+            }
+            info!("📥 ReadModelFeedWorker streaming on {brokers} topics: {topics:?}");
+
+            let mut consecutive_errors = 0u32;
+            loop {
+                match consumer.recv().await {
+                    Ok(msg) => {
+                        consecutive_errors = 0;
+                        if let Some(payload) = msg.payload() {
+                            self.handle_payload(payload).await;
+                        }
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        error!(
+                            "ReadModelFeedWorker: Kafka consumer error on {brokers} ({consecutive_errors} consecutive): {e}"
+                        );
+                        if consecutive_errors >= 3 {
+                            // The client is likely fenced/bad — replace it rather
+                            // than trusting it to heal (observed: it doesn't).
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
                 }
             }
         }
