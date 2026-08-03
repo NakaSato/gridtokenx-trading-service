@@ -330,6 +330,143 @@ pub fn check_sell_eligibility(
     Ok(())
 }
 
+// ── Buy-side funding gate ────────────────────────────────────────────────────
+
+/// Atomic units per whole currency token. The currency leg is 6-decimal
+/// (THBC-style) everywhere — the on-chain placement path scales prices by the
+/// same factor — so the funding gate must agree or it checks the wrong number.
+pub const CURRENCY_ATOMIC_PER_UNIT: u32 = 1_000_000;
+
+/// What the buy-side funding gate requires of the buyer's currency balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuyFundingRequirement {
+    /// No lookup needed (sell orders — a seller spends energy, not currency).
+    None,
+    /// A market buy with no slippage cap: its spend is unbounded by
+    /// construction, so the only meaningful submit-time check is that the buyer
+    /// holds *any* currency at all.
+    NonZero,
+    /// The order's maximum spend in currency atomic units (6-dec):
+    /// `matching_price × amount`, rounded up so truncation can never admit a
+    /// buyer who is short by less than one atomic unit.
+    Atomic(u64),
+}
+
+/// Why a buy order was refused on funding grounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuyFundingError {
+    /// The buyer has no on-chain wallet to pay from.
+    NoWallet,
+    /// The buyer's currency balance cannot cover the order's maximum spend.
+    InsufficientFunds {
+        /// Maximum spend of this order, currency atomic units (6-dec).
+        required_atomic: u64,
+        /// The buyer's current balance, currency atomic units (6-dec).
+        available_atomic: u64,
+    },
+}
+
+impl BuyFundingError {
+    /// Client-facing message, shared verbatim by the REST and gRPC edges.
+    #[must_use]
+    pub fn message(self) -> String {
+        match self {
+            Self::NoWallet => {
+                "you have no on-chain wallet — link a wallet before buying energy".to_string()
+            }
+            Self::InsufficientFunds {
+                required_atomic,
+                available_atomic,
+            } => {
+                let scale = Decimal::from(CURRENCY_ATOMIC_PER_UNIT);
+                format!(
+                    "insufficient currency balance: this order can spend up to {} but the wallet holds {}",
+                    Decimal::from(required_atomic) / scale,
+                    Decimal::from(available_atomic) / scale,
+                )
+            }
+        }
+    }
+}
+
+/// Compute what the funding gate must verify for this order.
+///
+/// `explicit_price` is the price the CLIENT sent (limit price or market-buy
+/// slippage cap), `matching_price` the output of [`resolve_order_price`]. The
+/// two are distinguished because a market buy with no cap resolves to
+/// [`MARKET_BUY_CEILING_BID`] — a sentinel, not a spend the buyer could ever
+/// owe — so that case degrades to [`BuyFundingRequirement::NonZero`].
+///
+/// A cost too large for `u64` maps to `u64::MAX` (fail closed: no real wallet
+/// holds it), and a non-positive amount contributes zero cost — amount
+/// validation is the edges' job, not this gate's.
+#[must_use]
+pub fn required_buy_funding(
+    side: OrderSide,
+    order_type: OrderType,
+    explicit_price: Option<Decimal>,
+    matching_price: Decimal,
+    amount: Decimal,
+) -> BuyFundingRequirement {
+    use rust_decimal::prelude::ToPrimitive;
+
+    if !matches!(side, OrderSide::Buy) {
+        return BuyFundingRequirement::None;
+    }
+    if matches!(order_type, OrderType::Market) && explicit_price.is_none() {
+        return BuyFundingRequirement::NonZero;
+    }
+    // checked_mul, not `*`: Decimal multiplication PANICS on overflow, and this
+    // runs on request input — an absurd price × amount must refuse, not crash.
+    let cost_atomic = matching_price
+        .checked_mul(amount)
+        .and_then(|c| c.checked_mul(Decimal::from(CURRENCY_ATOMIC_PER_UNIT)))
+        .map_or(u64::MAX, |c| c.ceil().to_u64().unwrap_or(u64::MAX));
+    BuyFundingRequirement::Atomic(cost_atomic)
+}
+
+/// Decide whether the buyer's balance admits the order.
+///
+/// `available_atomic` is the buyer's currency balance in atomic units, read by
+/// the edge only when the requirement is not [`BuyFundingRequirement::None`].
+///
+/// This is a submit-time admission check, not a reservation: nothing stops the
+/// balance being spent between admission and settlement, where the atomic swap
+/// remains the real enforcement. Its job is to keep knowably-unfundable bids
+/// out of the book.
+///
+/// # Errors
+/// Returns [`BuyFundingError::InsufficientFunds`] when the balance cannot cover
+/// the requirement.
+pub fn check_buy_funding(
+    requirement: BuyFundingRequirement,
+    available_atomic: u64,
+) -> Result<(), BuyFundingError> {
+    match requirement {
+        BuyFundingRequirement::None => Ok(()),
+        BuyFundingRequirement::NonZero => {
+            if available_atomic > 0 {
+                Ok(())
+            } else {
+                Err(BuyFundingError::InsufficientFunds {
+                    required_atomic: 1,
+                    available_atomic,
+                })
+            }
+        }
+        BuyFundingRequirement::Atomic(required_atomic) => {
+            if available_atomic >= required_atomic {
+                Ok(())
+            } else {
+                Err(BuyFundingError::InsufficientFunds {
+                    required_atomic,
+                    available_atomic,
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +572,125 @@ mod tests {
         );
         assert!(!needs_any_verified_meter_lookup(OrderSide::Buy, None));
         assert!(!needs_any_verified_meter_lookup(OrderSide::Buy, Some(&m)));
+    }
+
+    // ── Buy-side funding gate ─────────────────────────────────────────────────
+
+    #[test]
+    fn sell_orders_need_no_funding_lookup() {
+        assert_eq!(
+            required_buy_funding(OrderSide::Sell, OrderType::Limit, None, dec!(5), dec!(10)),
+            BuyFundingRequirement::None
+        );
+        assert_eq!(check_buy_funding(BuyFundingRequirement::None, 0), Ok(()));
+    }
+
+    #[test]
+    fn limit_buy_requires_price_times_amount_in_atomic() {
+        // 5.5 THB/kWh × 10 kWh = 55 currency = 55_000_000 atomic (6-dec).
+        assert_eq!(
+            required_buy_funding(
+                OrderSide::Buy,
+                OrderType::Limit,
+                Some(dec!(5.5)),
+                dec!(5.5),
+                dec!(10)
+            ),
+            BuyFundingRequirement::Atomic(55_000_000)
+        );
+    }
+
+    #[test]
+    fn funding_cost_rounds_up_never_down() {
+        // 0.0000001 × 1 kWh = 0.1 atomic — truncation would admit a zero-balance
+        // buyer; ceiling demands 1 atomic unit.
+        assert_eq!(
+            required_buy_funding(
+                OrderSide::Buy,
+                OrderType::Limit,
+                Some(dec!(0.0000001)),
+                dec!(0.0000001),
+                dec!(1)
+            ),
+            BuyFundingRequirement::Atomic(1)
+        );
+    }
+
+    #[test]
+    fn capped_market_buy_requires_cap_times_amount() {
+        assert_eq!(
+            required_buy_funding(
+                OrderSide::Buy,
+                OrderType::Market,
+                Some(dec!(2)),
+                dec!(2),
+                dec!(3)
+            ),
+            BuyFundingRequirement::Atomic(6_000_000)
+        );
+    }
+
+    #[test]
+    fn uncapped_market_buy_requires_nonzero_balance_only() {
+        // The resolved price is the ceiling sentinel, not a real spend — the
+        // gate must not demand a million-currency balance for it.
+        assert_eq!(
+            required_buy_funding(
+                OrderSide::Buy,
+                OrderType::Market,
+                None,
+                MARKET_BUY_CEILING_BID,
+                dec!(1)
+            ),
+            BuyFundingRequirement::NonZero
+        );
+        assert_eq!(check_buy_funding(BuyFundingRequirement::NonZero, 1), Ok(()));
+        assert_eq!(
+            check_buy_funding(BuyFundingRequirement::NonZero, 0),
+            Err(BuyFundingError::InsufficientFunds {
+                required_atomic: 1,
+                available_atomic: 0
+            })
+        );
+    }
+
+    #[test]
+    fn exact_balance_is_admitted_one_atomic_short_is_refused() {
+        let req = BuyFundingRequirement::Atomic(55_000_000);
+        assert_eq!(check_buy_funding(req, 55_000_000), Ok(()));
+        assert_eq!(
+            check_buy_funding(req, 54_999_999),
+            Err(BuyFundingError::InsufficientFunds {
+                required_atomic: 55_000_000,
+                available_atomic: 54_999_999
+            })
+        );
+    }
+
+    #[test]
+    fn overflowing_cost_fails_closed() {
+        // A cost beyond u64 maps to u64::MAX — no wallet passes it.
+        assert_eq!(
+            required_buy_funding(
+                OrderSide::Buy,
+                OrderType::Limit,
+                Some(Decimal::MAX),
+                Decimal::MAX,
+                dec!(1000000)
+            ),
+            BuyFundingRequirement::Atomic(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn insufficient_funds_message_reports_whole_currency_units() {
+        let msg = BuyFundingError::InsufficientFunds {
+            required_atomic: 55_000_000,
+            available_atomic: 1_500_000,
+        }
+        .message();
+        assert!(msg.contains("55"), "required in whole units: {msg}");
+        assert!(msg.contains("1.5"), "available in whole units: {msg}");
     }
 
     #[test]

@@ -201,6 +201,54 @@ impl TradingService for TradingGrpcService {
             return Err(ConnectError::new(ErrorCode::PermissionDenied, e.message()));
         }
 
+        // ── Buy-side funding gate ────────────────────────────────────────────
+        // Same shared policy as the REST edge (402 there): refuse a bid whose
+        // maximum spend knowably exceeds the buyer's currency balance. Fails
+        // OPEN when the balance cannot be read — a Chain Bridge blip must not
+        // refuse every buy; settlement's atomic swap is the real enforcement.
+        let funding = trading_core::order_policy::required_buy_funding(
+            side,
+            order_type,
+            price_input,
+            price,
+            amount,
+        );
+        if funding != trading_core::order_policy::BuyFundingRequirement::None {
+            match self.state.blockchain.get_user_wallet(user_id).await {
+                Ok(None) => {
+                    return Err(ConnectError::new(
+                        ErrorCode::PermissionDenied,
+                        trading_core::order_policy::BuyFundingError::NoWallet.message(),
+                    ));
+                }
+                Ok(Some(wallet)) => {
+                    match self.state.blockchain.get_currency_balance(&wallet).await {
+                        Ok(available) => {
+                            if let Err(e) =
+                                trading_core::order_policy::check_buy_funding(funding, available)
+                            {
+                                tracing::warn!("buy order from {user_id} refused: {e:?}");
+                                return Err(ConnectError::new(
+                                    ErrorCode::FailedPrecondition,
+                                    e.message(),
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "buy funding gate skipped for {user_id}: currency balance read failed: {e}"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "buy funding gate skipped for {user_id}: wallet lookup failed: {e}"
+                    );
+                }
+            }
+        }
+
         // Resolve the active market epoch so the matcher's settlement and
         // order_matches inserts satisfy their NOT NULL FK to market_epochs.
         let epoch_id = self

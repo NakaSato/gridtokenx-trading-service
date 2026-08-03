@@ -48,6 +48,8 @@ struct MockSystem {
     pub meters: Mutex<Vec<(String, MeterIdentity)>>,
     /// What `has_verified_meter` answers for any user.
     pub seller_has_verified_meter: Mutex<HasVerifiedMeter>,
+    /// What `get_currency_balance` answers for any wallet.
+    pub currency_balance: Mutex<CurrencyBalance>,
 }
 
 /// `has_verified_meter`'s answer, wrapped so its `Default` is **true**.
@@ -60,6 +62,19 @@ pub struct HasVerifiedMeter(pub bool);
 impl Default for HasVerifiedMeter {
     fn default() -> Self {
         Self(true)
+    }
+}
+
+/// `get_currency_balance`'s answer, wrapped so its `Default` is **`u64::MAX`**.
+///
+/// Same reasoning as [`HasVerifiedMeter`]: most tests are not about the
+/// buy-side funding gate, and inheriting the trait's `Ok(0)` default would turn
+/// every existing buy-order test into a 402. The gate's own tests set it.
+pub struct CurrencyBalance(pub u64);
+
+impl Default for CurrencyBalance {
+    fn default() -> Self {
+        Self(u64::MAX)
     }
 }
 
@@ -522,6 +537,9 @@ impl BlockchainGateway for MockSystem {
     }
     async fn get_token_balance(&self, _w: &str) -> TraitResult<u64> {
         Ok(1000000000)
+    }
+    async fn get_currency_balance(&self, _w: &str) -> TraitResult<u64> {
+        Ok(self.currency_balance.lock().unwrap().0)
     }
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<ZoneConfig> {
         Ok(ZoneConfig {
@@ -3241,4 +3259,169 @@ async fn submit_refuses_a_meter_id_naming_no_known_meter() {
         "unknown meter_id is refused"
     );
     assert!(mock.orders.lock().unwrap().is_empty());
+}
+
+// ── Buy-side funding gate ────────────────────────────────────────────────────
+//
+// A bid is a promise to pay at settlement; a buy whose maximum spend knowably
+// exceeds the buyer's currency balance is refused at submit. The rule itself is
+// unit-tested in `trading_core::order_policy`; these pin that both edges reach
+// it and that a refusal happens before any order row is written.
+
+#[tokio::test]
+async fn buy_exceeding_currency_balance_is_refused_402_and_stores_nothing() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let buyer = Uuid::new_v4();
+    // 10 kWh × 4.0 = 40 currency = 40_000_000 atomic; wallet holds one atomic less.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(39_999_999);
+
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        buyer,
+        Body::from(
+            json!({
+                "side": "buy", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "an unfundable bid must not be admitted"
+    );
+    assert!(
+        mock.orders.lock().unwrap().is_empty(),
+        "a refused buy must not reach the book — the refusal runs before the insert"
+    );
+}
+
+#[tokio::test]
+async fn buy_covered_by_currency_balance_is_admitted() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let buyer = Uuid::new_v4();
+    // Exactly the maximum spend: 40_000_000 atomic covers 10 kWh × 4.0.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(40_000_000);
+
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        buyer,
+        Body::from(
+            json!({
+                "side": "buy", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "an exact balance admits the bid"
+    );
+    assert_eq!(mock.orders.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn uncapped_market_buy_requires_any_nonzero_currency_balance() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let buyer = Uuid::new_v4();
+
+    let body = json!({
+        "side": "buy", "order_type": "market", "time_in_force": "ioc",
+        "energy_amount_kwh": "10", "zone_id": 1
+    })
+    .to_string();
+
+    // Empty wallet → refused: even an unbounded market buy needs SOME currency.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(0);
+    let res = request(
+        app.clone(),
+        "POST",
+        "/api/v1/orders",
+        buyer,
+        Body::from(body.clone()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::PAYMENT_REQUIRED);
+
+    // Any non-zero balance admits it — its true spend is unknowable at submit,
+    // so the gate must NOT demand the ceiling-sentinel price × amount.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(1);
+    let res = request(app, "POST", "/api/v1/orders", buyer, Body::from(body)).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sells_are_never_gated_on_currency_balance() {
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let app = build_router(state);
+    let seller = Uuid::new_v4();
+    // A seller spends energy, not currency — an empty wallet must not block the ask.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(0);
+    *mock.seller_has_verified_meter.lock().unwrap() = HasVerifiedMeter(true);
+
+    let res = request(
+        app,
+        "POST",
+        "/api/v1/orders",
+        seller,
+        Body::from(
+            json!({
+                "side": "sell", "order_type": "limit",
+                "energy_amount_kwh": "10", "price_per_kwh": "4.0", "zone_id": 1
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn grpc_submit_reaches_the_funding_gate() {
+    // The two edges share `order_policy::required_buy_funding`/`check_buy_funding`;
+    // this pins that gRPC actually calls them, so the rule cannot be REST-only.
+    let (state, mock) = setup_test_state_with_mock(test_oracle_key());
+    let svc = TradingGrpcService::new(state);
+    let buyer = Uuid::new_v4();
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(39_999_999);
+
+    let buy = SubmitOrderRequest {
+        user_id: buyer.to_string(),
+        side: "buy".into(),
+        order_type: "limit".into(),
+        energy_amount: 10.0,
+        price_per_kwh: 4.0,
+        zone_id: Some(1),
+        ..Default::default()
+    };
+    assert!(
+        svc.submit_order(ctx(), owned_view(&buy)).await.is_err(),
+        "gRPC must refuse an unfundable bid"
+    );
+    assert!(
+        mock.orders.lock().unwrap().is_empty(),
+        "nothing may be stored"
+    );
+
+    // Funding it admits the same order.
+    *mock.currency_balance.lock().unwrap() = CurrencyBalance(40_000_000);
+    svc.submit_order(ctx(), owned_view(&buy))
+        .await
+        .expect("a covered bid is admitted");
+    assert_eq!(mock.orders.lock().unwrap().len(), 1);
 }

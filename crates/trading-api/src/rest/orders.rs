@@ -22,7 +22,8 @@ use super::{
         (status = 200, description = "Order accepted (status `open`)", body = SubmitOrderResponse),
         (status = 400, description = "Invalid side/type/amount/price/TIF/segment combination, or an unknown meter_serial/meter_id", body = String),
         (status = 401, description = "Missing or invalid user id header", body = String),
-        (status = 403, description = "Caller role not allowed, or a sell order with no verified meter behind it", body = String),
+        (status = 402, description = "Buy order whose maximum spend exceeds the buyer's currency balance", body = String),
+        (status = 403, description = "Caller role not allowed, a sell order with no verified meter behind it, or a buy order from a user with no on-chain wallet", body = String),
         (status = 500, description = "Database or epoch resolution error", body = String),
     ),
     security(("gateway_role" = [], "user_id" = [])),
@@ -233,6 +234,54 @@ pub async fn submit_order(
         // 403, not 400: the request is well-formed and the caller is
         // authenticated — they are simply not authorized to sell yet.
         return Err((axum::http::StatusCode::FORBIDDEN, e.message().to_string()));
+    }
+
+    // ── Buy-side funding gate ────────────────────────────────────────────────
+    // A bid is a promise to pay at settlement; refuse it up front when the
+    // buyer's currency balance knowably cannot cover the order's maximum spend
+    // (matching price × amount; an uncapped market buy only needs a non-zero
+    // balance since its spend is unbounded by construction). Admission-time
+    // only — settlement's atomic swap remains the real enforcement — so the
+    // gate fails OPEN when the balance cannot be read: a Chain Bridge blip must
+    // not refuse every buy (same stance as the settlement pre-flight).
+    let funding = trading_core::order_policy::required_buy_funding(
+        side,
+        order_type,
+        price_input,
+        price,
+        amount,
+    );
+    if funding != trading_core::order_policy::BuyFundingRequirement::None {
+        match state.blockchain.get_user_wallet(user.user_id).await {
+            Ok(None) => {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    trading_core::order_policy::BuyFundingError::NoWallet.message(),
+                ));
+            }
+            Ok(Some(wallet)) => match state.blockchain.get_currency_balance(&wallet).await {
+                Ok(available) => {
+                    if let Err(e) =
+                        trading_core::order_policy::check_buy_funding(funding, available)
+                    {
+                        tracing::warn!("buy order from {} refused: {:?}", user.user_id, e);
+                        return Err((axum::http::StatusCode::PAYMENT_REQUIRED, e.message()));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "buy funding gate skipped for {}: currency balance read failed: {e}",
+                        user.user_id
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "buy funding gate skipped for {}: wallet lookup failed: {e}",
+                    user.user_id
+                );
+            }
+        }
     }
 
     // ── Per-user escrow settlement: verify the wallet signature ──────────────

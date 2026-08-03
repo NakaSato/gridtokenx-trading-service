@@ -30,6 +30,11 @@ async fn test_api_routing_e2e() {
     // 2. Setup environment variables for config
     std::env::set_var("TRADING_DATABASE_URL", &db_url);
     std::env::set_var("CHAIN_BRIDGE_INSECURE", "true");
+    // Deliberately unreachable: this test asserts ROUTING, not chain state. With
+    // a live dev bridge on the default port, the buy-side funding gate would
+    // read the fixture wallet's real (zero) THBC balance and 402 the submit;
+    // an unreachable bridge instead exercises the gate's fail-open path.
+    std::env::set_var("CHAIN_BRIDGE_URL", "http://127.0.0.1:1");
     std::env::set_var(
         "ENERGY_TOKEN_MINT",
         "EneryTokenMint111111111111111111111111111",
@@ -229,6 +234,20 @@ async fn test_api_routing_e2e() {
     // targeted the pre-split shared `gridtokenx` DB and failed with
     // `relation "users" does not exist`, so any caller-supplied uuid works.
     let user_id = Uuid::new_v4();
+
+    // The buy-side funding gate refuses a buyer with no on-chain wallet (403),
+    // so mirror one the way the IAM wallet feed would. The gate's balance read
+    // then fails OPEN here (no Chain Bridge in this test), which is exactly the
+    // path a bridge blip takes in production — the order must still be admitted.
+    sqlx::query(
+        "INSERT INTO iam_wallet_read_model (user_id, wallet_address, is_primary)
+         VALUES ($1, $2, true)",
+    )
+    .bind(user_id)
+    .bind("2Jwf36DQ8pq4hSbU39XnKk7XvCJoDLvu3gC5sCRvXGng")
+    .execute(&pool)
+    .await
+    .expect("Failed to mirror test wallet");
 
     let epoch_id = Uuid::new_v4();
     // Unique-id-derived, not wall-clock — avoids parallel-test collisions on
