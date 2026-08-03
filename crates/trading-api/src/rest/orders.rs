@@ -12,6 +12,13 @@ use super::{
     TimeInForce, ToSchema, TradingOrder, UserContext, Uuid,
 };
 
+/// A user-facing gate refusal as a JSON body (`{"error": …}`). The Trading UI
+/// parses every response body as JSON and surfaces `data.error`; a bare-text
+/// body reaches users as "Invalid JSON response: …" instead of the message.
+fn gate_refusal(msg: impl Into<String>) -> String {
+    serde_json::json!({ "error": msg.into() }).to_string()
+}
+
 /// Submit a spot order (limit or market) into the CDA or interval market.
 #[utoipa::path(
     post,
@@ -233,7 +240,7 @@ pub async fn submit_order(
         );
         // 403, not 400: the request is well-formed and the caller is
         // authenticated — they are simply not authorized to sell yet.
-        return Err((axum::http::StatusCode::FORBIDDEN, e.message().to_string()));
+        return Err((axum::http::StatusCode::FORBIDDEN, gate_refusal(e.message())));
     }
 
     // ── Buy-side funding gate ────────────────────────────────────────────────
@@ -256,7 +263,7 @@ pub async fn submit_order(
             Ok(None) => {
                 return Err((
                     axum::http::StatusCode::FORBIDDEN,
-                    trading_core::order_policy::BuyFundingError::NoWallet.message(),
+                    gate_refusal(trading_core::order_policy::BuyFundingError::NoWallet.message()),
                 ));
             }
             Ok(Some(wallet)) => match state.blockchain.get_currency_balance(&wallet).await {
@@ -265,7 +272,10 @@ pub async fn submit_order(
                         trading_core::order_policy::check_buy_funding(funding, available)
                     {
                         tracing::warn!("buy order from {} refused: {:?}", user.user_id, e);
-                        return Err((axum::http::StatusCode::PAYMENT_REQUIRED, e.message()));
+                        return Err((
+                            axum::http::StatusCode::PAYMENT_REQUIRED,
+                            gate_refusal(e.message()),
+                        ));
                     }
                 }
                 Err(e) => {
