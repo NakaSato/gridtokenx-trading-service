@@ -148,14 +148,13 @@ impl Default for SolanaProgramsConfig {
 /// Defaults reflect THB/kWh retail energy pricing. Override any value via the
 /// corresponding `MARKET_*` env var.
 ///
-/// **The four wheeling/loss fields no longer describe what anything charges.**
-/// They used to mirror `GridAwareTopology`'s hardcoded schedule, but that type
-/// now reads the on-chain `TariffConfig` through `charges::ChargeRates` — the
-/// same rates settlement bills — so these values feed only the
-/// `/api/v1/markets/p2p/market-prices` response. Reporting a zone-split 0/0.02
-/// schedule there is stale: the chain charges one flat per-kWh rate in every
-/// zone. Left in place because the endpoint's response shape is a published
-/// contract; point it at `ChargeRates` when that shape can change.
+/// There are deliberately **no wheeling or loss parameters here**. Four used to
+/// exist (`{intra,cross}_zone_wheeling_charge`, `{intra,cross}_zone_loss_factor`)
+/// mirroring a hardcoded matcher schedule. Everything that prices those charges
+/// now reads the on-chain `TariffConfig` via `charges::ChargeRates`, so the fields
+/// had no readers left while remaining settable through `MARKET_*` env vars — an
+/// operator could set them and silently get nothing. Removed rather than left as
+/// a trap. Add a wheeling override only if it feeds `ChargeRates`.
 ///
 /// **`min_price_per_kwh` is not the real floor for a sell.** Its 0.50 default is
 /// itself below the price at which the on-chain network-charge cap can be met at
@@ -175,10 +174,6 @@ pub struct MarketConfig {
     pub min_price_per_kwh: Decimal,
     pub max_price_per_kwh: Decimal,
     pub loss_allocation_model: String,
-    pub intra_zone_wheeling_charge: Decimal,
-    pub cross_zone_wheeling_charge: Decimal,
-    pub intra_zone_loss_factor: Decimal,
-    pub cross_zone_loss_factor: Decimal,
 }
 
 impl Default for MarketConfig {
@@ -191,10 +186,6 @@ impl Default for MarketConfig {
             min_price_per_kwh: Decimal::new(50, 2),
             max_price_per_kwh: Decimal::new(2000, 2),
             loss_allocation_model: "proportional".to_string(),
-            intra_zone_wheeling_charge: Decimal::new(0, 2),
-            cross_zone_wheeling_charge: Decimal::new(2, 2),
-            intra_zone_loss_factor: Decimal::new(101, 2),
-            cross_zone_loss_factor: Decimal::new(103, 2),
         }
     }
 }
@@ -379,22 +370,6 @@ impl MarketConfig {
             max_price_per_kwh: env_dec("MARKET_MAX_PRICE_PER_KWH", d.max_price_per_kwh)?,
             loss_allocation_model: env::var("MARKET_LOSS_ALLOCATION_MODEL")
                 .unwrap_or(d.loss_allocation_model),
-            intra_zone_wheeling_charge: env_dec(
-                "MARKET_INTRA_ZONE_WHEELING_CHARGE",
-                d.intra_zone_wheeling_charge,
-            )?,
-            cross_zone_wheeling_charge: env_dec(
-                "MARKET_CROSS_ZONE_WHEELING_CHARGE",
-                d.cross_zone_wheeling_charge,
-            )?,
-            intra_zone_loss_factor: env_dec(
-                "MARKET_INTRA_ZONE_LOSS_FACTOR",
-                d.intra_zone_loss_factor,
-            )?,
-            cross_zone_loss_factor: env_dec(
-                "MARKET_CROSS_ZONE_LOSS_FACTOR",
-                d.cross_zone_loss_factor,
-            )?,
         })
     }
 }
@@ -554,11 +529,17 @@ mod tests {
     fn market_config_default_invariants() {
         let m = MarketConfig::default();
         assert!(m.min_price_per_kwh < m.max_price_per_kwh);
-        assert_eq!(m.intra_zone_wheeling_charge, Decimal::new(0, 2));
-        assert_eq!(m.cross_zone_wheeling_charge, Decimal::new(2, 2));
-        assert_eq!(m.intra_zone_loss_factor, Decimal::new(101, 2));
-        assert_eq!(m.cross_zone_loss_factor, Decimal::new(103, 2));
         assert_eq!(m.loss_allocation_model, "proportional");
+        // The wheeling/loss parameters that used to be asserted here are gone on
+        // purpose: everything that prices those charges reads the on-chain
+        // TariffConfig, so config values for them could only ever be a trap. This
+        // note stands in for them so their removal reads as deliberate.
+
+        // `min_price_per_kwh` is NOT the effective floor for a sell. The binding
+        // one is derived from the live tariff (charges::min_settleable_price_per_kwh)
+        // and is currently ABOVE this default, so a price passing this check can
+        // still be unsettleable. Asserted so the relationship is not forgotten.
+        assert!(m.min_price_per_kwh > Decimal::ZERO);
     }
 
     /// The default order lifetime is one interval-clearing window (15 min), not an
