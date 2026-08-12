@@ -204,19 +204,41 @@ pub struct QuoteResponse {
     pub grid_metrics: GridMetrics,
 }
 
+/// Cost breakdown for a quoted trade, at the live on-chain tariff.
+///
+/// **The charge lines are pass-throughs the BUYER funds.** The CDA settles at the
+/// landed cost (`ask + wheeling + loss`), so the buyer's escrow is debited
+/// `total_cost`; settlement then routes the fee, wheeling and loss to the
+/// collector accounts and credits the seller the remainder, leaving them roughly
+/// `energy_cost` less the market fee.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct QuoteBreakdown {
+    /// `energy × price`: the seller's side of the trade, before the platform fee.
     pub energy_cost: String,
+    /// Flat per-kWh transmission charge (`TariffConfig.wheeling_rate_per_kwh`),
+    /// applied in every zone. Added to the buyer's bill.
     pub wheeling_charge: String,
+    /// Line-loss charge, a share of trade value (`TariffConfig.loss_bps`).
+    /// Added to the buyer's bill.
     pub loss_cost: String,
+    /// What the buyer pays: `energy_cost + wheeling_charge + loss_cost`, i.e. the
+    /// landed cost the trade settles at.
     pub total_cost: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct GridMetrics {
+    /// Energy the buyer receives — the full matched amount. Loss is settled in
+    /// money, not by withholding energy, so this is not discounted by
+    /// `loss_factor`.
     pub effective_energy_kwh: String,
+    /// The loss rate as a fraction of trade value (e.g. `0.0005` for 5 bps).
     pub loss_factor: String,
     pub zone_distance_km: String,
+    /// Whether this price may be traded: within the operator's configured band
+    /// **and** at or above the price below which the on-chain network-charge cap
+    /// makes settlement impossible. A sell at a non-compliant price is refused at
+    /// submit.
     pub is_grid_compliant: bool,
 }
 

@@ -39,6 +39,56 @@ use tracing::{info, warn};
 use trading_core::traits::{BlockchainGateway, TraitResult};
 use uuid::Uuid;
 
+/// Expose the existing inherent `read_charge_rates` through the narrow core trait,
+/// so the refresher worker can poll the tariff without depending on this concrete
+/// type (and can be tested against a fake).
+#[async_trait]
+impl trading_core::traits::ChargeRatesSource for BlockchainService {
+    async fn read_charge_rates(&self) -> TraitResult<trading_core::charges::StaticChargeRates> {
+        BlockchainService::read_charge_rates(self)
+            .await
+            .map_err(|e| trading_core::error::ApiError::Blockchain(e.to_string()))
+    }
+}
+
+/// Resolve the three collector token accounts and read their currency balances.
+///
+/// All of this is infra detail — the collector wallets come from env, the ATA
+/// derivation needs the currency mint and token program — so it is kept behind the
+/// narrow core trait rather than leaking into the reconciler.
+#[async_trait]
+impl trading_core::traits::CollectorBalanceSource for BlockchainService {
+    async fn collector_balances(&self) -> TraitResult<trading_core::charges::ChargeTotals> {
+        let atas = self.collector_atas()?;
+        let mut out = [rust_decimal::Decimal::ZERO; 3];
+        for (i, ata) in atas.iter().enumerate() {
+            // Propagate, never default to zero. An unreachable validator and an
+            // empty collector are indistinguishable once both read as 0, and the
+            // consequences differ completely: a zero BASELINE taken during an
+            // outage makes every later charge look like it never arrived, and a
+            // zero reading afterwards reports the entire ledger as missing. The
+            // caller skips the cross-check on an error, which is the honest
+            // outcome — a detector that invents readings is worse than one that
+            // admits it cannot see. (Observed: the validator died mid-session and
+            // this returned 0/0/0 for accounts holding ~2M.)
+            out[i] = self.currency_balance(ata).await.map_err(|e| {
+                trading_core::error::ApiError::Internal(format!(
+                    "collector balance read failed for {ata}: {e}"
+                ))
+            })?;
+        }
+        Ok(trading_core::charges::ChargeTotals {
+            fee: out[0],
+            wheeling: out[1],
+            loss: out[2],
+        })
+    }
+
+    async fn collector_addresses(&self) -> TraitResult<[String; 3]> {
+        Ok(self.collector_atas()?.map(|p| p.to_string()))
+    }
+}
+
 #[async_trait]
 impl BlockchainGateway for BlockchainService {
     async fn get_zone_config(&self, zone_id: i32) -> TraitResult<trading_core::models::ZoneConfig> {

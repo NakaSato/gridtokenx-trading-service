@@ -201,6 +201,20 @@ impl TradingService for TradingGrpcService {
             return Err(ConnectError::new(ErrorCode::PermissionDenied, e.message()));
         }
 
+        // ── Sell-side price floor ────────────────────────────────────────────
+        // Same shared policy as the REST edge (400 there): an ask below the
+        // settleable floor can only ever be rejected `ChargesExceedCap` on-chain,
+        // so refuse it rather than match it and strand the settlement.
+        if let Err(e) = trading_core::order_policy::check_sell_price_floor(
+            side,
+            price,
+            self.state.config.market.min_price_per_kwh,
+            trading_core::charges::min_settleable_price_per_kwh(self.state.charge_rates.as_ref()),
+        ) {
+            tracing::warn!("sell order from {user_id} refused on price: {e:?} (price={price})");
+            return Err(ConnectError::new(ErrorCode::InvalidArgument, e.message()));
+        }
+
         // ── Buy-side funding gate ────────────────────────────────────────────
         // Same shared policy as the REST edge (402 there): refuse a bid whose
         // maximum spend knowably exceeds the buyer's currency balance. Fails

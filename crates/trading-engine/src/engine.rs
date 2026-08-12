@@ -22,8 +22,20 @@ fn fill_take(need: Decimal, avail: Decimal) -> Option<Decimal> {
     }
 }
 
-/// Discount applied to intra-zone trades to encourage local balancing.
-pub const INTRA_ZONE_DISCOUNT: Decimal = rust_decimal_macros::dec!(0.05);
+// The intra-zone discount (formerly `INTRA_ZONE_DISCOUNT = 0.05`) was REMOVED
+// when the CDA began settling at the landed cost rather than the bare ask.
+//
+// It multiplied the landed cost by 0.95 for same-zone pairs. While the ask was
+// what settled, that was economically inert — it only made local pairs easier to
+// cross, benefiting nobody. Once the landed cost IS the settled price, a 0.95
+// factor would push the price the buyer pays BELOW the seller's ask, and the
+// chain rejects exactly that (`require!(match_price >= seller.price_per_kwh)`,
+// SlippageExceeded 6024). The discount cannot be funded at settle time: paying
+// the seller less than they asked requires their signed order to say so.
+//
+// Reinstating a local-trade incentive therefore needs a funding source decided
+// first — a rebate from the collectors, or a zone multiplier applied to the
+// charges rather than the whole price — not a bare factor on the clearing price.
 
 /// Trait for the grid topology snapshot.
 /// Allows the matching engine to remain pure and testable.
@@ -123,7 +135,6 @@ impl MatchingEngine {
         topology: &dyn TopologySnapshot,
         fees: ZoneFees,
         dynamic_multiplier: FastPrice,
-        intra_zone_mult: FastPrice,
     ) -> Option<Candidate> {
         if buy.user_id == sell.user_id {
             return None;
@@ -186,11 +197,6 @@ impl MatchingEngine {
                 .checked_mul(dynamic_multiplier)
                 .unwrap_or_else(|| FastPrice::from_raw(i64::MAX));
         }
-        if sell_zone_id == buy.zone_id {
-            landed_cost = landed_cost
-                .checked_mul(intra_zone_mult)
-                .unwrap_or_else(|| FastPrice::from_raw(i64::MAX));
-        }
 
         if landed_cost <= buy.price {
             Some(Candidate {
@@ -229,7 +235,6 @@ impl MatchingEngine {
         need_at_start: Decimal,
         topology: &dyn TopologySnapshot,
         dynamic_multiplier: FastPrice,
-        intra_zone_mult: FastPrice,
         early_stop: bool,
     ) -> bool {
         candidates.clear();
@@ -259,7 +264,6 @@ impl MatchingEngine {
                     topology,
                     fees,
                     dynamic_multiplier,
-                    intra_zone_mult,
                 ) {
                     gathered += sell_orders[sell_idx].remaining_amount();
                     candidates.push(c);
@@ -314,7 +318,6 @@ impl MatchingEngine {
                     topology,
                     cur.fees,
                     dynamic_multiplier,
-                    intra_zone_mult,
                 ) {
                     return Some(c);
                 }
@@ -405,10 +408,6 @@ impl MatchingEngine {
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        // Intra-zone discount multiplier, derived once from the INTRA_ZONE_DISCOUNT
-        // const (1 - discount). Integer/decimal math, no float, no drift.
-        let intra_zone_mult = FastPrice::from(Decimal::ONE - INTRA_ZONE_DISCOUNT);
-
         // 1. Segment active sell orders by Zone and Price-Time priority.
         // BTreeMap (not HashMap) so zone iteration order is deterministic.
         // Map: ZoneId -> BTreeMap<(Price, CreatedAt, Id), Index>
@@ -470,7 +469,6 @@ impl MatchingEngine {
                     need_at_start,
                     topology,
                     dynamic_multiplier,
-                    intra_zone_mult,
                     !full_scan,
                 );
 
@@ -580,8 +578,9 @@ impl MatchingEngine {
                         sell_metadata_index: sell_meta_idx,
                         match_amount,
                         match_price: landed_cost_fp.to_decimal(),
-                        // CDA settles at the seller's ask (see settle_price docs).
-                        settle_price: sell.price.to_decimal(),
+                        // CDA settles at the LANDED cost — what the buyer agreed to
+                        // pay. See `settle_price` docs for why this is not the ask.
+                        settle_price: landed_cost_fp.to_decimal(),
                         seller_price: sell.price.to_decimal(),
                         buyer_price: buy.price.to_decimal(),
                         total_energy_cost: match_amount * landed_cost_fp.to_decimal(),
@@ -1047,11 +1046,12 @@ mod tests {
         assert!(matches.is_empty(), "expired sell must not match");
     }
 
+    /// Same-zone pairs get NO discount: the factor was removed when the CDA began
+    /// settling at the landed cost, because 0.95 would put the settled price below
+    /// the seller's ask and the chain rejects that (SlippageExceeded 6024). With a
+    /// zero-charge topology the landed cost is therefore exactly the ask.
     #[test]
-    fn intra_zone_discount_applied() {
-        // Same zone → 5% discount. NoFee landed = sell price 1.0 → discounted 0.95.
-        // Bid 1.10 is above raw price so the range query admits the sell, and the
-        // recorded clearing price is the discounted 0.95.
+    fn intra_zone_pairs_are_not_discounted() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         let mut buys = vec![order(
@@ -1084,20 +1084,29 @@ mod tests {
         assert_eq!(matches.len(), 1, "same-zone trade should clear");
         assert_eq!(
             matches[0].match_price,
-            dec!(0.95),
-            "intra-zone price = 1.0 * (1 - 0.05)"
+            dec!(1.0),
+            "no discount: landed == ask when the topology charges nothing"
+        );
+        assert_eq!(
+            matches[0].settle_price, matches[0].match_price,
+            "the CDA settles at the landed cost the buyer was tested against"
+        );
+        assert!(
+            matches[0].settle_price >= matches[0].seller_price,
+            "settled price must never fall below the ask (on-chain guard 6024)"
         );
     }
 
-    /// Settlement invariant (option-a, Case 1): the intra-zone discount must NOT
-    /// rescue a local sell whose ask exceeds the bid. Here sell=1.0 > bid=0.96 in the
-    /// same zone; the discounted landed would be 0.95 ≤ 0.96, but rescuing it would
-    /// clear below the seller's ask with the buyer's escrow (posted at 0.96) unable to
-    /// pay the 1.0 ask — unsettleable without an on-chain platform top-up. So it must
-    /// NOT match. The discount only reduces the buyer's payment within an ask≤bid
-    /// crossing match (see intra_zone_discount_applied).
+    /// A sell whose ask exceeds the bid must NOT match, in any zone. Here sell=1.0
+    /// > bid=0.96 in the same zone: the removed 5% discount would once have pulled
+    /// the landed cost to 0.95 ≤ 0.96 and rescued it, clearing below the seller's
+    /// ask against an escrow posted at 0.96 that cannot pay the 1.0 ask.
+    ///
+    /// Retained after the discount's removal because `sell.price > buy.price` is
+    /// now the ONLY thing rejecting this pair — the guard is load-bearing on its
+    /// own, and this pins that it stays.
     #[test]
-    fn intra_zone_discount_does_not_rescue_above_bid_sell() {
+    fn above_bid_sell_never_matches_in_any_zone() {
         let buyer = Uuid::new_v4();
         let seller = Uuid::new_v4();
         let mut buys = vec![order(

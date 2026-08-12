@@ -67,12 +67,24 @@ pub struct MatchResult {
     /// The price the trade actually settles/records at — what `persist_matches`
     /// writes to the settlement, `order_matches` ledger, and `OrderMatched` event.
     /// The two markets differ, so each engine sets it explicitly:
-    /// - **CDA** (`engine.rs`): the seller's **ask**. The intra-zone discount pulls
-    ///   `match_price` (landed cost) below the ask, but on-chain settlement moves
-    ///   `amount * ask` from escrow to the seller, so the ask is what reconciles.
+    /// - **CDA** (`engine.rs`): the **landed cost** — the ask plus the network
+    ///   charges the chain will levy. This is what the buyer's bid was tested
+    ///   against, so it is what the buyer agreed to pay.
     /// - **Uniform auction** (`uniform_auction.rs`): the **clearing price** `p_star`.
-    ///   It is `>= ask`, so the on-chain `price >= sell_ask` guard still holds and
-    ///   the seller receives the auction outcome, not just the ask.
+    ///
+    /// # Why the CDA no longer settles at the bare ask
+    ///
+    /// It used to, and that made the whole landed-cost calculation economically
+    /// inert: wheeling and loss were priced into the bar the buyer had to clear,
+    /// then charged to the SELLER out of a gross that never included them. The
+    /// buyer was filtered on one number and paid another. Settling at the landed
+    /// cost makes the charges genuine pass-throughs — the buyer funds them, the
+    /// collectors receive them, and the seller keeps approximately `amount * ask`.
+    ///
+    /// Both values satisfy the on-chain `ask <= price <= bid` guard
+    /// (`settle_offchain.rs`): the landed cost is the ask plus non-negative
+    /// charges, so it is `>= ask`, and the matcher only crosses when it is
+    /// `<= bid`.
     pub settle_price: Decimal,
     /// Seller's limit (ask) price. The intra-zone discount can pull `match_price`
     /// (the buyer's landed cost) below this; on-chain settlement executes at

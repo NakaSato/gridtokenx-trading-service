@@ -39,6 +39,15 @@ pub struct Infrastructure {
     /// `TRADING_READMODEL_FEED` is on; `main.rs` spawns it. Boot backfill has
     /// already run by the time this is populated.
     pub readmodel_feed_worker: Option<trading_logic::ReadModelFeedWorker>,
+    /// The on-chain charge rates read at boot. Shared — not re-derived — with the
+    /// matcher's topology and the settlement ledger, so the submit edges gate on
+    /// exactly the tariff the chain will bill.
+    pub charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
+    /// Keeps `charge_rates` in step with the chain. `main.rs` spawns it; without
+    /// it the schedule is frozen at whatever the boot read produced.
+    pub charge_rates_worker: trading_logic::ChargeRatesWorker,
+    /// Chain side of the reconciler's collector cross-check.
+    pub collector_balances: Arc<dyn trading_core::traits::CollectorBalanceSource>,
 }
 
 /// Container for all domain services
@@ -207,31 +216,50 @@ impl ServiceBuilder {
         // values — `config.transaction_fee_bps` disagrees with the deployed market
         // (50 vs 25 bps) and would book double the real fee.
         //
-        // On failure book ZERO rather than a guess: zero is visibly wrong and comes
-        // with this error, whereas an invented rate would be quietly wrong — which
-        // is the failure mode this replaces.
-        let charge_rates: Arc<dyn trading_core::charges::ChargeRates> =
-            match blockchain_svc.read_charge_rates().await {
-                Ok(r) => {
-                    tracing::info!(
-                        fee_bps = r.fee_bps,
-                        wheeling_rate_per_kwh = r.wheeling_rate_per_kwh,
-                        loss_bps = r.loss_bps,
-                        "settlement charge rates loaded from chain"
-                    );
-                    Arc::new(r)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "could not read on-chain charge rates; settlements will record ZERO \
-                         fee/wheeling/loss until restart — the ledger will understate charges"
-                    );
-                    Arc::new(trading_core::charges::StaticChargeRates::ZERO)
-                }
-            };
+        // On failure start from ZERO rather than a guess: zero is visibly wrong and
+        // comes with this error, whereas an invented rate would be quietly wrong —
+        // which is the failure mode this replaces. Unlike before, ZERO is no longer
+        // terminal: `ChargeRatesWorker` re-reads on a cadence, so a failed boot read
+        // heals on the first successful poll instead of persisting until restart.
+        let boot_rates = match blockchain_svc.read_charge_rates().await {
+            Ok(r) => {
+                tracing::info!(
+                    fee_bps = r.fee_bps,
+                    wheeling_rate_per_kwh = r.wheeling_rate_per_kwh,
+                    loss_bps = r.loss_bps,
+                    "settlement charge rates loaded from chain"
+                );
+                r
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "could not read on-chain charge rates; the ledger will record ZERO \
+                     fee/wheeling/loss and the sell-price floor is disabled until the \
+                     ChargeRatesWorker completes a successful poll"
+                );
+                trading_core::charges::StaticChargeRates::ZERO
+            }
+        };
 
-        let blockchain: Arc<dyn BlockchainGateway> = Arc::new(blockchain_svc);
+        // ONE cell, shared by every consumer — the matcher's landed cost, the
+        // settlement ledger, the submit edges' sell-price floor and the quote
+        // endpoint. Handing out copies here is what would let them drift apart
+        // again, which is the whole failure this schedule keeps being fixed for.
+        let live_rates = Arc::new(trading_core::charges::RefreshingChargeRates::new(
+            boot_rates,
+        ));
+        let charge_rates: Arc<dyn trading_core::charges::ChargeRates> = live_rates.clone();
+
+        let blockchain_svc = Arc::new(blockchain_svc);
+        let charge_rates_worker = trading_logic::ChargeRatesWorker::new(
+            blockchain_svc.clone(),
+            live_rates,
+            config.charge_rates_refresh_secs,
+        );
+        let collector_balances: Arc<dyn trading_core::traits::CollectorBalanceSource> =
+            blockchain_svc.clone();
+        let blockchain: Arc<dyn BlockchainGateway> = blockchain_svc;
 
         let cache: Arc<dyn CacheStore> = Arc::new(CacheService::new(redis_url).await?);
 
@@ -309,6 +337,9 @@ impl ServiceBuilder {
             events: events.clone(),
             event_bus: event_bus.clone(),
             readmodel_feed_worker,
+            charge_rates: charge_rates.clone(),
+            charge_rates_worker,
+            collector_balances,
         };
 
         // 2. Services
@@ -322,7 +353,7 @@ impl ServiceBuilder {
         let matcher_service = Arc::new(MatcherService::new(
             order_repo.clone(),
             settlement_repo.clone(),
-            Arc::new(GridAwareTopology::new()),
+            Arc::new(GridAwareTopology::new(charge_rates.clone())),
             charge_rates.clone(),
         ));
 
@@ -331,7 +362,7 @@ impl ServiceBuilder {
         let clearing_service = Arc::new(ClearingService::new(
             order_repo.clone(),
             settlement_repo.clone(),
-            Arc::new(GridAwareTopology::new()),
+            Arc::new(GridAwareTopology::new(charge_rates.clone())),
             charge_rates.clone(),
         ));
 

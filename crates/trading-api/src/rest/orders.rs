@@ -243,6 +243,27 @@ pub async fn submit_order(
         return Err((axum::http::StatusCode::FORBIDDEN, gate_refusal(e.message())));
     }
 
+    // ── Sell-side price floor ────────────────────────────────────────────────
+    // A CDA trade settles at the ask, and below ~0.50 THB/kWh the flat wheeling
+    // charge breaches the on-chain network-charge cap, so every match on such an
+    // ask is rejected `ChargesExceedCap` — permanently, since no retry can change
+    // the price. Refuse it here instead of matching it and stranding the
+    // settlement. 400, not 403: the price is the problem, not the caller.
+    if let Err(e) = trading_core::order_policy::check_sell_price_floor(
+        side,
+        price,
+        state.config.market.min_price_per_kwh,
+        trading_core::charges::min_settleable_price_per_kwh(state.charge_rates.as_ref()),
+    ) {
+        tracing::warn!(
+            "sell order from {} refused on price: {:?} (price={})",
+            user.user_id,
+            e,
+            price
+        );
+        return Err((axum::http::StatusCode::BAD_REQUEST, e.message()));
+    }
+
     // ── Buy-side funding gate ────────────────────────────────────────────────
     // A bid is a promise to pay at settlement; refuse it up front when the
     // buyer's currency balance knowably cannot cover the order's maximum spend
@@ -1014,29 +1035,50 @@ pub async fn create_quote(
         price = mp.vwap;
     }
 
-    let same_zone = req.buyer_zone_id == req.seller_zone_id;
-    let wheeling_rate = if same_zone {
-        m.intra_zone_wheeling_charge
-    } else {
-        m.cross_zone_wheeling_charge
-    };
-    let loss_mult = if same_zone {
-        m.intra_zone_loss_factor
-    } else {
-        m.cross_zone_loss_factor
-    };
-    let loss_fraction = loss_mult - Decimal::ONE;
+    // Charges come from the on-chain tariff the settlement is actually billed at,
+    // not from `MarketConfig`'s legacy schedule. That schedule was zone-split
+    // (0 intra / 0.02 cross, loss 1.01 / 1.03) while the chain charges one FLAT
+    // per-kWh wheeling rate in every zone plus `loss_bps` of trade value — so this
+    // quote used to tell an intra-zone buyer wheeling was free when settlement
+    // deducted 0.10/kWh, and overstated loss by ~20x. Zone no longer selects a
+    // rate here because the chain's tariff has no zone dimension.
+    let loss_fraction =
+        trading_core::charges::loss_factor(state.charge_rates.as_ref()) - Decimal::ONE;
 
+    // WHO PAYS WHAT. This decomposes the LANDED price — `ask + wheeling + loss` —
+    // which is both the bar the buyer's bid is tested against and, since the CDA
+    // settles at it, what the buyer actually pays. The charges are pass-throughs:
+    // the buyer funds them, the collector accounts receive them, and the seller
+    // keeps roughly `energy × price` less the platform fee.
+    //
+    // `total_cost` therefore adds the charges back on. It briefly did NOT, during
+    // the window when the matcher priced the landed cost but settlement struck the
+    // gross at the bare ask — in that state the buyer really did pay only
+    // `energy_cost` while the seller silently absorbed the charges.
     let energy_cost = energy * price;
-    let wheeling_charge = energy * wheeling_rate;
+    let wheeling_charge =
+        energy * trading_core::charges::wheeling_per_kwh(state.charge_rates.as_ref());
     let loss_cost = energy_cost * loss_fraction;
     let total_cost = energy_cost + wheeling_charge + loss_cost;
-    let effective_energy = energy * (Decimal::ONE - loss_fraction);
+
+    // Energy delivered is the full matched amount: the loss term is billed in
+    // MONEY (a share of trade value) and no energy is withheld on-chain, so an
+    // "effective" figure discounted by the loss factor was never what the buyer
+    // received.
+    let effective_energy = energy;
 
     let zone_gap = (req.buyer_zone_id - req.seller_zone_id).abs();
     let zone_distance_km = Decimal::from(zone_gap) * Decimal::from(10);
 
-    let is_grid_compliant = price >= m.min_price_per_kwh && price <= m.max_price_per_kwh;
+    // Compliance now includes settleability, not just the operator's band: below
+    // the floor the flat wheeling charge breaches the on-chain network-charge cap
+    // and every match is rejected, so quoting such a price as compliant would be
+    // the same lie the submit edge now refuses.
+    let settleable_floor =
+        trading_core::charges::min_settleable_price_per_kwh(state.charge_rates.as_ref());
+    let is_grid_compliant = settleable_floor.is_some_and(|floor| price >= floor)
+        && price >= m.min_price_per_kwh
+        && price <= m.max_price_per_kwh;
 
     let qid = format!("q_{}", &Uuid::new_v4().to_string()[..8]);
     Ok(Json(QuoteResponse {

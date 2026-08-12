@@ -155,6 +155,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         supply_sync_worker.run().await;
     });
 
+    // Keep the fee/wheeling/loss schedule in step with the chain. Without this the
+    // boot read is frozen for the process lifetime, and it now gates four things:
+    // the matcher's landed cost, the settlement ledger, the sell-price floor at the
+    // submit edges, and the customer quote.
+    let charge_rates_worker = infra.charge_rates_worker;
+    tokio::spawn(async move {
+        charge_rates_worker.run().await;
+    });
+
+    // Audit the settlement ledger against that schedule. Nothing else checks the
+    // claim `charges.rs` makes — that a row's `net` is what the seller was actually
+    // credited — and every violation of it so far was found by a person looking.
+    let reconciliation_worker = trading_logic::ReconciliationWorker::new(
+        infra.settlement_repo.clone(),
+        infra.charge_rates.clone(),
+        Some(infra.collector_balances.clone()),
+        config.charge_rates_refresh_secs,
+    );
+    tokio::spawn(async move {
+        reconciliation_worker.run().await;
+    });
+
     // Recurring-order evaluator: place due recurring orders (Phase 6).
     let recurring_worker = trading_logic::RecurringEvaluatorWorker::new(
         services.recurring_evaluator.clone(),
@@ -210,6 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         config: config.clone(),
+        charge_rates: infra.charge_rates,
         order_repo: infra.order_repo,
         meter_repo: infra.meter_repo,
         settlement_repo: infra.settlement_repo,

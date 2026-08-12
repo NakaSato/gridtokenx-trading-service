@@ -108,15 +108,21 @@ pub(crate) async fn persist_matches(
         let settlement_id = Uuid::new_v4();
 
         // The price the trade settles/records at, chosen by the producing engine
-        // (`MatchResult::settle_price`): the seller's ask for CDA, the uniform
+        // (`MatchResult::settle_price`): the LANDED cost for CDA, the uniform
         // clearing price `p_star` for the interval auction. Both are
         // `>= sell_order.price_per_kwh`, so the on-chain
         // `execute_atomic_settlement` guard (`price >= ask`, Custom 6024
-        // SlippageExceeded otherwise) holds. The CDA intra-zone discount lowers the
-        // buyer's landed `match_price` below the ask to help a trade cross, but it
-        // is a crossing incentive only — never what settles.
+        // SlippageExceeded otherwise) holds.
+        //
+        // The gross is taken at that price, not at the bare ask, and that is what
+        // makes the network charges genuine pass-throughs: the buyer funds
+        // `amount * (ask + wheeling + loss)`, `compute_charges` splits the charges
+        // out to the collectors, and the seller is left with approximately
+        // `amount * ask`. While the gross was struck at the ask, the same charges
+        // were deducted from a total that never included them — so the buyer was
+        // filtered on the landed cost and the seller silently paid it.
         let settle_price = m.settle_price;
-        let total_at_ask = m.match_amount * settle_price;
+        let total_at_settle_price = m.match_amount * settle_price;
 
         // What the chain will actually deduct from the buyer's escrow before the
         // seller is paid. Previously this row recorded the matching engine's own
@@ -129,7 +135,8 @@ pub(crate) async fn persist_matches(
         // `m.wheeling_charge` / `m.loss_cost` remain correct for their own purpose
         // (pricing the buyer's landed cost during matching) — they simply are not
         // what gets charged, so only the tariff-derived values are persisted here.
-        let charges = trading_core::charges::compute_charges(total_at_ask, m.match_amount, rates);
+        let charges =
+            trading_core::charges::compute_charges(total_at_settle_price, m.match_amount, rates);
 
         let settlement = trading_core::models::Settlement {
             id: settlement_id,
@@ -141,7 +148,7 @@ pub(crate) async fn persist_matches(
             sell_order_id: m.sell_order_id,
             energy_amount: m.match_amount,
             price: settle_price,
-            total_amount: total_at_ask,
+            total_amount: total_at_settle_price,
             fee_amount: charges.fee,
             net_amount: charges.net,
             status: trading_core::models::SettlementStatus::Pending,

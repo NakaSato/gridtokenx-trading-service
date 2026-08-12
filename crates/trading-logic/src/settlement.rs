@@ -93,7 +93,12 @@ impl SettlementService {
     /// - claimed settlements the chain did **not** mint (missing from
     ///   `tx_results`, or the whole call failed) were never minted, so they are
     ///   released back to `pending` for retry (or `permanently_failed` once the
-    ///   retry budget is exhausted) — never silently dropped.
+    ///   retry budget is exhausted) — never silently dropped;
+    /// - except when the chain's refusal was a **program rejection**
+    ///   (`is_deterministic_chain_rejection`), which no retry can change: the
+    ///   batch is re-settled one entry at a time and only the entry that is
+    ///   rejected alone is parked `permanently_failed`, so a single doomed
+    ///   settlement cannot take its batch-mates down with it.
     ///
     /// A post-mint DB update failure deliberately does **not** reset the row to
     /// `pending`: the tokens already exist on-chain and a retry would double
@@ -118,6 +123,10 @@ impl SettlementService {
         // Deliberately NOT retryable: unlike a transient RPC failure, time only makes
         // this worse, so it goes straight to the terminal state for reconciliation
         // rather than through `reset_settlements_for_retry`.
+        let claimed = self.park_unplaceable_settlements(claimed).await;
+        if claimed.is_empty() {
+            return Ok(Vec::new());
+        }
         let claimed = self.park_lapsed_settlements(claimed).await;
         if claimed.is_empty() {
             return Ok(Vec::new());
@@ -132,6 +141,81 @@ impl SettlementService {
         {
             Ok(results) => results,
             Err(e) => {
+                // A PROGRAM rejection is final — the batch executed and the program
+                // refused it, so resubmitting it unchanged is guaranteed to fail the
+                // same way. Placement already refuses these up front
+                // (`is_deterministic_chain_rejection`); settlement did not, so a
+                // doomed settlement burned all five retries and then blamed "not
+                // included in on-chain batch result" — the symptom, not the cause.
+                //
+                // But the settle batch is ATOMIC: the verdict indicts the CHUNK, not
+                // any one settlement in it. Parking the whole batch on a program
+                // error would let a single broken trade permanently kill every valid
+                // settlement that happened to share its slot — the same "one bad
+                // entry drags its neighbours down" failure the mint outbox has, only
+                // now terminal instead of retried. (Today those neighbours are killed
+                // too, just five rounds later.)
+                //
+                // So isolate before convicting: re-settle each entry alone, which
+                // either lands it or convicts it on its own evidence. Only a
+                // SINGLETON batch — where the rejection can only be about that one
+                // settlement — is parked here. Nothing was minted (see below), so
+                // re-attempting is safe; recursion depth is 1, since the singleton
+                // branch parks instead of splitting further.
+                let reason = e.to_string();
+                if trading_core::error::is_deterministic_chain_rejection(&reason) {
+                    if let [single] = claimed.as_slice() {
+                        error!(
+                            "Settlement {} rejected by the program ({}); parking permanently \
+                             instead of retrying a verdict that cannot change",
+                            single.id, reason
+                        );
+                        let _ = self
+                            .repo
+                            .update_settlement_status(
+                                single.id,
+                                &SettlementStatus::PermanentlyFailed.to_string(),
+                                None,
+                                Some(&format!(
+                                    "deterministic on-chain rejection, not retried: {reason}"
+                                )),
+                            )
+                            .await;
+                        let _ = self
+                            .audit
+                            .log_action(
+                                single.buyer_id,
+                                "settlement_failed",
+                                &format!(
+                                    "Settlement {} permanently failed: program rejected it ({})",
+                                    single.id, reason
+                                ),
+                            )
+                            .await;
+                        return Err(e);
+                    }
+
+                    warn!(
+                        "batch of {} rejected by the program ({}); re-settling each entry alone \
+                         so only the offending one is parked",
+                        claimed.len(),
+                        reason
+                    );
+                    let mut isolated = Vec::new();
+                    for settlement in claimed {
+                        // Box::pin: this is `settle_claimed` calling itself.
+                        // A failure here is already recorded by the singleton
+                        // branch (parked) or the transient branch (released), so
+                        // it must not abort the remaining entries.
+                        if let Ok(mut results) =
+                            Box::pin(self.settle_claimed(vec![settlement])).await
+                        {
+                            isolated.append(&mut results);
+                        }
+                    }
+                    return Ok(isolated);
+                }
+
                 // Nothing was minted, so the whole claimed batch is safe to
                 // retry. Release it from `processing` rather than burning it to a
                 // terminal state on a transient failure.
@@ -260,6 +344,87 @@ impl SettlementService {
     /// errors, this degrades to the previous behaviour (attempt everything) and logs,
     /// because a doomed attempt is recoverable while refusing to settle live trades is
     /// a self-inflicted outage.
+    /// Park every claimed settlement whose order was never placed on chain, with the
+    /// cause instead of the symptom.
+    ///
+    /// The gateway needs an `order_pda` for both legs to build the settle instruction
+    /// and silently drops any settlement missing one. The caller then observes only an
+    /// absence from `tx_results` and writes *"not included in on-chain batch result"* —
+    /// which names what it saw, not what happened. Five retries later the row is parked
+    /// still blaming the batch.
+    ///
+    /// Nothing retries placement (no worker looks for `order_pda IS NULL`), so this can
+    /// never succeed later. Fail it here, once, naming the leg that was never placed.
+    ///
+    /// Runs BEFORE the expiry pre-flight deliberately: an unplaced order is the root
+    /// cause, whereas expiry is usually what goes wrong last, while a settlement is
+    /// already failing for some other reason and being retried.
+    async fn park_unplaceable_settlements(&self, claimed: Vec<Settlement>) -> Vec<Settlement> {
+        let ids: Vec<Uuid> = claimed.iter().map(|s| s.id).collect();
+        let unplaced: Vec<Uuid> = match self.repo.settlements_missing_order_pda(&ids).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Same stance as the expiry pre-flight: this is an optimisation, never
+                // a gate. Refusing to settle live trades over a broken helper query
+                // would be a self-inflicted outage.
+                warn!(
+                    "Could not check on-chain order placement ({}); attempting all {} claimed settlement(s)",
+                    e,
+                    claimed.len()
+                );
+                return claimed;
+            }
+        };
+        if unplaced.is_empty() {
+            return claimed;
+        }
+
+        let unplaced_set: std::collections::HashSet<Uuid> = unplaced.iter().copied().collect();
+        warn!(
+            "{} claimed settlement(s) reference an order that was never placed on-chain and can \
+             never settle; parking as {} without an on-chain attempt",
+            unplaced.len(),
+            SettlementStatus::PermanentlyFailed
+        );
+
+        for settlement in claimed.iter().filter(|s| unplaced_set.contains(&s.id)) {
+            let reason = format!(
+                "order never placed on-chain (buy {} / sell {} — one has no order_pda); \
+                 placement is not retried by any worker, so this settlement can never succeed",
+                settlement.buy_order_id, settlement.sell_order_id
+            );
+            if let Err(e) = self
+                .repo
+                .update_settlement_status(
+                    settlement.id,
+                    &SettlementStatus::PermanentlyFailed.to_string(),
+                    None,
+                    Some(&reason),
+                )
+                .await
+            {
+                error!(
+                    "Settlement {} references an unplaced order but could not be parked: {}",
+                    settlement.id, e
+                );
+                continue;
+            }
+            let _ = self
+                .audit
+                .log_action(
+                    settlement.buyer_id,
+                    "settlement_failed",
+                    &format!("Settlement {} not attempted: {}", settlement.id, reason),
+                )
+                .await;
+        }
+
+        claimed
+            .into_iter()
+            .filter(|s| !unplaced_set.contains(&s.id))
+            .collect()
+    }
+
     async fn park_lapsed_settlements(&self, claimed: Vec<Settlement>) -> Vec<Settlement> {
         let ids: Vec<Uuid> = claimed.iter().map(|s| s.id).collect();
         let lapsed: Vec<Uuid> = match self.repo.settlements_with_lapsed_orders(&ids).await {
@@ -425,6 +590,8 @@ mod tests {
         claim_calls: AtomicUsize,
         /// What the expiry pre-flight should report as lapsed.
         lapsed: Mutex<Vec<Uuid>>,
+        /// What the placement pre-flight should report as never placed on-chain.
+        unplaced: Mutex<Vec<Uuid>>,
         /// Make the expiry pre-flight query fail, to prove settlement degrades to
         /// attempting everything rather than stalling.
         lapsed_query_fails: bool,
@@ -441,6 +608,13 @@ mod tests {
             Self {
                 claim_returns: Mutex::new(returns),
                 lapsed: Mutex::new(lapsed),
+                ..Default::default()
+            }
+        }
+        fn with_claim_and_unplaced(returns: Vec<Settlement>, unplaced: Vec<Uuid>) -> Self {
+            Self {
+                claim_returns: Mutex::new(returns),
+                unplaced: Mutex::new(unplaced),
                 ..Default::default()
             }
         }
@@ -465,6 +639,15 @@ mod tests {
                 .lock()
                 .expect("fixture mutex poisoned")
                 .clone())
+        }
+
+        async fn settlements_missing_order_pda(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+            let unplaced = self.unplaced.lock().expect("fixture mutex poisoned");
+            Ok(ids
+                .iter()
+                .copied()
+                .filter(|id| unplaced.contains(id))
+                .collect())
         }
 
         async fn settlements_with_lapsed_orders(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
@@ -616,6 +799,12 @@ mod tests {
         /// Settlement ids actually handed to the chain — the expiry pre-flight is only
         /// worth anything if a doomed settlement never appears here.
         sent: Mutex<Vec<Uuid>>,
+        /// A settlement the program refuses forever. Any batch containing it is
+        /// rejected with `msg`; every other batch mints normally. Models the real
+        /// shape of a deterministic rejection — one bad trade in an atomic chunk —
+        /// which the single-shot `batch` field cannot, since it is consumed on the
+        /// first call and would let the isolating re-attempts succeed by accident.
+        poison: Option<(Uuid, String)>,
     }
 
     impl FakeChain {
@@ -624,6 +813,7 @@ mod tests {
                 batch: Mutex::new(Some(BatchResult::Ok(results))),
                 batch_calls: AtomicUsize::new(0),
                 sent: Mutex::new(Vec::new()),
+                poison: None,
             }
         }
         fn err(msg: &str) -> Self {
@@ -631,6 +821,16 @@ mod tests {
                 batch: Mutex::new(Some(BatchResult::Err(msg.to_string()))),
                 batch_calls: AtomicUsize::new(0),
                 sent: Mutex::new(Vec::new()),
+                poison: None,
+            }
+        }
+        /// Every batch containing `bad` is refused with `msg`; anything else mints.
+        fn poisoned_by(bad: Uuid, msg: &str) -> Self {
+            Self {
+                batch: Mutex::new(None),
+                batch_calls: AtomicUsize::new(0),
+                sent: Mutex::new(Vec::new()),
+                poison: Some((bad, msg.to_string())),
             }
         }
     }
@@ -646,6 +846,16 @@ mod tests {
                 .lock()
                 .expect("fixture mutex poisoned")
                 .extend(_settlements.iter().map(|s| s.id));
+            if let Some((bad, msg)) = &self.poison {
+                return if _settlements.iter().any(|s| s.id == *bad) {
+                    Err(ApiError::Blockchain(msg.clone()))
+                } else {
+                    Ok(_settlements
+                        .iter()
+                        .map(|s| tx_for(s.id, "sig-isolated"))
+                        .collect())
+                };
+            }
             match self.batch.lock().expect("fixture mutex poisoned").take() {
                 Some(BatchResult::Ok(r)) => Ok(r),
                 Some(BatchResult::Err(m)) => Err(ApiError::Blockchain(m)),
@@ -790,6 +1000,202 @@ mod tests {
         // The unminted one (and only it) is reset for retry.
         let reset = repo.reset_ids.lock().expect("fixture mutex poisoned");
         assert_eq!(*reset, vec![unminted]);
+    }
+
+    /// The production failure this pre-flight exists for, reproduced.
+    ///
+    /// Two settlements sat `permanently_failed` with `retry_count = 5` and the
+    /// message *"not included in on-chain batch result"* — a symptom. Their real
+    /// cause was that the seller's zone had no `ZoneMarket`, so placement was
+    /// refused and the order never got an `order_pda`. The gateway then dropped
+    /// them from every batch, silently, five times.
+    #[tokio::test]
+    async fn an_unplaced_order_is_parked_with_the_real_cause_not_the_symptom() {
+        let unplaced = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim_and_unplaced(
+            vec![make_settlement(unplaced)],
+            vec![unplaced],
+        ));
+        let chain = Arc::new(FakeChain::ok(vec![]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(unplaced)])
+            .await
+            .expect("nothing to attempt is not an error");
+        assert!(out.is_empty());
+
+        let plain = repo.completed_plain.lock().expect("fixture mutex poisoned");
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].0, unplaced);
+        assert_eq!(plain[0].1, SettlementStatus::PermanentlyFailed.to_string());
+        let msg = plain[0].3.as_deref().unwrap_or_default();
+        assert!(
+            msg.contains("never placed on-chain"),
+            "must name the cause, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not included in on-chain batch result"),
+            "must NOT report the symptom"
+        );
+
+        assert!(
+            repo.reset_ids
+                .lock()
+                .expect("fixture mutex poisoned")
+                .is_empty(),
+            "an unplaceable settlement must not consume a retry"
+        );
+        assert_eq!(
+            chain.batch_calls.load(Ordering::SeqCst),
+            0,
+            "and must never reach the chain"
+        );
+    }
+
+    /// A placeable settlement sharing the batch must be unaffected — the pre-flight
+    /// removes only the doomed one.
+    #[tokio::test]
+    async fn a_placeable_batch_mate_still_settles() {
+        let good = Uuid::new_v4();
+        let unplaced = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim_and_unplaced(
+            vec![make_settlement(good), make_settlement(unplaced)],
+            vec![unplaced],
+        ));
+        let chain = Arc::new(FakeChain::ok(vec![tx_for(good, "SIG_G")]));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let out = svc
+            .execute_batched_settlements(vec![make_settlement(good), make_settlement(unplaced)])
+            .await
+            .expect("the placeable one settles");
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].settlement_id, good);
+        assert_eq!(
+            *chain.sent.lock().expect("fixture mutex poisoned"),
+            vec![good],
+            "only the placeable settlement is handed to the chain"
+        );
+    }
+
+    // ── Deterministic on-chain rejection ─────────────────────────────────────
+
+    /// The program's refusal of a lone settlement can only be about that settlement,
+    /// so it is parked terminally at once. Retrying it five times cannot change a
+    /// verdict the program already reached — that is what made stranded settlements
+    /// blame "not included in on-chain batch result" instead of the real cause.
+    #[tokio::test]
+    async fn a_program_rejection_of_a_lone_settlement_parks_it_at_once() {
+        let doomed = Uuid::new_v4();
+        let repo = Arc::new(FakeRepo::with_claim(vec![make_settlement(doomed)]));
+        let chain = Arc::new(FakeChain::err(
+            "transaction failed on-chain: {\"InstructionError\":[0,{\"Custom\":6025}]}",
+        ));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let _ = svc
+            .execute_batched_settlements(vec![make_settlement(doomed)])
+            .await;
+
+        let plain = repo.completed_plain.lock().expect("fixture mutex poisoned");
+        assert_eq!(plain.len(), 1, "parked exactly once");
+        assert_eq!(plain[0].0, doomed);
+        assert_eq!(plain[0].1, SettlementStatus::PermanentlyFailed.to_string());
+        assert!(
+            plain[0]
+                .3
+                .as_deref()
+                .is_some_and(|m| m.contains("InstructionError")),
+            "the program's verdict must be the recorded cause, not a generic symptom"
+        );
+        assert!(
+            repo.reset_ids
+                .lock()
+                .expect("fixture mutex poisoned")
+                .is_empty(),
+            "a final verdict must not consume a retry"
+        );
+        assert_eq!(chain.batch_calls.load(Ordering::SeqCst), 1, "no re-attempt");
+    }
+
+    /// The regression that makes fast-failing safe: a settle batch is ATOMIC, so a
+    /// program rejection indicts the whole chunk. Parking the batch would let one
+    /// broken trade permanently kill its innocent batch-mates. The batch must be
+    /// re-settled entry by entry so only the guilty one is parked.
+    #[tokio::test]
+    async fn a_rejected_batch_is_isolated_so_only_the_offender_is_parked() {
+        let good_a = Uuid::new_v4();
+        let doomed = Uuid::new_v4();
+        let good_b = Uuid::new_v4();
+        let batch = vec![
+            make_settlement(good_a),
+            make_settlement(doomed),
+            make_settlement(good_b),
+        ];
+        let repo = Arc::new(FakeRepo::with_claim(batch.clone()));
+        let chain = Arc::new(FakeChain::poisoned_by(
+            doomed,
+            "transaction failed on-chain: {\"InstructionError\":[0,{\"Custom\":6025}]}",
+        ));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain, audit);
+
+        let out = svc
+            .execute_batched_settlements(batch)
+            .await
+            .expect("the innocent entries must still settle");
+
+        let settled: Vec<Uuid> = out.iter().map(|t| t.settlement_id).collect();
+        assert!(settled.contains(&good_a) && settled.contains(&good_b));
+        assert!(!settled.contains(&doomed));
+
+        let plain = repo.completed_plain.lock().expect("fixture mutex poisoned");
+        let parked: Vec<Uuid> = plain
+            .iter()
+            .filter(|(_, status, _, _)| *status == SettlementStatus::PermanentlyFailed.to_string())
+            .map(|(id, _, _, _)| *id)
+            .collect();
+        assert_eq!(
+            parked,
+            vec![doomed],
+            "only the settlement the program refused ALONE is terminal"
+        );
+    }
+
+    /// A transport failure never got a verdict, so it must keep the old behaviour:
+    /// released for retry, batch intact. Misclassifying it would turn a validator
+    /// blip into permanently dead customer settlements.
+    #[tokio::test]
+    async fn a_transport_failure_still_releases_the_whole_batch_for_retry() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let batch = vec![make_settlement(a), make_settlement(b)];
+        let repo = Arc::new(FakeRepo::with_claim(batch.clone()));
+        let chain = Arc::new(FakeChain::err("connection refused"));
+        let audit = Arc::new(FakeAudit::default());
+        let svc = service(repo.clone(), chain.clone(), audit);
+
+        let _ = svc.execute_batched_settlements(batch).await;
+
+        let reset = repo.reset_ids.lock().expect("fixture mutex poisoned");
+        assert_eq!(*reset, vec![a, b], "both released, neither parked");
+        assert!(
+            repo.completed_plain
+                .lock()
+                .expect("fixture mutex poisoned")
+                .is_empty(),
+            "no terminal write on a verdict-less failure"
+        );
+        assert_eq!(
+            chain.batch_calls.load(Ordering::SeqCst),
+            1,
+            "no isolating re-attempt for a transient failure"
+        );
     }
 
     /// A settlement whose order has lapsed is parked terminally WITHOUT an on-chain

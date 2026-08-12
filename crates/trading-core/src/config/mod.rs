@@ -37,6 +37,15 @@ pub struct Config {
     /// for the same reason as `matcher`.
     #[serde(default)]
     pub order_expiry: OrderExpiryConfig,
+    /// How often to re-read the on-chain fee/wheeling/loss schedule
+    /// (`CHARGE_RATES_REFRESH_SECS`). These rates are governance-controlled and
+    /// change rarely, but they now gate four behaviours — the matcher's landed
+    /// cost, the settlement ledger, the submit edges' sell-price floor and the
+    /// customer quote — so a change that lands only at the next restart is four
+    /// silent disagreements with the chain. Two account reads per poll, so five
+    /// minutes is cheap; `serde(default)` like the fields above.
+    #[serde(default = "default_charge_rates_refresh_secs")]
+    pub charge_rates_refresh_secs: u64,
     pub encryption_secret: String,
     pub iam_service_url: String,
     pub internal_api_key: String,
@@ -136,10 +145,27 @@ impl Default for SolanaProgramsConfig {
 
 /// P2P energy market pricing parameters.
 ///
-/// Defaults reflect THB/kWh retail energy pricing; cross-zone wheeling/loss
-/// defaults mirror the matcher's `GridAwareTopology` (wheeling 0.02, loss
-/// 1.01 intra / 1.03 cross — `trading-logic/src/energy.rs`). Override any value
-/// via the corresponding `MARKET_*` env var.
+/// Defaults reflect THB/kWh retail energy pricing. Override any value via the
+/// corresponding `MARKET_*` env var.
+///
+/// **The four wheeling/loss fields no longer describe what anything charges.**
+/// They used to mirror `GridAwareTopology`'s hardcoded schedule, but that type
+/// now reads the on-chain `TariffConfig` through `charges::ChargeRates` — the
+/// same rates settlement bills — so these values feed only the
+/// `/api/v1/markets/p2p/market-prices` response. Reporting a zone-split 0/0.02
+/// schedule there is stale: the chain charges one flat per-kWh rate in every
+/// zone. Left in place because the endpoint's response shape is a published
+/// contract; point it at `ChargeRates` when that shape can change.
+///
+/// **`min_price_per_kwh` is not the real floor for a sell.** Its 0.50 default is
+/// itself below the price at which the on-chain network-charge cap can be met at
+/// the deployed tariff (~0.5013 — see `charges::min_settleable_price_per_kwh`), so
+/// an ask satisfying this value could still be matched and then rejected
+/// `ChargesExceedCap` forever. The submit edges gate on `max(this, that floor)`;
+/// this is the operator's policy minimum, never a settleability guarantee.
+/// `max_price_per_kwh` is deliberately NOT enforced at submit — a market buy's
+/// synthetic bid is `MARKET_BUY_CEILING_BID` (1,000,000), which any sane maximum
+/// would reject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketConfig {
     pub base_price_thb_kwh: Decimal,
@@ -305,6 +331,12 @@ fn env_u32(key: &str, default: u32) -> Result<u32> {
     }
 }
 
+/// Five minutes. Long enough that polling costs nothing, short enough that a
+/// governance rate change converges well inside a settlement window.
+fn default_charge_rates_refresh_secs() -> u64 {
+    300
+}
+
 fn env_u64(key: &str, default: u64) -> Result<u64> {
     match env::var(key) {
         Ok(v) => v
@@ -437,6 +469,10 @@ impl Config {
             market: MarketConfig::from_env()?,
             matcher: MatcherConfig::from_env()?,
             order_expiry: OrderExpiryConfig::from_env()?,
+            charge_rates_refresh_secs: env_u64(
+                "CHARGE_RATES_REFRESH_SECS",
+                default_charge_rates_refresh_secs(),
+            )?,
             encryption_secret: env::var("ENCRYPTION_SECRET").unwrap_or_default(),
             iam_service_url: env::var("IAM_GRPC_URL")
                 .or_else(|_| env::var("IAM_SERVICE_URL"))

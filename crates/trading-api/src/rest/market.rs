@@ -97,7 +97,14 @@ pub async fn get_market_config(
     }))
 }
 
-/// P2P pricing + wheeling/loss schedules. NOTE: real JSON floats, not decimal strings.
+/// P2P pricing + the live wheeling/loss schedule. NOTE: real JSON floats, not
+/// decimal strings.
+///
+/// `wheeling_charges` and `loss_factors` report the on-chain `TariffConfig` rates
+/// that settlement is billed at. Both carry identical `intra_zone` / `cross_zone`
+/// values: the chain applies one flat per-kWh wheeling charge and one loss rate in
+/// every zone. The two keys are retained for response-shape compatibility only —
+/// do not read a zone distinction into them.
 #[utoipa::path(
     get,
     path = "/api/v1/markets/p2p/market-prices",
@@ -116,18 +123,28 @@ pub async fn get_p2p_market_prices(
         .map_err(|(_code, msg)| (axum::http::StatusCode::FORBIDDEN, msg.to_string()))?;
 
     let m = &state.config.market;
+
+    // The rates the chain actually bills (`TariffConfig`), not `MarketConfig`'s
+    // legacy schedule — which advertised wheeling as FREE intra-zone while
+    // settlement deducted a flat per-kWh charge in every zone.
+    //
+    // Both zone keys therefore carry the same value: the on-chain tariff has no
+    // zone dimension. The keys stay because the response shape is a published
+    // contract (the Trading UI and `tests/e2e/40_trading` both assert on
+    // `intra_zone`/`cross_zone`); collapsing the maps is a breaking change to make
+    // deliberately, not a side effect of correcting the numbers.
+    let wheeling = dec_f64(trading_core::charges::wheeling_per_kwh(
+        state.charge_rates.as_ref(),
+    ));
+    let loss = dec_f64(trading_core::charges::loss_factor(
+        state.charge_rates.as_ref(),
+    ));
     let mut wheeling_charges = HashMap::new();
-    wheeling_charges.insert(
-        "intra_zone".to_string(),
-        dec_f64(m.intra_zone_wheeling_charge),
-    );
-    wheeling_charges.insert(
-        "cross_zone".to_string(),
-        dec_f64(m.cross_zone_wheeling_charge),
-    );
+    wheeling_charges.insert("intra_zone".to_string(), wheeling);
+    wheeling_charges.insert("cross_zone".to_string(), wheeling);
     let mut loss_factors = HashMap::new();
-    loss_factors.insert("intra_zone".to_string(), dec_f64(m.intra_zone_loss_factor));
-    loss_factors.insert("cross_zone".to_string(), dec_f64(m.cross_zone_loss_factor));
+    loss_factors.insert("intra_zone".to_string(), loss);
+    loss_factors.insert("cross_zone".to_string(), loss);
 
     Ok(Json(P2PMarketPricesResponse {
         base_price_thb_kwh: dec_f64(m.base_price_thb_kwh),

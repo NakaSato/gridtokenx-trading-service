@@ -1092,3 +1092,50 @@ impl BlockchainService {
         ))
     }
 }
+
+impl BlockchainService {
+    /// The fee / wheeling / loss collector token accounts, in that order.
+    ///
+    /// Derived exactly as the settlement path derives them, so the reconciler
+    /// inspects the same accounts the transfers actually target — deriving them a
+    /// second way would let the auditor and the payer disagree, which is the class
+    /// of bug this whole reconciler exists to catch.
+    pub fn collector_atas(&self) -> anyhow::Result<[Pubkey; 3]> {
+        let currency_mint =
+            Self::parse_pubkey(&std::env::var("CURRENCY_TOKEN_MINT").unwrap_or_default())?;
+        let tp = crate::blockchain::currency_token_program();
+        let mut out = [Pubkey::default(); 3];
+        for (i, var) in [
+            "FEE_COLLECTOR_WALLET",
+            "WHEELING_COLLECTOR_WALLET",
+            "LOSS_COLLECTOR_WALLET",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let owner = Self::parse_pubkey(&std::env::var(var).unwrap_or_default())
+                .map_err(|e| anyhow::anyhow!("{var}: {e}"))?;
+            out[i] = self.calculate_ata_address_with_program(&owner, &currency_mint, &tp)?;
+        }
+        Ok(out)
+    }
+
+    /// Balance of a currency token account, in whole currency units.
+    ///
+    /// Reads the raw account and decodes `amount` from the SPL token layout
+    /// (u64 LE at offset 64) rather than going through an owner+mint helper: the
+    /// ATA is derived with the same token program the settlement path uses, and a
+    /// helper that assumed the other program would silently read a DIFFERENT
+    /// account and report a confident wrong balance.
+    pub async fn currency_balance(&self, ata: &Pubkey) -> anyhow::Result<rust_decimal::Decimal> {
+        let data = self.get_account_data(ata).await?;
+        if data.len() < 72 {
+            anyhow::bail!(
+                "account {ata} is not an SPL token account ({} bytes)",
+                data.len()
+            );
+        }
+        let amount = u64::from_le_bytes(data[64..72].try_into()?);
+        Ok(rust_decimal::Decimal::from(amount) / rust_decimal::Decimal::from(1_000_000u64))
+    }
+}

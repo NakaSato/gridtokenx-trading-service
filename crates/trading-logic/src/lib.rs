@@ -22,6 +22,7 @@ pub use recurring_evaluator::RecurringEvaluator;
 pub use settlement::SettlementService;
 pub use trigger_evaluator::TriggerEvaluator;
 pub use workers::{
-    ClearingWorker, MatcherWorker, ReadModelFeedWorker, ReaperWorker, RecurringEvaluatorWorker,
-    SettlementWorker, SupplySyncWorker, TriggerEvaluatorWorker,
+    ChargeRatesWorker, ClearingWorker, MatcherWorker, ReadModelFeedWorker, ReaperWorker,
+    ReconciliationWorker, RecurringEvaluatorWorker, SettlementWorker, SupplySyncWorker,
+    TriggerEvaluatorWorker,
 };

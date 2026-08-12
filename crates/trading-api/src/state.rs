@@ -9,6 +9,11 @@ use trading_logic::{MatcherService, SettlementService};
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<trading_core::config::Config>,
+    /// On-chain fee/wheeling/loss rates, read once at boot (see
+    /// `trading_core::charges`). The submit edges derive the minimum settleable
+    /// ask from these, so a price the chain could only ever reject is refused
+    /// here rather than matched and stranded in settlement.
+    pub charge_rates: Arc<dyn trading_core::charges::ChargeRates>,
     pub order_repo: Arc<dyn OrderRepository>,
     pub meter_repo: Arc<dyn MeterRepository>,
     pub settlement_repo: Arc<dyn SettlementRepository>,

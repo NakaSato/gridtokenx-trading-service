@@ -1001,6 +1001,14 @@ fn setup_test_state_with_mock(oracle_pub_key: String) -> (AppState, Arc<MockSyst
 
     let state = AppState {
         config: config_arc,
+        // The rates deployed on the dev validator, so the sell-price floor these
+        // tests submit against is the real ~0.5013 THB/kWh one rather than a
+        // permissive fixture that would let an unsettleable ask through.
+        charge_rates: Arc::new(trading_core::charges::StaticChargeRates {
+            fee_bps: 25,
+            wheeling_rate_per_kwh: 100_000,
+            loss_bps: 5,
+        }),
         order_repo: mock.clone(),
         meter_repo: mock.clone(),
         settlement_repo: mock.clone(),
@@ -1339,10 +1347,13 @@ async fn test_p2p_market_prices_endpoint() {
     let (status, body) = get_json(app, "/api/v1/markets/p2p/market-prices").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["loss_allocation_model"], "proportional");
-    assert_eq!(body["wheeling_charges"]["intra_zone"], 0.0);
-    assert_eq!(body["wheeling_charges"]["cross_zone"], 0.02);
-    assert_eq!(body["loss_factors"]["intra_zone"], 1.01);
-    assert_eq!(body["loss_factors"]["cross_zone"], 1.03);
+    // The rates the chain bills, not MarketConfig's legacy schedule. Both zone
+    // keys carry the same value because `TariffConfig` has no zone dimension —
+    // the keys survive only because the response shape is a published contract.
+    assert_eq!(body["wheeling_charges"]["intra_zone"], 0.1);
+    assert_eq!(body["wheeling_charges"]["cross_zone"], 0.1);
+    assert_eq!(body["loss_factors"]["intra_zone"], 1.0005);
+    assert_eq!(body["loss_factors"]["cross_zone"], 1.0005);
 }
 
 #[tokio::test]
@@ -2887,16 +2898,16 @@ async fn post_quote_json(
 }
 
 #[tokio::test]
-async fn create_quote_computes_cross_zone_breakdown_from_config() {
+async fn create_quote_prices_charges_from_the_on_chain_tariff() {
     let app = build_router(setup_test_state(test_oracle_key()));
-    // 100 kWh, Zone 1 -> Zone 2 (cross-zone), agreed ฿4.50.
-    // Default MarketConfig: cross wheeling 0.02/kWh, cross loss factor 1.03.
-    //   energy_cost = 100 * 4.50           = 450.00
-    //   wheeling    = 100 * 0.02           =   2.00
-    //   loss_cost   = 450.00 * 0.03        =  13.50
-    //   total       = 450 + 2 + 13.50      = 465.50
-    //   effective   = 100 * (1 - 0.03)     =  97.0000
-    //   distance    = |1 - 2| * 10         =  10.0
+    // 100 kWh, Zone 1 -> Zone 2, agreed ฿4.50, at the deployed tariff
+    // (0.10/kWh wheeling, 5 bps loss) — NOT MarketConfig's legacy 0.02 / 1.03.
+    //   energy_cost = 100 * 4.50            = 450.00
+    //   wheeling    = 100 * 0.10            =  10.00   (was 2.00 under the old schedule)
+    //   loss_cost   = 450.00 * 0.0005       =   0.23   (was 13.50 — overstated ~60x)
+    //   total       = what the BUYER pays   = 460.23   (energy + wheeling + loss)
+    //   effective   = full matched energy   = 100.0000 (loss is billed in money)
+    //   distance    = |1 - 2| * 10          =  10.0
     let (status, body) = post_quote_json(
         app,
         json!({
@@ -2910,20 +2921,29 @@ async fn create_quote_computes_cross_zone_breakdown_from_config() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["breakdown"]["energy_cost"], "450.00");
-    assert_eq!(body["breakdown"]["wheeling_charge"], "2.00");
-    assert_eq!(body["breakdown"]["loss_cost"], "13.50");
-    assert_eq!(body["breakdown"]["total_cost"], "465.50");
-    assert_eq!(body["grid_metrics"]["effective_energy_kwh"], "97.0000");
-    assert_eq!(body["grid_metrics"]["loss_factor"], "0.0300");
+    assert_eq!(body["breakdown"]["wheeling_charge"], "10.00");
+    assert_eq!(body["breakdown"]["loss_cost"], "0.23");
+    assert_eq!(
+        body["breakdown"]["total_cost"], "460.23",
+        "the buyer funds the landed cost: the charges are pass-throughs, not \
+         deductions from the seller"
+    );
+    assert_eq!(body["grid_metrics"]["effective_energy_kwh"], "100.0000");
+    assert_eq!(body["grid_metrics"]["loss_factor"], "0.0005");
     assert_eq!(body["grid_metrics"]["zone_distance_km"], "10.0");
     assert_eq!(body["grid_metrics"]["is_grid_compliant"], true);
 }
 
+/// The headline correction: an intra-zone trade was quoted with wheeling FREE
+/// while settlement deducted the same flat per-kWh charge it does everywhere. The
+/// chain's tariff has no zone dimension, so the quote must not invent one.
 #[tokio::test]
-async fn create_quote_same_zone_has_no_wheeling_and_low_loss() {
+async fn create_quote_charges_wheeling_intra_zone_too() {
     let app = build_router(setup_test_state(test_oracle_key()));
-    // Same zone: intra wheeling 0.00, intra loss factor 1.01 (0.01 fraction).
-    //   energy_cost = 10 * 5.00 = 50.00 ; wheeling = 0 ; loss = 50 * 0.01 = 0.50
+    //   energy_cost = 10 * 5.00       = 50.00
+    //   wheeling    = 10 * 0.10       =  1.00   (was quoted as 0.00)
+    //   loss_cost   = 50.00 * 0.0005  =  0.03
+    //   total       = buyer's outlay  = 51.02  (50.00 + 1.00 + 0.025)
     let (status, body) = post_quote_json(
         app,
         json!({
@@ -2937,10 +2957,60 @@ async fn create_quote_same_zone_has_no_wheeling_and_low_loss() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["breakdown"]["energy_cost"], "50.00");
-    assert_eq!(body["breakdown"]["wheeling_charge"], "0.00");
-    assert_eq!(body["breakdown"]["loss_cost"], "0.50");
-    assert_eq!(body["breakdown"]["total_cost"], "50.50");
+    assert_eq!(
+        body["breakdown"]["wheeling_charge"], "1.00",
+        "intra-zone wheeling is NOT free — the chain bills it in every zone"
+    );
+    assert_eq!(body["breakdown"]["loss_cost"], "0.03");
+    assert_eq!(body["breakdown"]["total_cost"], "51.02");
     assert_eq!(body["grid_metrics"]["zone_distance_km"], "0.0");
+}
+
+/// Cross-zone and intra-zone must quote the SAME wheeling, since the tariff the
+/// quote reads has no zone dimension. Pins the property rather than two constants.
+#[tokio::test]
+async fn create_quote_wheeling_does_not_depend_on_zone() {
+    let ask = |buyer, seller| async move {
+        let app = build_router(setup_test_state(test_oracle_key()));
+        let (status, body) = post_quote_json(
+            app,
+            json!({
+                "buyer_zone_id": buyer,
+                "seller_zone_id": seller,
+                "energy_amount_kwh": "40",
+                "agreed_price": "3.00"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        (
+            body["breakdown"]["wheeling_charge"].clone(),
+            body["breakdown"]["loss_cost"].clone(),
+        )
+    };
+
+    assert_eq!(ask(5, 5).await, ask(5, 9).await);
+}
+
+/// A price under the settleability floor can never settle, so quoting it as
+/// grid-compliant would contradict the submit edge that now refuses it.
+#[tokio::test]
+async fn create_quote_marks_an_unsettleable_price_non_compliant() {
+    let app = build_router(setup_test_state(test_oracle_key()));
+    // 0.50 satisfies MarketConfig's minimum but sits below the ~0.5013 floor.
+    let (status, body) = post_quote_json(
+        app,
+        json!({
+            "buyer_zone_id": 1,
+            "seller_zone_id": 1,
+            "energy_amount_kwh": "10",
+            "agreed_price": "0.50"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["grid_metrics"]["is_grid_compliant"], false);
 }
 
 #[tokio::test]

@@ -213,6 +213,53 @@ pub trait SettlementRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Which of `ids` reference an order that was never placed on chain.
+    ///
+    /// A settlement can only settle if BOTH legs have an `order_pda`: the gateway
+    /// resolves them before building the batch and silently drops any settlement
+    /// missing one (`"has no on-chain PDA; skipping"`). The caller then sees only
+    /// an absence from `tx_results` and records the symptom — *"not included in
+    /// on-chain batch result"* — while the real cause was known one layer down and
+    /// thrown away.
+    ///
+    /// **This is permanent, not transient.** Nothing retries placement: no worker
+    /// looks for `order_pda IS NULL`, so an order that failed to place never gets a
+    /// PDA. Retrying such a settlement is guaranteed waste, and the five attempts
+    /// it burns are what turn a placement fault into a settlement mystery.
+    ///
+    /// Defaulted to empty for the same reason as the lapsed-order pre-flight: a
+    /// fake that does not override it leaves the caller behaving exactly as before.
+    async fn settlements_missing_order_pda(&self, _ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+        Ok(Vec::new())
+    }
+
+    /// Summed fee / wheeling / loss over every `completed` settlement.
+    ///
+    /// The ledger side of the collector cross-check. Deliberately the FULL history,
+    /// not a window: it is compared against a collector balance, which is also
+    /// cumulative, and the reconciler works in deltas from a baseline so the
+    /// absolute values never need to agree.
+    ///
+    /// Defaulted to zero so a fake that does not override it simply disables the
+    /// cross-check rather than reporting a phantom drift.
+    async fn completed_charge_totals(&self) -> TraitResult<crate::charges::ChargeTotals> {
+        Ok(crate::charges::ChargeTotals::default())
+    }
+
+    /// The most recently completed settlements, newest first, for the charge
+    /// reconciler (`charges::reconcile_charges`).
+    ///
+    /// Only `Completed` rows are worth auditing: a pending or failed settlement
+    /// moved no money, so its charge columns describe an intention rather than an
+    /// outcome. Bounded by `limit` because this runs on a timer and must never turn
+    /// into a full-table scan as the ledger grows.
+    ///
+    /// Defaulted to empty for the same reason as the pre-flight above: a fake that
+    /// does not override it makes the reconciler a no-op rather than a failure.
+    async fn recent_completed_settlements(&self, _limit: i64) -> TraitResult<Vec<Settlement>> {
+        Ok(Vec::new())
+    }
+
     /// Insert an order-match ledger row (the `order_matches` table). Records the
     /// crossing of a buy/sell order; `settlement_id` links it to the settlement
     /// created for the same fill, `zone_id` tags it for sharded analytics.
@@ -822,4 +869,41 @@ pub trait MatchTrigger: Send + Sync {
     /// Request a matching cycle. Coalescing, not queueing: several calls before
     /// the matcher wakes collapse into one cycle.
     fn request_cycle(&self);
+}
+
+/// Reads the on-chain fee/wheeling/loss schedule.
+///
+/// Narrower than [`BlockchainGateway`] on purpose: the only consumer is the
+/// worker that keeps `charges::RefreshingChargeRates` current, and a one-method
+/// trait lets that worker be unit-tested against a fake without standing up the
+/// whole gateway. Implemented in the infra layer by the Chain Bridge client,
+/// which reads the `Market` and `TariffConfig` accounts.
+#[async_trait]
+pub trait ChargeRatesSource: Send + Sync {
+    /// The rates currently published on chain.
+    async fn read_charge_rates(&self) -> TraitResult<crate::charges::StaticChargeRates>;
+}
+
+/// Reads the on-chain balances of the fee / wheeling / loss collector accounts.
+///
+/// Narrow, like [`ChargeRatesSource`], and for the same reason: the only consumer
+/// is the reconciler, and everything this needs — the collector wallets, the
+/// currency mint, the ATA derivation — is infra detail the pure audit must not
+/// know about.
+#[async_trait]
+pub trait CollectorBalanceSource: Send + Sync {
+    /// Current balances, in whole currency units.
+    async fn collector_balances(&self) -> TraitResult<crate::charges::ChargeTotals>;
+
+    /// The three collector token-account addresses, in fee/wheeling/loss order.
+    ///
+    /// Exposed so the reconciler can detect COLLISIONS. Two collectors resolving
+    /// to one account means their charges are pooled; a collector colliding with
+    /// the platform escrow means the charge is transferred from that account back
+    /// into itself and is never collected at all. Both have happened here — all
+    /// three defaulted to the dev wallet, whose ATA is `buyer_currency_escrow`,
+    /// so fee, wheeling and loss were silently uncollected while the ledger
+    /// recorded them correctly. No balance comparison can spot that; only
+    /// comparing the addresses can.
+    async fn collector_addresses(&self) -> TraitResult<[String; 3]>;
 }

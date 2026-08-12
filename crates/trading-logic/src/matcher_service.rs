@@ -493,6 +493,93 @@ mod tests {
         }
     }
 
+    /// Wheeling and loss are PASS-THROUGHS: the buyer funds them and the seller
+    /// keeps their ask (less only the platform fee).
+    ///
+    /// This is the property the landed price exists for, and it did not hold until
+    /// the CDA began settling at the landed cost. Before, the gross was struck at
+    /// the bare ask while the same charges were still deducted from it, so on this
+    /// trade the seller netted **5.782** — the 0.20 wheeling came straight out of
+    /// their revenue even though the buyer had been filtered on a price that
+    /// included it. Now the buyer pays the landed 6.203 and the seller keeps
+    /// 5.9844, i.e. their 6.00 ask less the 0.0155 fee.
+    #[tokio::test]
+    async fn wheeling_and_loss_are_passed_through_to_the_buyer() {
+        #[derive(Debug)]
+        struct LiveRates;
+        impl trading_core::charges::ChargeRates for LiveRates {
+            fn fee_bps(&self) -> u16 {
+                25
+            }
+            fn wheeling_rate_per_kwh(&self) -> u64 {
+                100_000
+            }
+            fn loss_bps(&self) -> u16 {
+                5
+            }
+        }
+        /// The same tariff expressed as a topology, so the landed cost the matcher
+        /// builds and the charges the ledger bills come from one schedule.
+        struct TariffTopology;
+        impl TopologySnapshot for TariffTopology {
+            fn can_accommodate_flow(&self, _f: Option<i32>, _t: Option<i32>, _a: Decimal) -> bool {
+                true
+            }
+            fn calculate_wheeling_charge(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+                FastPrice::from(dec!(0.10))
+            }
+            fn calculate_loss_factor(&self, _f: Option<i32>, _t: Option<i32>) -> FastPrice {
+                FastPrice::from(dec!(1.0005))
+            }
+        }
+
+        // 2 kWh, ask 3.00. Landed = 3.00 + 0.10 + 3.00*0.0005 = 3.1015; the bid
+        // clears it, so gross = 2 * 3.1015 = 6.203.
+        let buy = order(OrderSide::Buy, dec!(3.5), dec!(2.0), 10);
+        let sell = order(OrderSide::Sell, dec!(3.0), dec!(2.0), 20);
+
+        let orders = Arc::new(MockOrderRepo {
+            buys: vec![buy],
+            sells: vec![sell],
+            fills: Mutex::new(Vec::new()),
+            ..Default::default()
+        });
+        let settlements = Arc::new(MockSettlementRepo::default());
+        let matcher = MatcherService::new(
+            orders.clone(),
+            settlements.clone(),
+            Arc::new(TariffTopology),
+            Arc::new(LiveRates),
+        );
+        assert_eq!(matcher.run_matching_cycle().await.unwrap(), 1);
+
+        let captured = settlements.settlements.lock().unwrap();
+        let s = &captured[0];
+
+        assert_eq!(s.total_amount, dec!(6.2030), "buyer funds the landed cost");
+        assert_eq!(s.wheeling_charge, Some(dec!(0.200000)), "2 kWh x THB0.10");
+
+        // The headline: the seller keeps their ask less the fee. Under the old
+        // settle-at-ask behaviour this was 5.782 — 0.20 lower, exactly the wheeling.
+        let ask_revenue = dec!(2.0) * dec!(3.0);
+        assert_eq!(
+            s.net_amount,
+            ask_revenue - s.fee_amount - dec!(0.00010150),
+            "seller keeps q*ask less the fee (and a rounding residual: loss is \
+             charged on the whole gross, which includes the wheeling component)"
+        );
+        assert!(
+            s.net_amount > dec!(5.98),
+            "must NOT be the old 5.782 — that meant the seller paid the wheeling"
+        );
+
+        // Every satang still accounted for.
+        assert_eq!(
+            s.net_amount + s.fee_amount + s.wheeling_charge.unwrap() + s.loss_cost.unwrap(),
+            s.total_amount
+        );
+    }
+
     /// The settlement row must record what the CHAIN charges, not the matching
     /// engine's own numbers.
     ///

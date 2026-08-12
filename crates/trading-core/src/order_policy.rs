@@ -330,6 +330,95 @@ pub fn check_sell_eligibility(
     Ok(())
 }
 
+// ── Sell-side price floor ────────────────────────────────────────────────────
+
+/// Why a sell order's ask was refused as too low.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SellPriceFloorError {
+    /// The ask sits below the price at which the on-chain network-charge cap can
+    /// be satisfied. Any match against it would be refused `ChargesExceedCap`
+    /// forever, so the order is turned away instead of resting unsettleable.
+    BelowSettleableFloor { price: Decimal, floor: Decimal },
+    /// The live tariff leaves no headroom for wheeling at *any* price. Nothing
+    /// the caller can do to the order fixes this — it is an operator problem.
+    TariffAdmitsNoPrice,
+    /// The ask clears the settleability floor but sits below the market's own
+    /// configured minimum (`MarketConfig::min_price_per_kwh`).
+    BelowMarketMinimum { price: Decimal, minimum: Decimal },
+}
+
+impl SellPriceFloorError {
+    /// Client-facing message, shared verbatim by the REST and gRPC edges.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::BelowSettleableFloor { price, floor } => format!(
+                "ask {price} is below the minimum settleable price of {floor} per kWh: \
+                 the flat wheeling charge would exceed the network-charge cap and every \
+                 match on this order would be rejected on-chain"
+            ),
+            Self::TariffAdmitsNoPrice => {
+                "the current wheeling/loss tariff leaves no headroom under the network-charge \
+                 cap, so no sell order can settle at any price — contact the operator"
+                    .to_string()
+            }
+            Self::BelowMarketMinimum { price, minimum } => {
+                format!("ask {price} is below the market minimum of {minimum} per kWh")
+            }
+        }
+    }
+}
+
+/// Refuse a sell whose ask can never settle.
+///
+/// # Why only sells, and only here
+///
+/// A CDA trade settles at the **seller's ask** (`MatchResult::settle_price`), so
+/// the ask is the number the on-chain network-charge cap is applied to. A bid is
+/// only a ceiling — it never becomes the settled price — so a low bid simply
+/// fails to cross rather than producing an unsettleable trade, and gating it
+/// would additionally break market buys, whose synthetic bid is
+/// [`MARKET_BUY_CEILING_BID`]. Market *sells* are rejected outright upstream by
+/// [`resolve_order_price`], so every price reaching here on a sell is a real ask.
+///
+/// This is the same shape as the placement gate for deterministic chain
+/// rejections: refuse at submit rather than accept an order, match it, and strand
+/// the settlement through five doomed retries.
+///
+/// `settleable_floor` comes from [`crate::charges::min_settleable_price_per_kwh`]
+/// — `None` means the tariff admits no price at all. Pass `Some(Decimal::ZERO)`
+/// (which the unreadable-rates fallback yields) to impose no floor: an admission
+/// gate must fail open when it cannot know the rates, never refuse every sell.
+///
+/// # Errors
+/// Returns [`SellPriceFloorError`] when the ask is below the settleability floor
+/// or the configured market minimum.
+pub fn check_sell_price_floor(
+    side: OrderSide,
+    price: Decimal,
+    market_minimum: Decimal,
+    settleable_floor: Option<Decimal>,
+) -> Result<(), SellPriceFloorError> {
+    if !matches!(side, OrderSide::Sell) {
+        return Ok(());
+    }
+    // Settleability before policy: an ask under both should be told the reason it
+    // could never work, not the reason the operator would rather it did not.
+    let Some(floor) = settleable_floor else {
+        return Err(SellPriceFloorError::TariffAdmitsNoPrice);
+    };
+    if price < floor {
+        return Err(SellPriceFloorError::BelowSettleableFloor { price, floor });
+    }
+    if price < market_minimum {
+        return Err(SellPriceFloorError::BelowMarketMinimum {
+            price,
+            minimum: market_minimum,
+        });
+    }
+    Ok(())
+}
+
 // ── Buy-side funding gate ────────────────────────────────────────────────────
 
 /// Atomic units per whole currency token. The currency leg is 6-decimal
@@ -471,6 +560,111 @@ pub fn check_buy_funding(
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    // ── Sell-side price floor ────────────────────────────────────────────────
+
+    /// The live floor at the deployed tariff, and the market minimum that sits
+    /// (wrongly) below it.
+    const FLOOR: Decimal = dec!(0.501254);
+    const MARKET_MIN: Decimal = dec!(0.50);
+
+    #[test]
+    fn an_ask_below_the_settleable_floor_is_refused() {
+        let e = check_sell_price_floor(OrderSide::Sell, dec!(0.40), MARKET_MIN, Some(FLOOR))
+            .expect_err("below the floor");
+        assert_eq!(
+            e,
+            SellPriceFloorError::BelowSettleableFloor {
+                price: dec!(0.40),
+                floor: FLOOR
+            }
+        );
+    }
+
+    /// The exact case the gap was reported for: an ask at the market's own
+    /// configured minimum is *still* unsettleable, so the settleability error —
+    /// not the policy one — must be what the caller sees.
+    #[test]
+    fn the_market_minimum_itself_is_refused_as_unsettleable() {
+        let e = check_sell_price_floor(OrderSide::Sell, MARKET_MIN, MARKET_MIN, Some(FLOOR))
+            .expect_err("the market minimum is itself below the floor");
+        assert!(matches!(
+            e,
+            SellPriceFloorError::BelowSettleableFloor { .. }
+        ));
+    }
+
+    #[test]
+    fn an_ask_at_the_floor_is_admitted() {
+        assert_eq!(
+            check_sell_price_floor(OrderSide::Sell, FLOOR, MARKET_MIN, Some(FLOOR)),
+            Ok(())
+        );
+        assert_eq!(
+            check_sell_price_floor(OrderSide::Sell, dec!(4.00), MARKET_MIN, Some(FLOOR)),
+            Ok(())
+        );
+    }
+
+    /// When the operator's minimum is the binding one, say so — it is a different
+    /// problem with a different remedy than an unsettleable price.
+    #[test]
+    fn the_market_minimum_binds_when_it_is_above_the_floor() {
+        let e = check_sell_price_floor(OrderSide::Sell, dec!(0.80), dec!(1.00), Some(FLOOR))
+            .expect_err("below the market minimum");
+        assert_eq!(
+            e,
+            SellPriceFloorError::BelowMarketMinimum {
+                price: dec!(0.80),
+                minimum: dec!(1.00)
+            }
+        );
+    }
+
+    /// Bids are never the settled price — the ask is — so gating them would refuse
+    /// harmless orders and break market buys, whose synthetic bid is deliberately
+    /// enormous.
+    #[test]
+    fn buys_are_never_gated_on_price() {
+        assert_eq!(
+            check_sell_price_floor(OrderSide::Buy, dec!(0.01), MARKET_MIN, Some(FLOOR)),
+            Ok(())
+        );
+        assert_eq!(
+            check_sell_price_floor(
+                OrderSide::Buy,
+                MARKET_BUY_CEILING_BID,
+                MARKET_MIN,
+                Some(FLOOR)
+            ),
+            Ok(())
+        );
+    }
+
+    /// A tariff with no headroom is an operator fault, and the message has to say
+    /// that rather than blame the caller's price.
+    #[test]
+    fn a_tariff_admitting_no_price_is_reported_as_such() {
+        let e = check_sell_price_floor(OrderSide::Sell, dec!(999), MARKET_MIN, None)
+            .expect_err("no price can settle under this tariff");
+        assert_eq!(e, SellPriceFloorError::TariffAdmitsNoPrice);
+    }
+
+    /// Unreadable on-chain rates yield a zero floor, and the gate must then admit
+    /// everything the market minimum allows — an admission gate that cannot read
+    /// the tariff must fail open, not refuse every sell.
+    #[test]
+    fn an_unknown_tariff_imposes_no_settleability_floor() {
+        assert_eq!(
+            check_sell_price_floor(
+                OrderSide::Sell,
+                dec!(0.001),
+                Decimal::ZERO,
+                Some(Decimal::ZERO)
+            ),
+            Ok(())
+        );
+    }
 
     // ── Sell-side meter-verification gate ────────────────────────────────────
 

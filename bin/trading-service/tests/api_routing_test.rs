@@ -78,6 +78,7 @@ async fn test_api_routing_e2e() {
 
     let state = AppState {
         config,
+        charge_rates: infra.charge_rates,
         order_repo: infra.order_repo,
         meter_repo: infra.meter_repo,
         settlement_repo: infra.settlement_repo,

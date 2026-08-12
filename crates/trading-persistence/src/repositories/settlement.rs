@@ -359,6 +359,63 @@ impl SettlementRepository for PostgresSettlementRepository {
         Ok(settlements.into_iter().map(Into::into).collect())
     }
 
+    async fn completed_charge_totals(&self) -> TraitResult<trading_core::charges::ChargeTotals> {
+        // COALESCE because wheeling/loss are nullable and an empty ledger must read
+        // as zero, not NULL — a NULL here would poison the delta arithmetic.
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(fee_amount), 0) AS fee, \
+                    COALESCE(SUM(wheeling_charge), 0) AS wheeling, \
+                    COALESCE(SUM(loss_cost), 0) AS loss \
+             FROM settlements WHERE status = 'completed'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(trading_core::charges::ChargeTotals {
+            fee: row.get::<Decimal, _>("fee"),
+            wheeling: row.get::<Decimal, _>("wheeling"),
+            loss: row.get::<Decimal, _>("loss"),
+        })
+    }
+
+    async fn settlements_missing_order_pda(&self, ids: &[Uuid]) -> TraitResult<Vec<Uuid>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Either leg missing its PDA is enough: the gateway needs both to build the
+        // instruction and drops the settlement if it cannot resolve one. Mirrors the
+        // lapsed-order pre-flight above — same shape, same same-database join
+        // (`settlements` and `trading_orders` are both owned by this service).
+        let rows = sqlx::query(
+            "SELECT s.id \
+             FROM settlements s \
+             JOIN trading_orders bo ON bo.id = s.buy_order_id \
+             JOIN trading_orders so ON so.id = s.sell_order_id \
+             WHERE s.id = ANY($1) \
+               AND (bo.order_pda IS NULL OR so.order_pda IS NULL)",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(|r| r.get::<Uuid, _>("id")).collect())
+    }
+
+    /// Newest-first so the reconciler audits what just settled — a charge fault is
+    /// worth catching while the rows are still few, not after it has run all night.
+    async fn recent_completed_settlements(&self, limit: i64) -> TraitResult<Vec<Settlement>> {
+        let settlements = sqlx::query_as::<_, SettlementDb>(
+            "SELECT * FROM settlements WHERE status = 'completed' \
+             ORDER BY created_at DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(settlements.into_iter().map(Into::into).collect())
+    }
+
     async fn claim_settlements_for_processing(&self, ids: &[Uuid]) -> TraitResult<Vec<Settlement>> {
         if ids.is_empty() {
             return Ok(Vec::new());
